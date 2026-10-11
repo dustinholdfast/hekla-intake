@@ -1,0 +1,13 @@
+--- src/airtable.ts
++++ src/airtable.ts
+@@ -259,9 +259,7 @@
+   const formula = `AND(${gameFormula(selected)},${setClause(card)},{Finish}=${formulaString(card.finish)},OR({Status}='Waitlist',{Status}='Listed'),${collectorClause})`;
+   const { records } = await listRecords(env, formula, READ_FIELDS);
+   return sortQueue(
+-    records
+-      .map(toQueueCard)
+-      .filter((row) => cardMatchesGame(row.game, selected) && (row.status === "Waitlist" || row.status === "Listed")),
++    records.map(toQueueCard).filter((row) => matchesPrinting(row, card)),
+     "Waitlist",
+   );
+ }

@@ -1,0 +1,31 @@
+# Hekla Lorcana intake — private Worker. Secrets are NOT stored here.
+#   wrangler secret put AIRTABLE_API_KEY
+#   wrangler secret put APP_PASSWORD
+# Optional:
+#   wrangler secret put AIRTABLE_PAT          (used if AIRTABLE_API_KEY is unset)
+#   wrangler secret put SESSION_SECRET        (else the session key is derived from APP_PASSWORD)
+#   wrangler secret put HEKLA_WEBHOOK_URL     (notify-only; this app never lists cards)
+# Optional Cloudflare Access (non-secret). When both are set, Access replaces the passphrase:
+#   CF_ACCESS_TEAM_DOMAIN = "team.cloudflareaccess.com"
+#   CF_ACCESS_AUD = "<application audience tag>"
+
+name = "hekla-intake"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+AIRTABLE_BASE_ID = "app4Tjz72sZtVMQyp"
+AIRTABLE_TABLE_ID = "tblvHPu7dgDHA91bc"

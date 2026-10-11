@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1628" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Hekla · TCG intake</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <p id="boot" class="boot">Opening intake…</p>
+
+  <section id="login-view" class="login" hidden>
+    <form id="login-form" class="login-card" autocomplete="current-password">
+      <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
+      <h1>Unlock the waitlist</h1>
+      <p>Private intake for Lorcana, Magic, Riftbound, Pokémon, and Yu-Gi-Oh!. Hekla ranks them. This app never lists on TCGPlayer.</p>
+      <label for="password">Passphrase</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required />
+      <p id="login-error" class="error" role="alert"></p>
+      <button class="primary" type="submit">Unlock intake</button>
+    </form>
+  </section>
+
+  <div id="app-view" class="app" hidden>
+    <div class="game-bar" id="game-bar" role="tablist" aria-label="Game"></div>
+    <aside>
+      <div class="brand-row">
+        <img class="wordmark brand-full" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" /><img class="brand-icon" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+        <button id="logout" class="ghost tiny" type="button">Lock</button>
+      </div>
+      <nav aria-label="Queue">
+        <button type="button" data-go="form">Intake</button>
+        <button type="button" data-status="Waitlist" class="on">Waitlist <em data-count="Waitlist">0</em></button>
+        <button type="button" data-status="Listed">Listed <em data-count="Listed">0</em></button>
+        <button type="button" data-status="Sold">Sold <em data-count="Sold">0</em></button>
+        <button type="button" data-status="Skip">Skip <em data-count="Skip">0</em></button>
+      </nav>
+      <section class="cap" aria-label="Listing cap">
+        <div class="cap-label">L1 cap · <span data-cap-game>Lorcana</span> listed</div>
+        <div class="cap-num"><span data-cap="listed">–</span> <small>/ <span data-cap="max">100</span></small></div>
+        <div class="bar" aria-hidden="true"><i data-cap="bar" data-pct="0"></i></div>
+        <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> waitlist qty. Not live TCGPlayer inventory.</p>
+        <p id="cap-error" class="error"></p>
+      </section>
+      <a class="airtable-link text-link" href="https://airtable.com/app4Tjz72sZtVMQyp/tblvHPu7dgDHA91bc" target="_blank" rel="noopener noreferrer">Open Waitlist in Airtable</a>
+    </aside>
+
+    <main>
+      <header class="top">
+        <div>
+          <h1>Intake</h1>
+          <p>Add cards for Hekla to rank. You greenlight listing separately — nothing here posts to TCGPlayer.</p>
+        </div>
+        <section class="mobile-cap" aria-label="Listing cap">
+          <div class="cap-label">L1 cap · <span data-cap-game>Lorcana</span> listed</div>
+          <div class="cap-num"><span data-cap="listed">–</span> <small>/ <span data-cap="max">100</span></small></div>
+          <div class="bar" aria-hidden="true"><i data-cap="bar" data-pct="0"></i></div>
+          <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> waitlist qty. Not live TCGPlayer inventory.</p>
+        </section>
+      </header>
+
+      <div class="layout">
+        <section class="panel" id="quick-add">
+          <div class="panel-head">
+            <h2>Quick add</h2>
+            <button id="open-bulk" class="ghost" type="button">Bulk paste</button>
+          </div>
+          <p class="lede">Sticky defaults, including the game, stay on this device. Enter adds the card and jumps back to the collector number.</p>
+          <form id="add-form" autocomplete="off">
+            <fieldset class="defaults">
+              <legend>Sticky defaults</legend>
+              <label id="set-number-field">Set #
+                <select id="set" name="setNumber"></select>
+              </label>
+              <label id="set-identifier-field" class="field" for="set-identifier" hidden>Set identifier
+                <input id="set-identifier" name="setIdentifier" autocomplete="off" />
+              </label>
+              <label>Finish
+                <select id="finish" name="finish"></select>
+              </label>
+              <label>Condition
+                <select id="condition" name="condition"></select>
+              </label>
+              <label>Qty
+                <input id="qty" name="qty" type="number" min="1" max="250" step="1" inputmode="numeric" value="1" />
+              </label>
+            </fieldset>
+
+            <label class="field" for="collector">Collector number <span class="req">required</span></label>
+            <input id="collector" name="collectorNumber" inputmode="text" enterkeyhint="go" autocomplete="off" placeholder="42 or 42/204" autofocus />
+
+            <label class="field" for="card-name">Card name <span class="opt">optional — Hekla can resolve it</span></label>
+            <input id="card-name" name="cardName" autocomplete="off" placeholder="Elsa - Snow Queen" />
+
+            <div class="split">
+              <div>
+                <label class="field" for="rarity">Rarity</label>
+                <select id="rarity" name="rarity"></select>
+              </div>
+              <div>
+                <label class="field" for="cost">Cost basis USD</label>
+                <input id="cost" name="costBasisUsd" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" />
+              </div>
+            </div>
+
+            <details>
+              <summary>Priority and notes</summary>
+              <label class="field" for="priority">Priority <span class="opt">lower is sooner</span></label>
+              <input id="priority" name="priority" type="number" step="1" inputmode="numeric" placeholder="blank" />
+              <label class="field" for="notes">Notes</label>
+              <textarea id="notes" name="notes" rows="2" placeholder="Binder A, bent corner…"></textarea>
+            </details>
+
+            <div class="actions">
+              <button id="add-button" class="primary" type="submit">Add to waitlist</button>
+            </div>
+            <p class="hint">Status is always Waitlist. Rank score and market price stay with Hekla.</p>
+            <p id="form-error" class="error" role="alert"></p>
+            <p id="form-flash" class="flash" role="status"></p>
+          </form>
+        </section>
+
+        <section class="panel" id="queue-panel">
+          <div class="panel-head">
+            <h2>Queue</h2>
+            <div class="hekla-actions">
+              <button id="ask-process" class="ghost" type="button">Auto-sort pending</button>
+              <button id="rerank-listed" class="ghost" type="button" hidden>Re-rank listed cards</button>
+              <button id="ask-greenlight" class="ghost" type="button">Greenlight shortlist</button>
+            </div>
+          </div>
+          <div class="queue-tools">
+            <label class="search">
+              <span class="sr">Search this queue</span>
+              <input id="search" type="search" placeholder="Search name, number, set…" />
+            </label>
+            <button id="refresh" class="ghost" type="button">Refresh</button>
+          </div>
+          <p id="queue-meta" class="hint"></p>
+          <p id="queue-error" class="error" role="alert"></p>
+          <p id="queue-flash" class="flash" role="status"></p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Set</th>
+                  <th>#</th>
+                  <th>Name</th>
+                  <th>Finish</th>
+                  <th>Cond</th>
+                  <th>Qty</th>
+                  <th>Status</th>
+                  <th>Rank</th>
+                  <th>Price</th>
+                </tr>
+              </thead>
+              <tbody id="queue-body"></tbody>
+            </table>
+          </div>
+          <p class="footnote">Listed, Sold, and Skip are shown so you can see where a card went. Intake does not move cards there. Market price and rank are Hekla’s, shown only when Airtable already has them. <a class="airtable-link" href="https://airtable.com/app4Tjz72sZtVMQyp/tblvHPu7dgDHA91bc" target="_blank" rel="noopener noreferrer">Open the Waitlist table</a></p>
+        </section>
+      </div>
+    </main>
+    </div>
+  </div>
+
+  <dialog id="dupe-dialog">
+    <form method="dialog" id="dupe-form">
+      <h3>Already in the queue</h3>
+      <p id="dupe-copy">Same game, set, collector number, and finish is already Waitlist or Listed. Merging adds your quantity onto that row. Adding anyway creates a second row. Neither lists the card.</p>
+      <div id="dupe-list" class="choice-list"></div>
+      <p id="dupe-listed" class="warn" hidden>A match is already Listed. Merging increases the Airtable listed quantity. It still does not create a TCGPlayer listing.</p>
+      <div class="actions">
+        <button id="dupe-merge" class="primary" type="button" value="merge">Merge qty</button>
+        <button id="dupe-add" class="ghost" type="button" value="add">Add anyway</button>
+        <button class="ghost" type="button" id="dupe-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="bulk-dialog">
+    <form id="bulk-form">
+      <h3>Bulk paste</h3>
+      <p id="bulk-help" class="lede">One card per line. The selected game applies to every line. First token is the set. Then collector number, finish, condition, optional quantity, and an optional name.</p>
+      <pre id="bulk-sample" class="sample">8 042 Foil NM 1
+8,156,Normal,NM,2,Elsa - Snow Queen
+13	15	Foil	LP	1	Tiana</pre>
+      <label class="field" for="bulk-text">Lines</label>
+      <textarea id="bulk-text" rows="6" placeholder="13 42 Foil NM 1"></textarea>
+      <div class="actions">
+        <button id="bulk-preview" class="ghost" type="button">Preview</button>
+        <button id="bulk-commit" class="primary" type="button" disabled>Add these to waitlist</button>
+        <button id="bulk-close" class="ghost" type="button">Close</button>
+      </div>
+      <fieldset class="dup-policy" id="dup-policy" hidden>
+        <legend>When a line matches a Waitlist or Listed row</legend>
+        <label><input type="radio" name="onDuplicate" value="skip" /> Skip those lines</label>
+        <label><input type="radio" name="onDuplicate" value="merge" /> Merge qty into the existing row</label>
+        <label><input type="radio" name="onDuplicate" value="add" /> Add anyway</label>
+      </fieldset>
+      <p id="bulk-warning" class="warn" hidden></p>
+      <p id="bulk-error" class="error" role="alert"></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Line</th><th>Set</th><th>#</th><th>Finish</th><th>Cond</th><th>Qty</th><th>Name</th><th>Check</th></tr>
+          </thead>
+          <tbody id="bulk-body"></tbody>
+        </table>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="hekla-dialog">
+    <form method="dialog">
+      <h3 id="hekla-title">Hekla</h3>
+      <p id="hekla-copy"></p>
+      <pre id="hekla-message" class="sample" hidden></pre>
+      <p id="hekla-result" class="hint"></p>
+      <div class="actions">
+        <button id="hekla-send" class="primary" type="button">Send</button>
+        <a id="hekla-mail" class="ghost mail" hidden>Email this note</a>
+        <button id="hekla-copy" class="ghost" type="button" hidden>Copy message</button>
+        <button class="ghost" type="button" id="hekla-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

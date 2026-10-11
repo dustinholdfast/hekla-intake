@@ -1,0 +1,22 @@
+{
+  "name": "hekla-intake",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 47231 --ip 0.0.0.0",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "types": "wrangler types",
+    "deploy": "wrangler deploy",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "hono": "^4.9.6"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.40.0"
+  }
+}
