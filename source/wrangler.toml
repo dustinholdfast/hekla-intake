@@ -28,3 +28,5 @@ head_sampling_rate = 1
 [vars]
 # Public by design (it ships to the browser). Paste the key from Clerk dashboard > API keys.
 CLERK_PUBLISHABLE_KEY = "pk_test_Y3V0ZS1nYXItNzgwMi5jbGVyay5hY2NvdW50cy5kZXYk"
+# Clerk user IDs (comma-separated) allowed into /admin, where plans are granted. Not an organization role.
+PLATFORM_ADMIN_USER_IDS = "user_3KYHxnl1WPPJkOIR8PQhr8gzOxD"

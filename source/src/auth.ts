@@ -17,6 +17,12 @@ export function authConfigured(env: Env): boolean {
   return Boolean(env.CLERK_SECRET_KEY?.trim() && clerkFrontendApi(env.CLERK_PUBLISHABLE_KEY) && env.DATABASE_URL?.trim());
 }
 
+/** Platform admins run the service itself (granting plans). This is not a Clerk organization role. */
+export function isPlatformAdmin(env: Env, userId: string | null | undefined): boolean {
+  if (!userId) return false;
+  return (env.PLATFORM_ADMIN_USER_IDS ?? "").split(/[\s,]+/).includes(userId);
+}
+
 /** Clerk's components need their own script host, its bot-protection script, inline styles, a blob worker, and the Turnstile frame. */
 export function contentSecurityPolicy(env: Env, imageHosts: readonly string[]): string {
   const host = clerkFrontendApi(env.CLERK_PUBLISHABLE_KEY);
@@ -25,9 +31,9 @@ export function contentSecurityPolicy(env: Env, imageHosts: readonly string[]): 
   return [
     "default-src 'self'",
     `style-src 'self'${host ? " 'unsafe-inline'" : ""}`,
-    `script-src 'self'${clerk}${turnstile}${host ? " https://cdn.protect.clerk.com" : ""}`,
+    `script-src 'self'${clerk}${turnstile}${host ? " https://*.protect.clerk.com" : ""}`,
     `img-src 'self' data:${host ? " https://img.clerk.com" : ""} ${imageHosts.join(" ")}`,
-    `connect-src 'self'${clerk}${host ? " https://*.protect.clerk.com https://clerk-telemetry.com" : ""}`,
+    `connect-src 'self'${clerk}${host ? " https://*.protect.clerk.com:* https://clerk-telemetry.com" : ""}`,
     ...(host ? ["worker-src 'self' blob:", `frame-src${turnstile}`] : []),
     "base-uri 'none'",
     "form-action 'self'",

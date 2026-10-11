@@ -17,12 +17,12 @@ import {
   summary,
   type QueueCard,
 } from "./airtable.ts";
-import { authConfigured, clerkFrontendApi, contentSecurityPolicy } from "./auth.ts";
+import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
 import { canonicalGame, CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, LISTED_CAP, RARITIES, SETS, type Game } from "./sets.ts";
-import { listTenants, recordAudit, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
+import { listTenantPlans, listTenants, recordAudit, setCompPlan, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
 
 type Variables = { tenant: Tenant; tenantEnv: Env; userId: string; orgRole: string | null };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -52,18 +52,43 @@ app.use("/api/*", async (c, next) => {
   return clerkMiddleware({ secretKey: c.env.CLERK_SECRET_KEY, publishableKey: c.env.CLERK_PUBLISHABLE_KEY })(c, next);
 });
 
-// Every route below runs as one signed-in user inside one tenant (their active Clerk Organization).
+// Every route below runs as one signed-in user. Outside /api/admin it also runs inside one tenant
+// (their active Clerk Organization); the admin routes act across tenants and are guarded separately.
 app.use("/api/*", async (c, next) => {
   const auth = getAuth(c);
   if (!auth.userId) return c.json({ error: "Sign in required." }, 401);
+  c.set("userId", auth.userId);
+  if (c.req.path.startsWith("/api/admin/")) return next();
   if (!auth.orgId) return c.json({ error: "Choose an organization to continue.", code: "no_org" }, 403);
   const tenant = await tenantForOrg(c.env, auth.orgId);
   if (!tenant) return c.json({ error: "This organization has not been set up for intake yet.", code: "no_tenant" }, 403);
   c.set("tenant", tenant);
   c.set("tenantEnv", tenantEnv(c.env, tenant));
-  c.set("userId", auth.userId);
   c.set("orgRole", auth.orgRole ?? null);
   await next();
+});
+
+app.use("/api/admin/*", async (c, next) => {
+  if (!isPlatformAdmin(c.env, c.var.userId)) return c.json({ error: "Platform admins only." }, 403);
+  await next();
+});
+
+app.get("/api/admin/tenants", async (c) => {
+  return c.json({ tenants: await listTenantPlans(c.env) });
+});
+
+app.post("/api/admin/tenants/:id/plan", async (c) => {
+  const id = c.req.param("id");
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) return c.json({ error: "That is not a tenant id." }, 400);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const plan = body.value.plan;
+  if (plan !== "pro" && plan !== "free") return c.json({ error: "Plan must be pro or free." }, 400);
+  const note = typeof body.value.note === "string" ? body.value.note.trim().slice(0, 280) || null : null;
+  const tenant = await setCompPlan(c.env, id, plan, c.var.userId, note);
+  if (!tenant) return c.json({ error: "No tenant was changed. It may not exist, or it is on a paid plan." }, 404);
+  console.log("admin plan", JSON.stringify({ tenant: tenant.id, plan, by: c.var.userId }));
+  return c.json({ tenant });
 });
 
 app.get("/api/session", (c) => {
@@ -72,6 +97,8 @@ app.get("/api/session", (c) => {
     via: "clerk",
     tenant: c.var.tenant.name,
     role: c.var.orgRole,
+    plan: c.var.tenant.plan,
+    platformAdmin: isPlatformAdmin(c.env, c.var.userId),
     cap: LISTED_CAP,
     baseId: c.var.tenant.airtableBaseId,
     tableId: c.var.tenant.airtableTableId,

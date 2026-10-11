@@ -5,7 +5,7 @@
 **Prepared:** Sunday, October 11, 2026, about 9:35 AM ET
 **Updated:** Sunday, October 11, 2026, about 10:55 AM ET (GitHub repo, Clerk sign-in, Neon tenants and audit log)
 **Live URL:** https://hekla-intake.dustin-eef.workers.dev
-**Source of truth:** private GitHub repo `dustinholdfast/hekla-intake`. The app is in `source/`. The current code is on the `clerk-auth` branch, which is deployed but not yet merged into `main`. Dustin's working clone is `E:\Projects\Hekla Intake`.
+**Source of truth:** private GitHub repo `dustinholdfast/hekla-intake`. The app is in `source/`. `main` matches what is deployed; a GitHub Action runs `npm run check` on every push to `main` and on pull requests. Dustin's working clone is `E:\Projects\Hekla Intake`.
 
 > **How this was checked.** The original 9:35 AM version was checked against the source code in `/workspace/hekla-intake` (src/, public/, wrangler.toml, package.json, tests), the live Airtable schema and rows (read through the Airtable connector), `wrangler secret list` (names only), `wrangler deployments list`, and the local wrangler logs. No secret values appear in this document. Anything I couldn't confirm is marked **Unknown**.
 >
@@ -27,14 +27,14 @@ The app is deliberately limited. **It never changes Status, never writes Hekla's
 
 | Item | State |
 |---|---|
-| Deployed version | `52ed2e0e-5c23-41e4-9cd3-09d3bcf10f9b` (Oct 11, 10:50 AM ET). Code from the `clerk-auth` branch, commit `40b2de6`. |
+| Deployed version | `52ed2e0e-5c23-41e4-9cd3-09d3bcf10f9b` (Oct 11, 10:50 AM ET). Code from commit `40b2de6`, now on `main`. |
 | Tests / typecheck | 22 of 22 tests pass. `tsc --noEmit` is clean. |
 | Sign-in | Clerk, development instance. Dustin signed in and reached the queue on Oct 11. |
 | Lorcana L1 cap | **Full**: 68 Listed rows, total qty 100 out of 100 |
 | Listed re-rank | All 68 Listed rows have an Enriched At from today: **62 Pull, 6 Watch, 0 Keep** |
 | Riftbound pricing (tcgcsv) | **Landed and live.** 49 of 55 Riftbound Waitlist rows were re-priced by about 10:00 AM ET; the cron was working through the last 6. |
 | Biggest risk | Not ready for a second seller yet: Clerk is a development instance on a `workers.dev` address, every tenant would share one Airtable token, and new tenants are added by hand (§10 #22–#28) |
-| Next actions | Merge `clerk-auth` into `main`. Confirm audit rows are landing in Neon. Check Gemini billing. Check the Acceleration Gate finish (§10 #3). Decide Rank Score vs. Auto Rank. |
+| Next actions | Check Gemini billing. Check the Acceleration Gate finish (§10 #3). Decide Rank Score vs. Auto Rank. |
 
 ---
 
@@ -415,7 +415,7 @@ Secret changes also create versions. Four others from Oct 11 (10:25, 10:30 and 1
   - the per-tenant env taking base, table and webhook only from the tenant row
 - `npm run typecheck` runs `tsc --noEmit`, and `npm run check` runs both. Both passed on Oct 11 at about 10:45 AM ET.
 - `npm run dev` starts local wrangler on port 47231. Local secrets need a `.dev.vars` file, which doesn't exist; never commit one.
-- **There is no CI and no end-to-end or UI test.** Checked by hand on Oct 11: signed out, the live API returns 401 on every route; Dustin signed in through Clerk and reached the queue. **Not checked:** that add, edit and delete write rows to `audit_log`, and the cron's tenant loop in production logs.
+- **CI runs `npm run check` on GitHub** for every push to `main` and every pull request (first run passed Oct 11). **There is no end-to-end or UI test.** Checked by hand on Oct 11: signed out, the live API returns 401 on every route; Dustin signed in through Clerk and reached the queue. Two inline edits on Oct 11 at 11:52 AM ET each wrote an `edit` row to `audit_log` with Dustin's Clerk user ID. **Not checked:** audit rows for create, merge and delete, and the cron's tenant loop in production logs.
 
 ---
 
@@ -439,7 +439,7 @@ Secret changes also create versions. Four others from Oct 11 (10:25, 10:30 and 1
 
 | # | Issue | Impact | Where |
 |---|---|---|---|
-| 1 | **Resolved Oct 11.** The source is in the private GitHub repo `dustinholdfast/hekla-intake`. Still open: `clerk-auth` is deployed but not merged into `main`, and the repo's first commit differs slightly from the 9:27 AM deployment (the page title reads "TCG intake", not "Lorcana intake"), so the box source changed after this document was first written. What else changed is **Unknown**. | `main` is behind what is live | GitHub |
+| 1 | **Resolved Oct 11.** The source is in the private GitHub repo `dustinholdfast/hekla-intake`. Still open: the repo's first commit differs slightly from the 9:27 AM deployment (the page title reads "TCG intake", not "Lorcana intake"), so the box source changed after this document was first written. What else changed is **Unknown**. | Possible unreviewed changes in the source | GitHub |
 | 2 | Gemini `gemini-3.6-flash` is over quota (429), per the brief. 2 of the 68 Listed rows fell back to rules. | Lower-quality reasons, and slower retries | `enrich.ts` |
 | 3 | **Sona, Harmonious** (VEN 002): its Finish now reads Foil, which matches the Foil-only TCGplayer printing ($20.81), so the List recommendation is consistent. Its Price Source still carries a stale "check finish" note. **Acceleration Gate** (VEN 150) has the same flag and is still entered as Normal while priced from the Foil-only printing ($0.71, Hold). | Could mislead ranking | Airtable `rec1OLlcT3GPPVGck`, `recejB4nyDnBKWxcQ` |
 | 4 | 6 of 55 Riftbound rows were still waiting for tcgcsv re-pricing at about 10:00 AM | They show stale "price unavailable" until the cron catches up | cron |
@@ -452,13 +452,13 @@ Secret changes also create versions. Four others from Oct 11 (10:25, 10:30 and 1
 | 11 | Enrichment **overwrites** Market Price USD whenever a catalog price exists, including a price Hekla set | Possible conflict with Hekla's pricing | `enrich.ts` |
 | 12 | A qty **merge can target a Listed row**, raising Listed qty past the cap with no warning | Cap meter can exceed 100 | `airtable.ts mergeQty` |
 | 13 | Auto Rank (0–100) and Rank Score (0.03–6.86) sit side by side, and the UI shows Auto Rank with Rank Score in a tooltip | Confusing to have two ranks | UI and Airtable |
-| 14 | **Mostly resolved Oct 11.** Sign-in is Clerk's, so there is no passphrase endpoint to brute-force. An audit log exists, but it stores only the row after a change (no "before" values), doesn't cover enrichment, and hasn't been confirmed against the live database. | Thin trail of changes | `index.ts audit`, `tenants.ts` |
+| 14 | **Mostly resolved Oct 11.** Sign-in is Clerk's, so there is no passphrase endpoint to brute-force. An audit log exists, but it stores only the row after a change (no "before" values) and doesn't cover enrichment. Edits were confirmed landing in the live database on Oct 11. | Thin trail of changes | `index.ts audit`, `tenants.ts` |
 | 15 | **Resolved Oct 11.** Cloudflare Access mode was removed. | — | — |
 | 16 | Delete is one row at a time, with no undo | Tedious, and mistakes are permanent | `airtable.ts deleteCard` |
 | 17 | Queue reads cap out at 2,000 rows (20 pages), and the Airtable throttle is per isolate | Fine at today's 185 rows | `airtable.ts` |
 | 18 | Raster logo with a possible halo, and no vector mark | Edges look soft on light or high-DPI backgrounds | `public/` |
 | 19 | A stale Gemini comment and an older CSS palette are still in the source. (The `.orig`/`.rej` files were deleted Oct 11.) | Housekeeping noise | `enrich.ts`, `app.css` |
-| 20 | No CI and no UI or end-to-end tests. Sign-in was checked by hand once, on desktop only. | Regressions found by hand | — |
+| 20 | No UI or end-to-end tests (CI runs the typecheck and unit tests only). Sign-in was checked by hand once, on desktop only. | Regressions found by hand | — |
 | 21 | The L2 unlock path is not modelled in intake (`LISTED_CAP` is fixed at 100) | The cap meter is wrong once L2 unlocks | `sets.ts` |
 | 22 | **Clerk is a development instance.** The sign-in form says "Development mode". As far as is known, a Clerk production instance needs a domain Dustin controls, which a `workers.dev` address isn't. | Not suitable for outside sellers as is | Clerk, `wrangler.toml` |
 | 23 | **All tenants share one Airtable token.** Isolation relies on each tenant row naming the right base. A second seller with their own Airtable account can't be supported. | Blocks a real second tenant | `airtable.ts tokenOf` |
@@ -478,7 +478,7 @@ Effort: **S** is under half a day, **M** is 1–2 days, **L** is 3 days or more.
 
 | # | Phase | Goal | Scope | Effort | Dependencies | Risks |
 |---|---|---|---|---|---|---|
-| 1 | **Put the source in a GitHub repo** (**done Oct 11**) | End the single-box risk | Done: private repo, `.gitignore`, `.orig`/`.rej` files deleted. Left over: merge `clerk-auth` into `main`, add a README pointing to this handoff, and optionally a GitHub Action for `npm run check`. | S | — | — |
+| 1 | **Put the source in a GitHub repo** (**done Oct 11**) | End the single-box risk | Done: private repo, `.gitignore`, `.orig`/`.rej` files deleted, `clerk-auth` merged into `main`, and a GitHub Action for `npm run check`. Left over: a README pointing to this handoff. | S | — | — |
 | 2 | **Gemini quota / billing** | Get reliable AI adjustments | Check the plan and billing on Dustin's Google AI account. Confirm both models work, or reorder or replace the fallback. Fix the stale comment. Count `gemini error` 429s in the logs. | S | Dustin's access to the Google AI account | Cost. Model names change or get deprecated. |
 | 3 | **Riftbound pricing completeness** | Every Riftbound row has a real price or a clear reason why not | Confirm the last 6 VEN rows finish. Resolve the Acceleration Gate finish and re-sort Sona, Harmonious to clear its stale flag. Check other sets (OGN, SFD, UNL, …) and the Set Identifier ↔ tcgcsv abbreviation mapping. Show the "check finish" flag in the UI. Consider using tcgcsv as a fallback for the other games. | S–M | tcgcsv availability | tcgcsv is an unofficial mirror that can change or go away. Prices can be up to a day old. |
 | 4 | **Retry skipped / failed Listed rows** | No silent enrichment failures | Log the failed record ids and errors (not just counts). Show a "pending / failed" count in the UI. Add a one-click retry for failed rows. Find the root cause of the 9:15 report. | S | Workers Logs access | Retry loops that keep using up Gemini or Airtable quota |
@@ -494,7 +494,7 @@ Effort: **S** is under half a day, **M** is 1–2 days, **L** is 3 days or more.
 | 9 | **Rarity options per game** | Accurate rarity for every game | Add options (e.g. Mythic, Ultra Rare, Secret Rare, Showcase, Epic) or a per-game rarity field. Update `RARITIES`, `mapRarity`, and the rank points. | S–M | Airtable schema change (`typecast:false` means the options must exist first) | Messing up existing rows. Stale options. |
 | 10 | **Pokémon set-code mapping** | Pokémon lookups resolve reliably | A mapping table of printed or PTCGO codes to pokemontcg.io set ids (e.g. SVI → sv1), used by preview and enrichment. Add tests. | M | A pokemontcg.io sets list | The mapping needs upkeep as new sets release |
 | 11 | **Observability** | See failures | The login rate limit is no longer needed (Clerk handles sign-in). Still to do: structured logs for each enrichment outcome, a saved Workers Logs query or dashboard, and an optional alert on cron failures. | S–M | Cloudflare bindings | — |
-| 12 | **Audit log** (**first cut done Oct 11**) | A trail of every change intake makes | Done: create, merge, edit and delete are logged to Neon `audit_log` with the Clerk user and the row after the change. Still to do: confirm rows land in production, add "before" values, decide whether to log enrichment, and add a way to read the log in the app. | S–M | — | Storage growth. Could capture personal data if notes are logged. |
+| 12 | **Audit log** (**first cut done Oct 11**) | A trail of every change intake makes | Done: create, merge, edit and delete are logged to Neon `audit_log` with the Clerk user and the row after the change. Edits confirmed landing in production. Still to do: add "before" values, decide whether to log enrichment, and add a way to read the log in the app. | S–M | — | Storage growth. Could capture personal data if notes are logged. |
 | 13 | **Bulk delete / undo** | Safer, faster cleanup | Multi-select delete for Waitlist rows only, with confirmation. Keep a soft-delete or snapshot so changes can be undone within N minutes. | M | Audit log (#12) helps | Deleting the wrong rows. Undo making Status messy. |
 | 14 | **Vector logo** | Crisp branding without a halo | Get or trace an SVG of the mountain mark, replace the PNGs in the UI and favicons, and remove the halo | S–M | The brand sheet source art in the repo's `brand/` folder | Tracing errors. Needs Dustin's sign-off on the art. |
 | 15 | **Merge-into-Listed guard** | The cap can't be broken from intake | Warn or block when a merge would push Listed qty over the cap | S | — | Getting in the way of legitimate restocks |
@@ -523,7 +523,7 @@ The first step, real accounts and tenant isolation, shipped on Oct 11 (§3.3). T
 | 26 | **Roles and organization switcher** | Shops with staff | Owner-only greenlight and delete, staff can add and edit, and Clerk's organization switcher in the sidebar | S–M | — | Locking an owner out of their own actions |
 | 27 | **Pricing data and AI that can be sold on** | Commercially safe inputs | Check each catalog's commercial-use terms, replace tcgcsv with a licensed source if needed, share the catalog cache across tenants, and meter Gemini calls per tenant | M–L | Legal review of terms | Cost. A source withdrawing access. |
 
-**Suggested order:** finish 1 (merge to `main`), then 2 → 3 → 4 → 5 → 6, then 7, 15, 11, 9, 10, 8, 12, 13, 14, then the Priority 2 phases. Start the multi-tenant phases with 22 and 23; 24 to 27 depend on them. Phase 20 stays blocked until Dustin explicitly approves it.
+**Suggested order:** 2 → 3 → 4 → 5 → 6, then 7, 15, 11, 9, 10, 8, 12, 13, 14, then the Priority 2 phases. Start the multi-tenant phases with 22 and 23; 24 to 27 depend on them. Phase 20 stays blocked until Dustin explicitly approves it.
 
 ---
 
@@ -533,7 +533,7 @@ The first step, real accounts and tenant isolation, shipped on Oct 11 (§3.3). T
 - Current Gemini quota and billing state for each model.
 - What happened between the Oct 10 report of 78 Waitlist rows and today's 34 Lorcana Waitlist + 28 Skip-status rows.
 - Hekla's exact Rank Score formula and its L2 unlock criteria.
-- Whether add, edit and delete are writing rows to `audit_log` in Neon (the code path has not been observed against the live database).
+- Whether create, merge and delete write rows to `audit_log` in Neon. Only edits have been observed.
 - Whether Hekla has a webhook endpoint that could be set as tenant one's `bot_webhook_url`.
 - What changed in the box source between the 9:27 AM deployment and the push to GitHub (§10 #1).
 - Whether a Clerk production instance can be used without a custom domain (believed not; unconfirmed).
@@ -548,7 +548,7 @@ The first step, real accounts and tenant isolation, shipped on Oct 11 (§3.3). T
 | Cloudflare account | `eef14117e342317b606fda458b144e58` |
 | Airtable base / table | `app4Tjz72sZtVMQyp` / `tblvHPu7dgDHA91bc` (Lorcana Card Waitlist / Waitlist) |
 | Hekla bot id | `4590aafc-366c-4a4c-ac9c-6e3eb8d9968b` |
-| Source | GitHub `dustinholdfast/hekla-intake` (private), app in `source/`, branch `clerk-auth` |
+| Source | GitHub `dustinholdfast/hekla-intake` (private), app in `source/`, branch `main` |
 | Local clone | `E:\Projects\Hekla Intake` |
 | Clerk instance | `cute-gar-7802.clerk.accounts.dev` (development) |
 | Tenant one | Clerk organization `org_3KYI7xB6yJInWU8sf5KbJ6x3mZx`, Neon `tenants.name` = Hekla |

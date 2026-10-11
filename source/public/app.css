@@ -489,3 +489,17 @@ tr.has-preview:focus-visible { outline: 2px solid var(--ice-white); outline-offs
 .del-yes { background: var(--lava); color: var(--white); border: 0; font-weight: 600; }
 .del-yes:hover:not(:disabled) { background: #C53030; }
 .del-no { border: 1px solid var(--divider); color: var(--ice-white); }
+
+/* Platform admin (/admin) */
+.admin { max-width: 1040px; margin: 0 auto; padding: 1.1rem 1.15rem 2.5rem; }
+.admin-top { display: flex; gap: 0.9rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+.admin-top > div:first-of-type { flex: 1 1 280px; }
+.admin-top h1 { margin: 0; font-size: 1.5rem; font-weight: 700; color: var(--white); }
+.admin-top .lede { margin: 0.2rem 0 0; }
+.admin-logo { width: 44px; height: auto; }
+.admin .queue-tools input { width: min(240px, 100%); }
+.admin-table td { vertical-align: middle; }
+.admin-table .org-id { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
+.primary.tiny { min-height: 36px; padding: 0.35rem 0.7rem; }
+a.ghost { display: inline-flex; align-items: center; text-decoration: none; }
+.admin-link { display: block; margin-top: 0.5rem; }

@@ -7,12 +7,27 @@ export type Tenant = {
   airtableBaseId: string;
   airtableTableId: string;
   botWebhookUrl: string | null;
+  plan: Plan;
+};
+
+export type Plan = "free" | "pro";
+export type TenantPlan = {
+  id: string;
+  name: string;
+  clerkOrgId: string;
+  plan: Plan;
+  planSource: "comp" | "paid" | null;
+  planChangedBy: string | null;
+  planChangedAt: string | null;
+  planNote: string | null;
+  createdAt: string;
 };
 
 export type AuditAction = "create" | "merge" | "edit" | "delete";
 export type AuditEntry = { tenantId: string; userId: string; action: AuditAction; recordId: string; snapshot?: unknown };
 
-const TENANT_COLUMNS = "id, clerk_org_id, name, airtable_base_id, airtable_table_id, bot_webhook_url";
+const TENANT_COLUMNS = "id, clerk_org_id, name, airtable_base_id, airtable_table_id, bot_webhook_url, plan";
+const PLAN_COLUMNS = "id, name, clerk_org_id, plan, plan_source, plan_changed_by, plan_changed_at, plan_note, created_at";
 const CACHE_MS = 60_000;
 const cache = new Map<string, { tenant: Tenant | null; at: number }>();
 
@@ -30,6 +45,24 @@ export function toTenant(row: Record<string, unknown>): Tenant {
     airtableBaseId: String(row.airtable_base_id),
     airtableTableId: String(row.airtable_table_id),
     botWebhookUrl: typeof row.bot_webhook_url === "string" ? row.bot_webhook_url : null,
+    plan: row.plan === "pro" ? "pro" : "free",
+  };
+}
+
+const text = (value: unknown): string | null => (value == null ? null : String(value));
+const time = (value: unknown): string | null => (value == null ? null : new Date(value as string).toISOString());
+
+export function toTenantPlan(row: Record<string, unknown>): TenantPlan {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    clerkOrgId: String(row.clerk_org_id),
+    plan: row.plan === "pro" ? "pro" : "free",
+    planSource: row.plan_source === "comp" || row.plan_source === "paid" ? row.plan_source : null,
+    planChangedBy: text(row.plan_changed_by),
+    planChangedAt: time(row.plan_changed_at),
+    planNote: text(row.plan_note),
+    createdAt: time(row.created_at) ?? "",
   };
 }
 
@@ -59,6 +92,30 @@ export function tenantEnv(env: Env, tenant: Tenant): Env {
     AIRTABLE_TABLE_ID: tenant.airtableTableId,
     HEKLA_WEBHOOK_URL: tenant.botWebhookUrl ?? undefined,
   } as Env;
+}
+
+/** Every tenant with its plan, for the platform admin screen. */
+export async function listTenantPlans(env: Env): Promise<TenantPlan[]> {
+  const rows = await db(env).query(`select ${PLAN_COLUMNS} from tenants order by name`);
+  return rows.map(toTenantPlan);
+}
+
+/**
+ * Grants or removes complimentary Pro. A paid plan is never touched here, so removing a comp
+ * can't cancel something a seller is paying for. Returns null when no tenant was changed.
+ */
+export async function setCompPlan(env: Env, tenantId: string, plan: Plan, adminUserId: string, note: string | null): Promise<TenantPlan | null> {
+  const rows = await db(env).query(
+    `update tenants
+     set plan = $2, plan_source = case when $2 = 'pro' then 'comp' end, plan_changed_by = $3, plan_changed_at = now(), plan_note = $4
+     where id = $1 and plan_source is distinct from 'paid'
+     returning ${PLAN_COLUMNS}`,
+    [tenantId, plan, adminUserId, note],
+  );
+  if (!rows[0]) return null;
+  const changed = toTenantPlan(rows[0]);
+  cache.delete(changed.clerkOrgId);
+  return changed;
 }
 
 export async function recordAudit(env: Env, entries: AuditEntry[]): Promise<void> {

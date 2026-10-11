@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1628" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Hekla · Platform admin</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <p id="boot" class="boot">Opening admin…</p>
+
+  <section id="login-view" class="login" hidden>
+    <div class="login-card">
+      <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
+      <h1>Platform admin</h1>
+      <div id="clerk-mount"></div>
+      <p id="login-error" class="error" role="alert"></p>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Back to intake</a>
+        <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="admin-view" class="admin" hidden>
+    <header class="admin-top">
+      <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+      <div>
+        <h1>Platform admin</h1>
+        <p class="lede">Grant or remove complimentary Pro for an account. Paid plans are never changed here.</p>
+      </div>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Back to intake</a>
+        <button id="logout" class="ghost tiny" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Accounts</h2>
+        <div class="queue-tools">
+          <input id="search" type="search" placeholder="Search accounts" aria-label="Search accounts" />
+          <button id="refresh" class="ghost tiny" type="button">Refresh</button>
+        </div>
+      </div>
+      <p id="admin-meta" class="hint"></p>
+      <p id="admin-error" class="error" role="alert"></p>
+      <p id="admin-flash" class="flash" role="status"></p>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr><th>Account</th><th>Plan</th><th>Last change</th><th>Note</th><th></th></tr>
+          </thead>
+          <tbody id="tenant-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <dialog id="plan-dialog">
+    <form method="dialog" id="plan-form">
+      <h3 id="plan-title">Grant complimentary Pro</h3>
+      <p id="plan-text" class="hint"></p>
+      <label class="field" for="plan-note">Note (optional)</label>
+      <input id="plan-note" name="note" type="text" maxlength="280" placeholder="Why, or until when" />
+      <p id="plan-error" class="error" role="alert"></p>
+      <div class="actions">
+        <button id="plan-confirm" class="primary" type="button">Grant Pro</button>
+        <button id="plan-cancel" class="ghost" type="button">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/session.js"></script>
+  <script src="/admin.js"></script>
+</body>
+</html>
