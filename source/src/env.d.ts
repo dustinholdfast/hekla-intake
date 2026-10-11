@@ -9,4 +9,6 @@ interface Env {
   GEMINI_API_KEY?: string;
   CLERK_SECRET_KEY?: string;
   DATABASE_URL?: string;
+  /** Encrypts each tenant's connection tokens before they are stored in Neon. */
+  CONNECTIONS_KEY?: string;
 }

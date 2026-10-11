@@ -23,7 +23,7 @@ export type TenantPlan = {
   createdAt: string;
 };
 
-export type AuditAction = "create" | "merge" | "edit" | "delete";
+export type AuditAction = "create" | "merge" | "edit" | "delete" | "connect" | "disconnect";
 export type AuditEntry = { tenantId: string; userId: string; action: AuditAction; recordId: string; snapshot?: unknown };
 
 const TENANT_COLUMNS = "id, clerk_org_id, name, airtable_base_id, airtable_table_id, bot_webhook_url, plan";
@@ -31,7 +31,7 @@ const PLAN_COLUMNS = "id, name, clerk_org_id, plan, plan_source, plan_changed_by
 const CACHE_MS = 60_000;
 const cache = new Map<string, { tenant: Tenant | null; at: number }>();
 
-function db(env: Env) {
+export function db(env: Env) {
   const url = env.DATABASE_URL?.trim();
   if (!url) throw new Error("DATABASE_URL is not set.");
   return neon(url);

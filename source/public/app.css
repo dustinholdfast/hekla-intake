@@ -503,3 +503,10 @@ tr.has-preview:focus-visible { outline: 2px solid var(--ice-white); outline-offs
 .primary.tiny { min-height: 36px; padding: 0.35rem 0.7rem; }
 a.ghost { display: inline-flex; align-items: center; text-decoration: none; }
 .admin-link { display: block; margin-top: 0.5rem; }
+
+/* Settings (/settings) */
+.connection { display: grid; gap: 0.6rem; padding: 0.9rem 0 0; border-top: 1px solid var(--divider); margin-top: 0.8rem; }
+.connection h3 { margin: 0; font-size: 1.05rem; font-weight: 600; color: var(--white); }
+.connection .hint { margin: 0; }
+.connection-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.connection-row input { flex: 1 1 260px; }

@@ -20,6 +20,7 @@ import {
   type QueueCard,
 } from "./airtable.ts";
 import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
+import { cleanToken, ConnectionError, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
@@ -118,6 +119,34 @@ app.get("/api/session", (c) => {
       DMG: "Damaged",
     },
   });
+});
+
+// Connections: each tenant links its own outside accounts. Only an organization admin may change them,
+// and a stored token is never returned to the browser.
+const canManageConnections = (c: AppContext) => c.var.orgRole === "org:admin";
+
+app.get("/api/connections", async (c) => {
+  return c.json({ ready: connectionsReady(c.env), canManage: canManageConnections(c), cardtrader: await connectionStatus(c.env, c.var.tenant.id, "cardtrader") });
+});
+
+app.put("/api/connections/cardtrader", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can connect CardTrader." }, 403);
+  if (!connectionsReady(c.env)) return c.json({ error: "Connections are not set up on this server yet (CONNECTIONS_KEY is missing)." }, 503);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const token = cleanToken(body.value.token);
+  if (!token) return c.json({ error: "Paste the CardTrader API token on one line." }, 400);
+  const account = await verifyCardTrader(token);
+  if (!account.ok) return c.json({ error: account.error }, 400);
+  await saveConnection(c.env, c.var.tenant.id, "cardtrader", token, account, c.var.userId);
+  audit(c, "connect", [{ id: "cardtrader" }]);
+  return c.json({ cardtrader: await connectionStatus(c.env, c.var.tenant.id, "cardtrader") });
+});
+
+app.delete("/api/connections/cardtrader", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can disconnect CardTrader." }, 403);
+  if (await deleteConnection(c.env, c.var.tenant.id, "cardtrader")) audit(c, "disconnect", [{ id: "cardtrader" }]);
+  return c.json({ cardtrader: { connected: false } });
 });
 
 app.get("/api/summary", async (c) => {
@@ -415,6 +444,7 @@ app.get("*", async (c) => {
 });
 
 app.onError((error, c) => {
+  if (error instanceof ConnectionError) return c.json({ error: error.message }, error.status === 503 ? 503 : 400);
   if (error instanceof AirtableError) {
     const status = error.status === 503 ? 503 : error.status >= 500 ? 502 : 400;
     return c.json({ error: error.message }, status);
@@ -432,7 +462,7 @@ function backgroundEnrich(c: AppContext, id: string): void {
 
 /** Best-effort trail of who changed what. A failed audit write never fails the request. */
 function audit(c: AppContext, action: AuditAction, cards: { id: string }[]): void {
-  const entries = cards.map((card) => ({ tenantId: c.var.tenant.id, userId: c.var.userId, action, recordId: card.id, snapshot: action === "delete" ? null : card }));
+  const entries = cards.map((card) => ({ tenantId: c.var.tenant.id, userId: c.var.userId, action, recordId: card.id, snapshot: action === "delete" || action === "disconnect" ? null : card }));
   const work = recordAudit(c.env, entries).catch((e) => console.error("audit failed", action, e instanceof Error ? e.message : e));
   try { c.executionCtx.waitUntil(work); } catch { /* no ctx */ }
 }
