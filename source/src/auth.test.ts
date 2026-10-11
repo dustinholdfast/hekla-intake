@@ -24,8 +24,8 @@ test("csp stays strict without clerk and only opens the clerk host with it", () 
   const strict = contentSecurityPolicy(env({}), ["https://img.example"]);
   assert.equal(strict, "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data: https://img.example; connect-src 'self'; base-uri 'none'; form-action 'self'");
   const open = contentSecurityPolicy(env({ CLERK_PUBLISHABLE_KEY: key("a.clerk.accounts.dev") }), ["https://img.example"]);
-  assert.match(open, /script-src 'self' https:\/\/a\.clerk\.accounts\.dev https:\/\/challenges\.cloudflare\.com;/);
-  assert.match(open, /connect-src 'self' https:\/\/a\.clerk\.accounts\.dev;/);
+  assert.match(open, /script-src 'self' https:\/\/a\.clerk\.accounts\.dev https:\/\/challenges\.cloudflare\.com https:\/\/cdn\.protect\.clerk\.com;/);
+  assert.match(open, /connect-src 'self' https:\/\/a\.clerk\.accounts\.dev https:\/\/\*\.protect\.clerk\.com https:\/\/clerk-telemetry\.com;/);
   assert.doesNotMatch(open, /script-src[^;]*'unsafe-inline'/);
 });
 test("tenant env takes base, table and webhook from the tenant, never from the worker", () => {

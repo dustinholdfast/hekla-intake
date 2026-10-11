@@ -17,7 +17,7 @@ export function authConfigured(env: Env): boolean {
   return Boolean(env.CLERK_SECRET_KEY?.trim() && clerkFrontendApi(env.CLERK_PUBLISHABLE_KEY) && env.DATABASE_URL?.trim());
 }
 
-/** Clerk's components need their own script host, inline styles, a blob worker, and the Turnstile frame. */
+/** Clerk's components need their own script host, its bot-protection script, inline styles, a blob worker, and the Turnstile frame. */
 export function contentSecurityPolicy(env: Env, imageHosts: readonly string[]): string {
   const host = clerkFrontendApi(env.CLERK_PUBLISHABLE_KEY);
   const clerk = host ? ` https://${host}` : "";
@@ -25,9 +25,9 @@ export function contentSecurityPolicy(env: Env, imageHosts: readonly string[]): 
   return [
     "default-src 'self'",
     `style-src 'self'${host ? " 'unsafe-inline'" : ""}`,
-    `script-src 'self'${clerk}${turnstile}`,
+    `script-src 'self'${clerk}${turnstile}${host ? " https://cdn.protect.clerk.com" : ""}`,
     `img-src 'self' data:${host ? " https://img.clerk.com" : ""} ${imageHosts.join(" ")}`,
-    `connect-src 'self'${clerk}`,
+    `connect-src 'self'${clerk}${host ? " https://*.protect.clerk.com https://clerk-telemetry.com" : ""}`,
     ...(host ? ["worker-src 'self' blob:", `frame-src${turnstile}`] : []),
     "base-uri 'none'",
     "form-action 'self'",
