@@ -268,7 +268,7 @@ function bulkSample(game) {
   if (game === "Magic: The Gathering") return "MH3 123 Foil NM 1\nMH3,456,Normal,NM,2,Orcish Bowmasters";
   if (game === "Pokémon") return "SV08 25 Foil NM 1\nSV08,25,Normal,NM,2,Pikachu";
   if (game === "Yu-Gi-Oh!") return "LOB 1 Normal NM 1\nLOB,5,Foil,NM,1,Dark Magician";
-  return "OGN 12 Foil NM 1\nOGN,12,Enchanted,NM,1";
+  return "OGN 12 Foil NM 1\nOGN,12,Special,NM,1";
 }
 
 function saveDefaults() {

@@ -1,5 +1,5 @@
 import { buildCreateFields, collectorVariants, SET_IDENTIFIER_MAX, setIdentityOf, type DraftCard } from "./fields.ts";
-import { canonicalCondition, canonicalFinish, canonicalSet, FINISHES, type Game } from "./sets.ts";
+import { canonicalCondition, canonicalFinish, canonicalSet, finishesFor, type Game } from "./sets.ts";
 
 export type ParsedRow = {
   line: number;
@@ -66,8 +66,8 @@ export function parseBulk(text: string, game: Game = "Lorcana"): ParsedRow[] {
       rows.push({ line, raw, error: "Collector number is missing." });
       return;
     }
-    if (!finish) {
-      rows.push({ line, raw, error: `“${tokens[2]}” is not a finish. Use ${FINISHES.join(", ")}.` });
+    if (!finish || !finishesFor(game).includes(finish)) {
+      rows.push({ line, raw, error: `“${tokens[2]}” is not a ${game} finish. Use ${finishesFor(game).join(", ")}.` });
       return;
     }
     if (!condition) {

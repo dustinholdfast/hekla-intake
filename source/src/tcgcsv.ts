@@ -33,7 +33,7 @@ export function matchPrice(products: J[], prices: J[], q: { number: string; name
   if (!cands.length) return { price: null };
   // Prefer the plain printing (shortest name, no "(Alternate Art)" etc.)
   cands.sort((a, b) => String(a.name).length - String(b.name).length);
-  const foil = /foil/i.test(q.finish ?? "");
+  const foil = /foil|special/i.test(q.finish ?? ""); // Special is a foil printing; TCGplayer has only Normal and Foil
   for (const p of cands) {
     const rows = prices.filter((x) => x.productId === p.productId);
     const pick = rows.find((x) => (foil ? /foil/i.test(x.subTypeName) : x.subTypeName === "Normal")) ?? (rows.length === 1 ? rows[0] : undefined);

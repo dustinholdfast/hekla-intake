@@ -33,17 +33,19 @@ export const GAMES = [
 export type Game = (typeof GAMES)[number];
 
 /**
- * Live Airtable Finish choices. Holofoil, Reverse Holo, Etched, and Special
- * can be re-enabled once Dustin adds them on the Finish field.
+ * The default finishes. Every value here and in RIFTBOUND_FINISHES must exist as a choice on the Airtable
+ * Finish field, because writes use typecast: false. Holofoil, Reverse Holo and Etched can be added the same way.
  */
 export const FINISHES = ["Normal", "Foil", "Enchanted"] as const;
-export type Finish = (typeof FINISHES)[number];
+/** Riftbound has no Enchanted cards; its third finish is Special (showcase and other non-standard foils). */
+export const RIFTBOUND_FINISHES = ["Normal", "Foil", "Special"] as const;
+export type Finish = (typeof FINISHES)[number] | (typeof RIFTBOUND_FINISHES)[number];
 
-/** Same three choices for every game, matching the Airtable Finish field. */
+/** The choices offered for each game. */
 export const FINISHES_BY_GAME: Record<Game, readonly Finish[]> = {
   Lorcana: FINISHES,
   "Magic: The Gathering": FINISHES,
-  Riftbound: FINISHES,
+  Riftbound: RIFTBOUND_FINISHES,
   "Pokémon": FINISHES,
   "Yu-Gi-Oh!": FINISHES,
 };
@@ -122,6 +124,8 @@ const FINISH_ALIASES: Record<string, Finish> = {
   f: "Foil",
   enchanted: "Enchanted",
   e: "Enchanted",
+  special: "Special",
+  s: "Special",
 };
 
 const CONDITION_ALIASES: Record<string, Condition> = {

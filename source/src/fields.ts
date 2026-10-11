@@ -6,7 +6,6 @@ import {
   canonicalSet,
   CONDITIONS,
   effectiveGame,
-  FINISHES,
   finishesFor,
   GAMES,
   type Condition,
@@ -194,7 +193,7 @@ export function parseDraft(input: IntakeBody): { ok: true; card: DraftCard } | {
   }
 
   const finish = canonicalFinish(input.finish ?? "");
-  if (!finish) return { ok: false, error: `Finish must be ${FINISHES.join(", ")}.` };
+  if (!finish || !finishesFor(game).includes(finish)) return { ok: false, error: `Finish must be ${finishesFor(game).join(", ")}.` };
 
   const condition = canonicalCondition(input.condition?.trim() ? input.condition : "NM");
   if (!condition) return { ok: false, error: "Condition must be NM, LP, MP, HP, or DMG." };

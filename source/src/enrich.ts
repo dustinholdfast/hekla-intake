@@ -35,7 +35,7 @@ export function mapRarity(raw: string | undefined | null): RarityChoice | null {
   return "Special";
 }
 const num = (v: unknown): number | null => { const n = typeof v === "string" ? Number.parseFloat(v) : typeof v === "number" ? v : NaN; return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
-const isFoil = (finish: string | null) => finish === "Foil" || finish === "Enchanted";
+const isFoil = (finish: string | null) => finish === "Foil" || finish === "Enchanted" || finish === "Special";
 
 export function extractCatalog(game: Game, raw: J | undefined, finish: string | null): Catalog {
   if (!raw) return { found: false, price: null, priceSource: "price unavailable (no catalog match)" };

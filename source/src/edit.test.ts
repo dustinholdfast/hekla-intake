@@ -21,3 +21,22 @@ test("preview helpers", () => {
   assert.equal(collectorCore("42/204"), "42");
   assert.equal(previewCacheKey({ game: "Lorcana", set: "1", number: "42/204", name: "" }), previewCacheKey({ game: "Lorcana", set: "1", number: "42", name: "" }));
 });
+
+import { parseDraft } from "./fields.ts";
+import { parseBulk } from "./parse.ts";
+import { finishesFor } from "./sets.ts";
+test("riftbound offers Normal, Foil, Special; other games keep Enchanted", () => {
+  assert.deepEqual([...finishesFor("Riftbound")], ["Normal", "Foil", "Special"]);
+  assert.deepEqual([...finishesFor("Lorcana")], ["Normal", "Foil", "Enchanted"]);
+  const rift = (finish: string) => parseDraft({ game: "Riftbound", setIdentifier: "VEN", collectorNumber: "SP6", finish, condition: "NM", qty: 1 } as never);
+  const special = rift("Special");
+  assert.equal(special.ok && special.card.finish, "Special");
+  assert.equal(rift("Enchanted").ok, false);
+  assert.equal(parseDraft({ game: "Lorcana", setNumber: "1", collectorNumber: "1", finish: "Special", condition: "NM", qty: 1 } as never).ok, false);
+  assert.equal(buildEditFields({ finish: "special" }, "Riftbound").ok, true);
+  assert.equal(buildEditFields({ finish: "Enchanted" }, "Riftbound").ok, false);
+  assert.equal(buildEditFields({ finish: "Special" }, "Lorcana").ok, false);
+  const [ok, bad] = parseBulk("VEN SP6 Special NM 1\nVEN 12 Enchanted NM 1", "Riftbound");
+  assert.equal(ok?.card?.finish, "Special");
+  assert.match(bad?.error ?? "", /not a Riftbound finish/);
+});
