@@ -15,6 +15,7 @@ async function cachedJson(url: string, fetcher: typeof fetch = fetch): Promise<J
   return JSON.parse(text) as J;
 }
 
+import { riftboundNumberKey } from "./preview.ts";
 const numCore = (s: string | null | undefined) => (String(s ?? "").split("/")[0].match(/\d+/)?.[0] ?? "").replace(/^0+(?=\d)/, "");
 const norm = (s: string | null | undefined) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const ext = (p: J, k: string) => (p.extendedData as J[] | undefined)?.find((e) => e.name === k)?.value as string | undefined;
@@ -23,7 +24,10 @@ const ext = (p: J, k: string) => (p.extendedData as J[] | undefined)?.find((e) =
 export function matchPrice(products: J[], prices: J[], q: { number: string; name: string; finish: string | null }): { price: number | null; productName?: string; subType?: string; mismatch?: boolean } {
   const want = numCore(q.number); const nm = norm(q.name);
   const cards = products.filter((p) => ext(p, "Number"));
-  let cands = want ? cards.filter((p) => numCore(ext(p, "Number")) === want) : [];
+  // SP6/006, 006/166 and R06 are different cards: match the printed number exactly before falling back to its digits.
+  const key = riftboundNumberKey(q.number);
+  const exact = want ? cards.filter((p) => riftboundNumberKey(ext(p, "Number")) === key) : [];
+  let cands = exact.length ? exact : want ? cards.filter((p) => numCore(ext(p, "Number")) === want) : [];
   if (cands.length > 1 && nm) { const byName = cands.filter((p) => norm(p.name) === nm || norm(p.name).startsWith(nm)); if (byName.length) cands = byName; }
   if (!cands.length && nm) cands = cards.filter((p) => norm(p.name) === nm);
   if (!cands.length) return { price: null };

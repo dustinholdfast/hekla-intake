@@ -21,6 +21,18 @@ async function getJson(url: string): Promise<J | null> {
 }
 const clean = (s: unknown) => (typeof s === "string" ? s.trim() : "");
 export function collectorCore(n: string): string { const head = clean(n).split("/")[0] ?? ""; return head.trim(); }
+/**
+ * Riftbound reuses numbers inside one set: 006/166 is a main-set card, SP6/006 a showcase card and R06 a rune.
+ * The key keeps the letter prefix and suffix so they stay three different cards: "006" → "6", "SP6/006" → "sp6",
+ * "R06a" → "r6a", "019a/166" → "19a".
+ */
+export function riftboundNumberKey(n: string | null | undefined): string {
+  const head = collectorCore(String(n ?? "")).toLowerCase().replace(/\s+/g, "");
+  const m = /^([a-z]*)0*(\d+)([a-z*]?)$/.exec(head);
+  return m ? `${m[1]}${m[2]}${m[3]}` : head;
+}
+/** The same key from a Riftcodex id such as "ven-sp6-006" or "ven-006-166". */
+const riftcodexKey = (card: J): string => riftboundNumberKey(String(card.riftbound_id ?? "").split("-")[1] ?? "");
 function safeImage(url: unknown): string | undefined {
   const u = clean(url); if (!u) return undefined;
   return PREVIEW_IMAGE_HOSTS.some((h) => u.startsWith(h + "/")) ? u : undefined;
@@ -83,14 +95,19 @@ async function ygo(q: PreviewQuery): Promise<CardPreview> {
 async function riftbound(q: PreviewQuery): Promise<CardPreview> {
   const src = "Riftcodex";
   let c: J | null = null;
-  const num = Number.parseInt(collectorCore(q.number), 10);
+  const key = riftboundNumberKey(q.number);
+  const num = Number.parseInt(key.replace(/^[a-z]+/, ""), 10);
   if (q.set && Number.isFinite(num)) {
+    // An exact match on the printed number wins. Only when the set has none do we fall back to the bare number.
+    let loose: J | null = null;
     for (let page = 1; page <= 6 && !c; page++) {
       const r = await getJson(`https://api.riftcodex.com/cards?set_id=${encodeURIComponent(q.set.toUpperCase())}&size=100&page=${page}`);
       const items: J[] = r?.items ?? [];
-      c = items.find((i) => i.collector_number === num && !i.metadata?.alternate_art && !i.metadata?.signature) ?? items.find((i) => i.collector_number === num) ?? null;
+      c = items.find((i) => riftcodexKey(i) === key) ?? null;
+      loose ??= items.find((i) => i.collector_number === num && !i.metadata?.alternate_art && !i.metadata?.signature) ?? items.find((i) => i.collector_number === num) ?? null;
       if (!r || page >= (r.pages ?? 1)) break;
     }
+    c ??= loose;
   }
   if (!c && q.name) { const r = await getJson(`https://api.riftcodex.com/cards/name?fuzzy=${encodeURIComponent(q.name)}`); c = r?.items?.[0] ?? null; }
   if (!c) return none(src);

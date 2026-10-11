@@ -159,3 +159,33 @@ test("enrichOne re-ranks from a supplied catalog without a lookup, and still nev
   assert.match(String(r.fields["Rank Reason"]), /^(Keep|Watch|Pull):/);
   assertEnrichFields(r.fields);
 });
+
+import { riftboundNumberKey } from "./preview.ts";
+test("riftbound numbers keep their prefix so 006, SP6 and R06 stay different cards", () => {
+  assert.equal(riftboundNumberKey("006"), "6");
+  assert.equal(riftboundNumberKey("6/166"), "6");
+  assert.equal(riftboundNumberKey("SP6/006"), "sp6");
+  assert.equal(riftboundNumberKey("sp6"), "sp6");
+  assert.equal(riftboundNumberKey("R06"), "r6");
+  assert.equal(riftboundNumberKey("R06a"), "r6a");
+  assert.equal(riftboundNumberKey("019a/166"), "19a");
+  assert.notEqual(riftboundNumberKey("006"), riftboundNumberKey("SP6/006"));
+});
+test("tcgcsv matcher does not price a main-set card from the showcase card with the same number", () => {
+  const products = [
+    { productId: 1, name: "Lux, Crownguard", extendedData: [{ name: "Number", value: "SP6/006" }] },
+    { productId: 2, name: "Oasis Raider", extendedData: [{ name: "Number", value: "006/166" }] },
+    { productId: 3, name: "Order Rune", extendedData: [{ name: "Number", value: "R06" }] },
+  ];
+  const prices = [
+    { productId: 1, subTypeName: "Foil", marketPrice: 21.65 },
+    { productId: 2, subTypeName: "Normal", marketPrice: 0.05 }, { productId: 2, subTypeName: "Foil", marketPrice: 0.13 },
+    { productId: 3, subTypeName: "Normal", marketPrice: 0.11 }, { productId: 3, subTypeName: "Foil", marketPrice: 9.51 },
+  ];
+  assert.deepEqual([matchPrice(products, prices, { number: "006", name: "", finish: "Normal" }).price, matchPrice(products, prices, { number: "006", name: "", finish: "Foil" }).price], [0.05, 0.13]);
+  // Even a stale stored name must not pull a plain number over to the showcase card.
+  assert.equal(matchPrice(products, prices, { number: "006", name: "Lux, Crownguard", finish: "Foil" }).productName, "Oasis Raider");
+  assert.equal(matchPrice(products, prices, { number: "SP6", name: "", finish: "Foil" }).price, 21.65);
+  assert.equal(matchPrice(products, prices, { number: "SP6/006", name: "", finish: "Normal" }).mismatch, true);
+  assert.equal(matchPrice(products, prices, { number: "R06", name: "", finish: "Foil" }).price, 9.51);
+});
