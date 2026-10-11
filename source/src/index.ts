@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { clerkMiddleware, getAuth } from "@clerk/hono";
+import { Hono, type Context } from "hono";
 import {
   AirtableError,
   createCards,
@@ -16,13 +17,15 @@ import {
   summary,
   type QueueCard,
 } from "./airtable.ts";
-import { accessConfigured, hasSession, login, logout } from "./auth.ts";
+import { authConfigured, clerkFrontendApi, contentSecurityPolicy } from "./auth.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
 import { canonicalGame, CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, LISTED_CAP, RARITIES, SETS, type Game } from "./sets.ts";
+import { listTenants, recordAudit, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
 
-const app = new Hono<{ Bindings: Env }>();
+type Variables = { tenant: Tenant; tenantEnv: Env; userId: string; orgRole: string | null };
+const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 app.use("*", async (c, next) => {
   await next();
@@ -33,27 +36,45 @@ app.use("*", async (c, next) => {
 
 app.use("/api/*", async (c, next) => {
   c.header("cache-control", "no-store");
-  if (c.req.path === "/api/login" && c.req.method === "POST") {
-    await next();
-    return;
+  await next();
+});
+
+// Public: the sign-in page needs these before anyone has a session. Neither value is secret.
+app.get("/api/config", (c) => {
+  const clerkPublishableKey = c.env.CLERK_PUBLISHABLE_KEY?.trim() || null;
+  return c.json({ clerkPublishableKey, clerkFrontendApi: clerkFrontendApi(c.env.CLERK_PUBLISHABLE_KEY) });
+});
+
+app.use("/api/*", async (c, next) => {
+  if (!authConfigured(c.env)) {
+    return c.json({ error: "Set CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY, and DATABASE_URL before using intake." }, 503);
   }
-  if (!(await hasSession(c))) {
-    const status = accessConfigured(c.env) || c.env.APP_PASSWORD?.trim() ? 401 : 503;
-    const error = status === 503
-      ? "Set APP_PASSWORD, or put Cloudflare Access in front of this worker."
-      : "Sign in required.";
-    return c.json({ error }, status);
-  }
+  return clerkMiddleware({ secretKey: c.env.CLERK_SECRET_KEY, publishableKey: c.env.CLERK_PUBLISHABLE_KEY })(c, next);
+});
+
+// Every route below runs as one signed-in user inside one tenant (their active Clerk Organization).
+app.use("/api/*", async (c, next) => {
+  const auth = getAuth(c);
+  if (!auth.userId) return c.json({ error: "Sign in required." }, 401);
+  if (!auth.orgId) return c.json({ error: "Choose an organization to continue.", code: "no_org" }, 403);
+  const tenant = await tenantForOrg(c.env, auth.orgId);
+  if (!tenant) return c.json({ error: "This organization has not been set up for intake yet.", code: "no_tenant" }, 403);
+  c.set("tenant", tenant);
+  c.set("tenantEnv", tenantEnv(c.env, tenant));
+  c.set("userId", auth.userId);
+  c.set("orgRole", auth.orgRole ?? null);
   await next();
 });
 
 app.get("/api/session", (c) => {
   return c.json({
     ok: true,
-    via: accessConfigured(c.env) ? "access" : "passphrase",
+    via: "clerk",
+    tenant: c.var.tenant.name,
+    role: c.var.orgRole,
     cap: LISTED_CAP,
-    baseId: c.env.AIRTABLE_BASE_ID,
-    tableId: c.env.AIRTABLE_TABLE_ID,
+    baseId: c.var.tenant.airtableBaseId,
+    tableId: c.var.tenant.airtableTableId,
     games: GAMES,
     sets: SETS,
     finishes: FINISHES,
@@ -70,24 +91,10 @@ app.get("/api/session", (c) => {
   });
 });
 
-app.post("/api/login", async (c) => {
-  const body = await readJson(c);
-  if (!body.ok) return c.json({ error: body.error }, 400);
-  const password = typeof body.value.password === "string" ? body.value.password : "";
-  const result = await login(c, password);
-  if (!result.ok) return c.json({ error: result.error }, result.status);
-  return c.json({ ok: true });
-});
-
-app.post("/api/logout", (c) => {
-  logout(c);
-  return c.json({ ok: true });
-});
-
 app.get("/api/summary", async (c) => {
   const game = readGame(c.req.query("game"));
   if (!game) return c.json({ error: gameError() }, 400);
-  return c.json(await summary(c.env, game));
+  return c.json(await summary(c.var.tenantEnv, game));
 });
 
 app.get("/api/queue", async (c) => {
@@ -95,7 +102,7 @@ app.get("/api/queue", async (c) => {
   if (!isStatus(status)) return c.json({ error: "Status must be Waitlist, Listed, Sold, or Skip." }, 400);
   const game = readGame(c.req.query("game"));
   if (!game) return c.json({ error: gameError() }, 400);
-  const result = await listByStatus(c.env, status, game);
+  const result = await listByStatus(c.var.tenantEnv, status, game);
   return c.json(result);
 });
 
@@ -109,7 +116,7 @@ app.post("/api/intake", async (c) => {
 
   const choice = parsedBody.body.onDuplicate ?? "ask";
   if (choice !== "add") {
-    const matches = await findDuplicates(c.env, draft.card);
+    const matches = await findDuplicates(c.var.tenantEnv, draft.card);
     if (matches.length > 0) {
       if (choice === "ask" || (choice === "merge" && matches.length > 1 && !parsedBody.body.mergeRecordId)) {
         return c.json(
@@ -125,14 +132,16 @@ app.post("/api/intake", async (c) => {
         ? matches.find((match) => match.id === parsedBody.body.mergeRecordId)
         : matches[0];
       if (!target) return c.json({ error: "That row is not a matching Waitlist or Listed card." }, 400);
-      const card = await mergeQty(c.env, target.id, draft.card.qty);
+      const card = await mergeQty(c.var.tenantEnv, target.id, draft.card.qty);
+      audit(c, "merge", [card]);
       backgroundEnrich(c, card.id);
       return c.json({ card, merged: true });
     }
   }
 
-  const [card] = await createCards(c.env, [draft.card]);
+  const [card] = await createCards(c.var.tenantEnv, [draft.card]);
   if (!card) return c.json({ error: "Airtable did not return the new row." }, 502);
+  audit(c, "create", [card]);
   backgroundEnrich(c, card.id);
   return c.json({ card, merged: false }, 201);
 });
@@ -157,7 +166,7 @@ app.post("/api/intake/bulk", async (c) => {
   if (rows.length > 100) return c.json({ error: "Paste at most 100 cards at a time." }, 400);
 
   if (mode === "preview") {
-    const open = await listOpenPrintings(c.env, game).catch((error: unknown) => {
+    const open = await listOpenPrintings(c.var.tenantEnv, game).catch((error: unknown) => {
       if (error instanceof AirtableError && error.status === 503) return null;
       throw error;
     });
@@ -169,7 +178,7 @@ app.post("/api/intake/bulk", async (c) => {
     });
   }
 
-  const open = await listOpenPrintings(c.env, game);
+  const open = await listOpenPrintings(c.var.tenantEnv, game);
   const created: QueueCard[] = [];
   const merged: QueueCard[] = [];
   const skipped: { line: number; raw: string; reason: string }[] = [];
@@ -182,7 +191,7 @@ app.post("/api/intake/bulk", async (c) => {
     const batch = pending;
     pending = [];
     try {
-      const cards = await createCards(c.env, batch.map((item) => item.card));
+      const cards = await createCards(c.var.tenantEnv, batch.map((item) => item.card));
       cards.forEach((card) => {
         created.push(card);
         open.push(card);
@@ -241,7 +250,7 @@ app.post("/api/intake/bulk", async (c) => {
     const target = matches[0];
     if (!target) continue;
     try {
-      const updated = await mergeQty(c.env, target.id, row.card.qty);
+      const updated = await mergeQty(c.var.tenantEnv, target.id, row.card.qty);
       const index = open.findIndex((card) => card.id === updated.id);
       if (index >= 0) open[index] = updated;
       else open.push(updated);
@@ -253,8 +262,11 @@ app.post("/api/intake/bulk", async (c) => {
     }
   }
   await flush();
+  audit(c, "create", created);
+  audit(c, "merge", merged);
   if (created.length || merged.length) {
-    try { c.executionCtx.waitUntil((async () => { for (const m of merged) await enrichRecord(c.env, m.id).catch(() => null); await enrichPending(c.env).catch(() => null); })()); } catch { /* no ctx in tests */ }
+    const env = c.var.tenantEnv;
+    try { c.executionCtx.waitUntil((async () => { for (const m of merged) await enrichRecord(env, m.id).catch(() => null); await enrichPending(env).catch(() => null); })()); } catch { /* no ctx in tests */ }
   }
 
   return c.json({ preview: false, created, merged, skipped, errors });
@@ -263,12 +275,15 @@ app.post("/api/intake/bulk", async (c) => {
 app.patch("/api/cards/:id", async (c) => {
   const body = await readJson(c);
   if (!body.ok) return c.json({ error: body.error }, 400);
-  const card = await editCard(c.env, c.req.param("id"), body.value);
+  const card = await editCard(c.var.tenantEnv, c.req.param("id"), body.value);
+  audit(c, "edit", [card]);
   return c.json({ card });
 });
 
 app.delete("/api/cards/:id", async (c) => {
-  return c.json(await deleteCard(c.env, c.req.param("id")));
+  const result = await deleteCard(c.var.tenantEnv, c.req.param("id"));
+  if (result.deleted) audit(c, "delete", [{ id: result.id }]);
+  return c.json(result);
 });
 
 app.get("/api/preview", async (c) => {
@@ -281,7 +296,7 @@ app.get("/api/preview", async (c) => {
 });
 
 app.post("/api/enrich/:id", async (c) => {
-  const result = await enrichRecord(c.env, c.req.param("id"));
+  const result = await enrichRecord(c.var.tenantEnv, c.req.param("id"));
   return c.json(result);
 });
 
@@ -289,14 +304,14 @@ app.post("/api/enrich-listed", async (c) => {
   const game = readGame(c.req.query("game"));
   if (!game) return c.json({ error: gameError() }, 400);
   const offset = Number.parseInt(c.req.query("offset") ?? "0", 10) || 0;
-  return c.json(await enrichListedPage(c.env, game, offset));
+  return c.json(await enrichListedPage(c.var.tenantEnv, game, offset));
 });
 
 app.post("/api/enrich", async (c) => {
   // Run now for everything pending (up to 4 batches per click to stay inside request limits).
   let enriched = 0; let picked = 0; const failed: { id: string; error: string }[] = []; let remaining = false; let ai = false;
   for (let round = 0; round < 4; round++) {
-    const r = await enrichPending(c.env);
+    const r = await enrichPending(c.var.tenantEnv);
     enriched += r.enriched; picked += r.picked; failed.push(...r.failed); remaining = r.remaining; ai = r.ai;
     if (!r.remaining || r.enriched === 0) break;
   }
@@ -320,7 +335,7 @@ app.post("/api/hekla", async (c) => {
         : "Dustin greenlit the shortlist. Listing still happens in Hekla, not in this intake app.",
   };
 
-  const webhook = c.env.HEKLA_WEBHOOK_URL?.trim();
+  const webhook = c.var.tenantEnv.HEKLA_WEBHOOK_URL?.trim();
   if (!webhook) {
     return c.json({ delivered: false, copyText: payload.message, payload, mailto: mailtoLink(payload.message) });
   }
@@ -355,10 +370,7 @@ app.post("/api/hekla", async (c) => {
 app.get("*", async (c) => {
   const response = await c.env.ASSETS.fetch(c.req.raw);
   const headers = new Headers(response.headers);
-  headers.set(
-    "content-security-policy",
-    `default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data: ${PREVIEW_IMAGE_HOSTS.join(" ")}; connect-src 'self'; base-uri 'none'; form-action 'self'`,
-  );
+  headers.set("content-security-policy", contentSecurityPolicy(c.env, PREVIEW_IMAGE_HOSTS));
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-frame-options", "DENY");
@@ -374,23 +386,38 @@ app.onError((error, c) => {
   return c.json({ error: "Something went wrong." }, 500);
 });
 
-function backgroundEnrich(c: { executionCtx: { waitUntil(p: Promise<unknown>): void }; env: Env }, id: string): void {
-  try { c.executionCtx.waitUntil(enrichRecord(c.env, id).catch((e) => console.error("enrich failed", id, e instanceof Error ? e.message : e))); } catch { /* no ctx */ }
+type AppContext = Context<{ Bindings: Env; Variables: Variables }>;
+
+function backgroundEnrich(c: AppContext, id: string): void {
+  const env = c.var.tenantEnv;
+  try { c.executionCtx.waitUntil(enrichRecord(env, id).catch((e) => console.error("enrich failed", id, e instanceof Error ? e.message : e))); } catch { /* no ctx */ }
+}
+
+/** Best-effort trail of who changed what. A failed audit write never fails the request. */
+function audit(c: AppContext, action: AuditAction, cards: { id: string }[]): void {
+  const entries = cards.map((card) => ({ tenantId: c.var.tenant.id, userId: c.var.userId, action, recordId: card.id, snapshot: action === "delete" ? null : card }));
+  const work = recordAudit(c.env, entries).catch((e) => console.error("audit failed", action, e instanceof Error ? e.message : e));
+  try { c.executionCtx.waitUntil(work); } catch { /* no ctx */ }
 }
 
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil((async () => {
-      try {
-        const r = await enrichPending(env);
-        console.log("cron enrich", JSON.stringify({ picked: r.picked, enriched: r.enriched, failed: r.failed.length, ai: r.ai }));
-        // Failed Waitlist rows stay pending and are re-picked every run; always leave Listed a budget.
-        {
-          const l = await enrichPendingListed(env, Math.max(10, 25 - r.enriched));
-          if (l.picked) console.log("cron enrich listed", JSON.stringify({ picked: l.picked, enriched: l.enriched, failed: l.failed.length }));
-        }
-      } catch (e) { console.error("cron enrich failed", e instanceof Error ? e.message : e); }
+      let tenants: Tenant[];
+      try { tenants = await listTenants(env); } catch (e) { console.error("cron tenants failed", e instanceof Error ? e.message : e); return; }
+      for (const tenant of tenants) {
+        try {
+          const scoped = tenantEnv(env, tenant);
+          const r = await enrichPending(scoped);
+          console.log("cron enrich", JSON.stringify({ tenant: tenant.id, picked: r.picked, enriched: r.enriched, failed: r.failed.length, ai: r.ai }));
+          // Failed Waitlist rows stay pending and are re-picked every run; always leave Listed a budget.
+          {
+            const l = await enrichPendingListed(scoped, Math.max(10, 25 - r.enriched));
+            if (l.picked) console.log("cron enrich listed", JSON.stringify({ tenant: tenant.id, picked: l.picked, enriched: l.enriched, failed: l.failed.length }));
+          }
+        } catch (e) { console.error("cron enrich failed", tenant.id, e instanceof Error ? e.message : e); }
+      }
     })());
   },
 } satisfies ExportedHandler<Env>;

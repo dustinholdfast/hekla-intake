@@ -1,13 +1,11 @@
-# Hekla Lorcana intake — private Worker. Secrets are NOT stored here.
+# Hekla intake — multi-tenant Worker. Secrets are NOT stored here.
 #   wrangler secret put AIRTABLE_API_KEY
-#   wrangler secret put APP_PASSWORD
+#   wrangler secret put CLERK_SECRET_KEY      (sign-in; users and organizations live in Clerk)
+#   wrangler secret put DATABASE_URL          (Neon Postgres; tenants and audit log, see db/migrations)
 # Optional:
 #   wrangler secret put AIRTABLE_PAT          (used if AIRTABLE_API_KEY is unset)
-#   wrangler secret put SESSION_SECRET        (else the session key is derived from APP_PASSWORD)
-#   wrangler secret put HEKLA_WEBHOOK_URL     (notify-only; this app never lists cards)
-# Optional Cloudflare Access (non-secret). When both are set, Access replaces the passphrase:
-#   CF_ACCESS_TEAM_DOMAIN = "team.cloudflareaccess.com"
-#   CF_ACCESS_AUD = "<application audience tag>"
+#   wrangler secret put GEMINI_API_KEY        (AI rank adjustment; rules-only without it)
+# Each tenant's Airtable base, table and bot webhook are rows in the Neon tenants table, not vars.
 
 name = "hekla-intake"
 main = "src/index.ts"
@@ -26,6 +24,7 @@ crons = ["*/15 * * * *"]
 enabled = true
 head_sampling_rate = 1
 
+
 [vars]
-AIRTABLE_BASE_ID = "app4Tjz72sZtVMQyp"
-AIRTABLE_TABLE_ID = "tblvHPu7dgDHA91bc"
+# Public by design (it ships to the browser). Paste the key from Clerk dashboard > API keys.
+CLERK_PUBLISHABLE_KEY = "pk_test_Y3V0ZS1nYXItNzgwMi5jbGVyay5hY2NvdW50cy5kZXYk"

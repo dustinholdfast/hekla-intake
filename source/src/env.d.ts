@@ -1,11 +1,12 @@
-/** Secrets and optional Access settings. Non-secret IDs live in wrangler.toml. */
+/** Secrets and sign-in settings. Each tenant's Airtable base and table live in Neon (see src/tenants.ts). */
 interface Env {
+  /** Never Worker vars: tenantEnv() fills these from the signed-in tenant's row. */
+  AIRTABLE_BASE_ID: string;
+  AIRTABLE_TABLE_ID: string;
   AIRTABLE_API_KEY?: string;
   AIRTABLE_PAT?: string;
-  APP_PASSWORD?: string;
-  SESSION_SECRET?: string;
   HEKLA_WEBHOOK_URL?: string;
   GEMINI_API_KEY?: string;
-  CF_ACCESS_TEAM_DOMAIN?: string;
-  CF_ACCESS_AUD?: string;
+  CLERK_SECRET_KEY?: string;
+  DATABASE_URL?: string;
 }

@@ -15,15 +15,14 @@
   <p id="boot" class="boot">Opening intake…</p>
 
   <section id="login-view" class="login" hidden>
-    <form id="login-form" class="login-card" autocomplete="current-password">
+    <div class="login-card">
       <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
-      <h1>Unlock the waitlist</h1>
+      <h1>Sign in to intake</h1>
       <p>Private intake for Lorcana, Magic, Riftbound, Pokémon, and Yu-Gi-Oh!. Hekla ranks them. This app never lists on TCGPlayer.</p>
-      <label for="password">Passphrase</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required />
+      <div id="clerk-mount"></div>
       <p id="login-error" class="error" role="alert"></p>
-      <button class="primary" type="submit">Unlock intake</button>
-    </form>
+      <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
+    </div>
   </section>
 
   <div id="app-view" class="app" hidden>
@@ -31,7 +30,7 @@
     <aside>
       <div class="brand-row">
         <img class="wordmark brand-full" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" /><img class="brand-icon" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
-        <button id="logout" class="ghost tiny" type="button">Lock</button>
+        <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
       <nav aria-label="Queue">
         <button type="button" data-go="form">Intake</button>

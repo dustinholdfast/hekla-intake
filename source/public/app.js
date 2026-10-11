@@ -25,8 +25,8 @@ const views = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
-  $("login-form").addEventListener("submit", onLogin);
   $("logout").addEventListener("click", onLogout);
+  $("login-signout").addEventListener("click", onLogout);
   $("add-form").addEventListener("submit", onAdd);
   $("add-form").addEventListener("change", saveDefaults);
   $("open-bulk").addEventListener("click", () => {
@@ -73,12 +73,67 @@ document.addEventListener("DOMContentLoaded", () => {
   boot();
 });
 
+let clerkLoading = null;
+
+function loadClerk() {
+  clerkLoading ||= startClerk();
+  return clerkLoading;
+}
+
+async function startClerk() {
+  const { data } = await api("/api/config");
+  if (!data.clerkPublishableKey || !data.clerkFrontendApi) throw new Error("Sign-in is not configured.");
+  const base = `https://${data.clerkFrontendApi}/npm/@clerk`;
+  await loadScript(`${base}/ui@1/dist/ui.browser.js`);
+  await loadScript(`${base}/clerk-js@6/dist/clerk.browser.js`, data.clerkPublishableKey);
+  await window.Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+  return window.Clerk;
+}
+
+function loadScript(src, publishableKey) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.crossOrigin = "anonymous";
+    if (publishableKey) script.dataset.clerkPublishableKey = publishableKey;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Could not load sign-in."));
+    document.head.appendChild(script);
+  });
+}
+
+function showOrganizations(clerk, message) {
+  show("login");
+  $("login-error").textContent = message || "";
+  clerk.mountOrganizationList($("clerk-mount"), {
+    hidePersonal: true,
+    afterSelectOrganizationUrl: "/",
+    afterCreateOrganizationUrl: "/",
+  });
+}
+
 async function boot() {
-  const { response, data } = await api("/api/session");
-  if (response.status === 401 || response.status === 503) {
+  let clerk;
+  try {
+    clerk = await loadClerk();
+  } catch (error) {
     show("login");
-    if (response.status === 503) $("login-error").textContent = data.error || "Sign-in is not configured.";
-    $("password").focus();
+    $("login-error").textContent = error.message || "Could not load sign-in.";
+    return;
+  }
+  if (!clerk.user) {
+    show("login");
+    clerk.mountSignIn($("clerk-mount"));
+    return;
+  }
+  $("login-signout").hidden = false;
+  if (!clerk.organization) {
+    showOrganizations(clerk, "");
+    return;
+  }
+  const { response, data } = await api("/api/session");
+  if (response.status === 403) {
+    showOrganizations(clerk, data.error);
     return;
   }
   if (!response.ok) {
@@ -263,27 +318,9 @@ function saveDefaults() {
   }
 }
 
-async function onLogin(event) {
-  event.preventDefault();
-  $("login-error").textContent = "";
-  const { response, data } = await api("/api/login", {
-    method: "POST",
-    body: JSON.stringify({ password: $("password").value }),
-  });
-  if (!response.ok) {
-    $("login-error").textContent = data.error || "Could not sign in.";
-    return;
-  }
-  $("password").value = "";
-  show("boot");
-  views.boot.textContent = "Opening intake…";
-  await boot();
-}
-
 async function onLogout() {
-  await api("/api/logout", { method: "POST", body: "{}" });
-  show("login");
-  $("password").focus();
+  await window.Clerk?.signOut();
+  location.assign("/");
 }
 
 function cardPayload(extra) {
@@ -449,7 +486,7 @@ async function loadQueue() {
   const { response, data } = await api(`/api/queue?status=${encodeURIComponent(status)}&game=${encodeURIComponent(game)}`);
   if (generation !== queueGeneration) return;
   if (response.status === 401) {
-    show("login");
+    location.reload();
     return;
   }
   if (!response.ok) {
@@ -1096,6 +1133,9 @@ async function copyHekla() {
 async function api(path, options = {}) {
   const headers = { accept: "application/json" };
   if (options.body) headers["content-type"] = "application/json";
+  // The session cookie can go stale in a background tab; getToken() always returns a fresh token.
+  const token = await window.Clerk?.session?.getToken().catch(() => null);
+  if (token) headers.authorization = `Bearer ${token}`;
   const response = await fetch(path, { ...options, headers, credentials: "same-origin" });
   let data = {};
   try {

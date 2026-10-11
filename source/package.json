@@ -12,6 +12,8 @@
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {
+    "@clerk/hono": "^0.1.88",
+    "@neondatabase/serverless": "^1.2.0",
     "hono": "^4.9.6"
   },
   "devDependencies": {
