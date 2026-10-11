@@ -14,6 +14,8 @@ import {
   listByStatus,
   listOpenPrintings,
   mergeQty,
+  rescanPage,
+  rescanSlotOffset,
   summary,
   type QueueCard,
 } from "./airtable.ts";
@@ -304,6 +306,7 @@ app.patch("/api/cards/:id", async (c) => {
   if (!body.ok) return c.json({ error: body.error }, 400);
   const card = await editCard(c.var.tenantEnv, c.req.param("id"), body.value);
   audit(c, "edit", [card]);
+  backgroundEnrich(c, card.id); // a new finish or condition changes the price and rank
   return c.json({ card });
 });
 
@@ -332,6 +335,13 @@ app.post("/api/enrich-listed", async (c) => {
   if (!game) return c.json({ error: gameError() }, 400);
   const offset = Number.parseInt(c.req.query("offset") ?? "0", 10) || 0;
   return c.json(await enrichListedPage(c.var.tenantEnv, game, offset));
+});
+
+app.post("/api/rescan", async (c) => {
+  const game = readGame(c.req.query("game"));
+  if (!game) return c.json({ error: gameError() }, 400);
+  const offset = Number.parseInt(c.req.query("offset") ?? "0", 10) || 0;
+  return c.json(await rescanPage(c.var.tenantEnv, game, offset));
 });
 
 app.post("/api/enrich", async (c) => {
@@ -443,6 +453,9 @@ export default {
             const l = await enrichPendingListed(scoped, Math.max(10, 25 - r.enriched));
             if (l.picked) console.log("cron enrich listed", JSON.stringify({ tenant: tenant.id, picked: l.picked, enriched: l.enriched, failed: l.failed.length }));
           }
+          // Then re-check prices on one page of already-sorted rows; the page moves on every run.
+          const s = await rescanPage(scoped, null, (total) => rescanSlotOffset(total, Date.now()));
+          console.log("cron rescan", JSON.stringify({ tenant: tenant.id, offset: s.offset, total: s.total, scanned: s.scanned, changed: s.changed.length, failed: s.failed.length }));
         } catch (e) { console.error("cron enrich failed", tenant.id, e instanceof Error ? e.message : e); }
       }
     })());

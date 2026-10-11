@@ -97,7 +97,7 @@ export async function editCard(env: Env, recordId: string, input: EditInput): Pr
 }
 
 /* ---------- Auto-sort enrichment ---------- */
-import { assertEnrichFields, enrichOne, type EnrichMode, type EnrichResult } from "./enrich.ts";
+import { assertEnrichFields, enrichOne, lookupCatalog, priceMove, type EnrichMode, type EnrichResult } from "./enrich.ts";
 export const ENRICH_BATCH = 25;
 
 /** Listed qty for one game — matches the per-game L1 cap card in the UI. */
@@ -181,6 +181,45 @@ export async function enrichPendingListed(env: Env, limit = ENRICH_BATCH): Promi
   const all = (body.records ?? []).map(toQueueCard);
   const summary = await enrichCards(env, all.slice(0, limit), "listed");
   return { ...summary, remaining: all.length > limit };
+}
+
+/**
+ * Re-scan: re-check the catalog price of open (Waitlist and Listed) rows and re-rank only the ones whose
+ * price moved, or that were never sorted. Unchanged rows cost one catalog lookup and no AI call or write.
+ */
+export const RESCAN_BATCH = 20;
+export type PriceMove = { id: string; name: string; status: string | null; priceFrom: number | null; priceTo: number | null; rankFrom: number | null; rankTo: number; recommendation: string };
+export type RescanSummary = { total: number; offset: number; done: number; nextOffset: number | null; scanned: number; changed: PriceMove[]; failed: { id: string; error: string }[]; ai: boolean };
+
+/** The page the cron scans this run: one page per 10-minute slot, wrapping, so every row comes round. */
+export function rescanSlotOffset(total: number, nowMs: number, size = RESCAN_BATCH, slotMs = 600_000): number {
+  const pages = Math.ceil(total / size);
+  return pages <= 1 ? 0 : (Math.floor(nowMs / slotMs) % pages) * size;
+}
+
+export async function rescanPage(env: Env, game: Game | null, offset: number | ((total: number) => number)): Promise<RescanSummary> {
+  const open = "OR({Status}='Waitlist',{Status}='Listed')";
+  const { records } = await listRecords(env, game ? `AND(${open},${gameFormula(game)})` : open);
+  const cards = records.map(toQueueCard)
+    .filter((c) => (c.status === "Waitlist" || c.status === "Listed") && (!game || cardMatchesGame(c.game, game)))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const { start, end, nextOffset } = pageWindow(cards.length, typeof offset === "function" ? offset(cards.length) : offset, RESCAN_BATCH);
+  const listedByGame = new Map<Game, number>();
+  const results: EnrichResult[] = []; const changed: PriceMove[] = []; const failed: { id: string; error: string }[] = [];
+  for (const card of cards.slice(start, end)) {
+    try {
+      const catalog = await lookupCatalog(card);
+      const move = priceMove(card.marketPriceUsd, catalog.price);
+      if (!move.changed && card.enrichedAt) continue;
+      const cardGame = effectiveGame(card.game) ?? "Lorcana";
+      if (!listedByGame.has(cardGame)) listedByGame.set(cardGame, await listedCount(env, cardGame));
+      const result = await enrichOne(card, listedByGame.get(cardGame) ?? 0, env, { mode: card.status === "Listed" ? "listed" : "waitlist", catalog });
+      results.push(result);
+      changed.push({ id: card.id, name: card.resolvedName || card.name || catalog.name || card.collectorNumber || card.id, status: card.status, priceFrom: move.from, priceTo: move.to, rankFrom: card.autoRank, rankTo: result.decision.rankScore, recommendation: result.decision.recommendation });
+    } catch (error) { failed.push({ id: card.id, error: error instanceof Error ? error.message : "lookup failed" }); }
+  }
+  await applyEnrichment(env, results);
+  return { total: cards.length, offset: start, done: end, nextOffset, scanned: end - start, changed, failed, ai: Boolean(env.GEMINI_API_KEY?.trim()) };
 }
 
 /** Delete a single Waitlist record by id. */

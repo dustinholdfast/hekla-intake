@@ -47,6 +47,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("dupe-cancel").addEventListener("click", () => $("dupe-dialog").close());
   $("ask-process").addEventListener("click", runAutoSort);
   $("rerank-listed").addEventListener("click", runRerankListed);
+  $("rescan").addEventListener("click", runRescan);
   $("ask-greenlight").addEventListener("click", () => openHekla("greenlight"));
   $("hekla-send").addEventListener("click", sendHekla);
   $("hekla-close").addEventListener("click", () => $("hekla-dialog").close());
@@ -471,6 +472,7 @@ async function loadQueue() {
 function markTabs() {
   $("rerank-listed").hidden = state.status !== "Listed";
   $("ask-process").hidden = state.status === "Listed";
+  $("rescan").hidden = state.status !== "Waitlist" && state.status !== "Listed";
   document.querySelectorAll("[data-status]").forEach((button) => {
     const on = button.dataset.status === state.status;
     button.classList.toggle("on", on);
@@ -660,6 +662,38 @@ async function runRerankListed() {
   }
 }
 
+async function runRescan() {
+  const btn = $("rescan");
+  const flash = $("queue-flash");
+  const game = state.game || "Lorcana";
+  const money = (value) => (value === null || value === undefined ? "no price" : `${Number(value).toFixed(2)}`);
+  btn.disabled = true;
+  $("queue-error").textContent = "";
+  let offset = 0, total = 0, failed = 0, ai = true;
+  const changed = [];
+  try {
+    for (let guard = 0; guard < 120; guard++) {
+      btn.textContent = total ? `Scanning ${offset}/${total}…` : "Scanning…";
+      const { response, data } = await api(`/api/rescan?game=${encodeURIComponent(game)}&offset=${offset}`, { method: "POST" });
+      if (!response.ok) throw new Error(data.error || "Scan failed");
+      total = data.total; failed += data.failed?.length || 0; ai = data.ai;
+      changed.push(...(data.changed || []));
+      flash.textContent = `Scanned ${data.done}/${total}…`;
+      if (data.nextOffset === null || data.nextOffset === undefined) break;
+      offset = data.nextOffset;
+    }
+    const moves = changed.slice(0, 5).map((move) => `${move.name} ${money(move.priceFrom)} → ${money(move.priceTo)} (rank ${move.rankFrom ?? "–"} → ${move.rankTo})`);
+    const more = changed.length > 5 ? ` and ${changed.length - 5} more` : "";
+    flash.textContent = `Scanned ${total} open ${game} cards: ${changed.length ? `${changed.length} updated — ${moves.join("; ")}${more}` : "no price changes"}${failed ? ` · ${failed} failed (retry)` : ""}${ai ? "" : " · AI off (rules only)"}.`;
+  } catch (error) {
+    $("queue-error").textContent = `${error.message || error} — stopped at ${offset}/${total}; click again to retry.`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Scan for changes";
+    previewCache.clear();
+    await refreshAll();
+  }
+}
+
 async function runAutoSort() {
   const btn = $("ask-process");
   const label = btn.textContent;
@@ -669,7 +703,7 @@ async function runAutoSort() {
   if (!response.ok) { $("queue-error").textContent = data.error || "Auto-sort failed."; return; }
   const bits = [`Auto-sorted ${data.enriched} of ${data.picked} pending`];
   if (data.failed?.length) bits.push(`${data.failed.length} will retry`);
-  if (data.remaining) bits.push("more pending — the 15-min job continues");
+  if (data.remaining) bits.push("more pending — the 10-min job continues");
   if (!data.ai) bits.push("AI off (rules only)");
   const flash = $("queue-flash");
   if (flash) { flash.textContent = bits.join(" · ") + "."; }

@@ -131,3 +131,31 @@ test("tcgcsv matcher picks by number then finish, never invents", () => {
   assert.equal(matchPrice(products, prices, { number: "77", name: "Nope", finish: "Normal" }).price, null);
   assert.equal(matchPrice(products, [{ productId: 1, subTypeName: "Normal", marketPrice: null }], { number: "1", name: "", finish: "Normal" }).price, null);
 });
+
+import { lookupCatalog as _lookupCatalog, priceMove } from "./enrich.ts";
+import { rescanSlotOffset, RESCAN_BATCH } from "./airtable.ts";
+test("price move: only a real, different catalog price counts as a change", () => {
+  assert.deepEqual(priceMove(1.2, 1.45), { changed: true, from: 1.2, to: 1.45 });
+  assert.deepEqual(priceMove(null, 0.5), { changed: true, from: null, to: 0.5 });
+  assert.equal(priceMove(1.2, 1.2).changed, false);
+  assert.equal(priceMove(0.1 + 0.2, 0.3).changed, false);
+  assert.deepEqual(priceMove(4.25, null), { changed: false, from: 4.25, to: 4.25 });
+  assert.deepEqual(priceMove(undefined, null), { changed: false, from: null, to: null });
+});
+test("cron re-scan visits every page in turn and wraps", () => {
+  const slot = 600_000; const seen = new Set<number>();
+  for (let run = 0; run < 8; run++) seen.add(rescanSlotOffset(157, run * slot));
+  assert.deepEqual([...seen].sort((a, b) => a - b), [0, 20, 40, 60, 80, 100, 120, 140]);
+  assert.equal(rescanSlotOffset(157, 8 * slot), 0);
+  assert.equal(rescanSlotOffset(RESCAN_BATCH, 5 * slot), 0);
+  assert.equal(rescanSlotOffset(0, 5 * slot), 0);
+});
+test("enrichOne re-ranks from a supplied catalog without a lookup, and still never writes Status", async () => {
+  assert.equal(typeof _lookupCatalog, "function");
+  const card = { id: "rec1", game: "Lorcana", setNumber: "1", setIdentifier: null, collectorNumber: "1", name: "Test", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: "Rare", resolvedName: "Test", marketPriceUsd: 1 };
+  const r = await enrichOne(card, 0, {}, { mode: "listed", catalog: { found: true, name: "Test", price: 9.5, priceSource: "Lorcast usd" }, fetcher: (() => { throw new Error("no network in a re-rank"); }) as never, now: () => new Date("2026-10-11T00:00:00Z") });
+  assert.equal(r.fields["Market Price USD"], 9.5);
+  assert.equal(r.fields.Status, undefined);
+  assert.match(String(r.fields["Rank Reason"]), /^(Keep|Watch|Pull):/);
+  assertEnrichFields(r.fields);
+});

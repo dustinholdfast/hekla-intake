@@ -198,8 +198,8 @@ const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 /* ---------- orchestration ---------- */
 export type EnrichResult = { id: string; fields: Record<string, string | number | null>; decision: Decision; catalog: Catalog };
 
-export async function enrichOne(card: EnrichInput, listed: number, env: { GEMINI_API_KEY?: string }, deps: { fetcher?: typeof fetch; now?: () => Date; mode?: EnrichMode } = {}): Promise<EnrichResult> {
-  const mode: EnrichMode = deps.mode ?? "waitlist";
+/** Catalog facts and the finish-matched market price for one card. Throws on an upstream 5xx/429 so the caller retries later. */
+export async function lookupCatalog(card: EnrichInput, deps: { fetcher?: typeof fetch } = {}): Promise<Catalog> {
   const game = effectiveGame(card.game) ?? "Lorcana";
   const q: PreviewQuery = { game, set: (game === "Lorcana" ? card.setNumber : card.setIdentifier) ?? "", number: card.collectorNumber ?? "", name: (card.resolvedName || card.name || "").slice(0, 120) };
   const preview = await RESOLVERS[game](q); // throws on upstream 5xx/429 → caller retries later
@@ -208,6 +208,19 @@ export async function enrichOne(card: EnrichInput, listed: number, env: { GEMINI
     const t = await tcgcsvPrice(TCGCSV_CATEGORY.Riftbound, card.setIdentifier ?? "", { number: card.collectorNumber ?? "", name: catalog.name || card.resolvedName || card.name || "", finish: card.finish }, deps.fetcher);
     catalog = { ...catalog, price: t.price, priceSource: t.source, ...(catalog.found ? {} : t.productName ? { found: true, name: t.productName } : {}) };
   }
+  return catalog;
+}
+
+/** Has the market price moved? A missing catalog price is never a change, so an existing price is never cleared. */
+export function priceMove(stored: number | null | undefined, catalogPrice: number | null): { changed: boolean; from: number | null; to: number | null } {
+  const from = stored ?? null;
+  if (catalogPrice === null) return { changed: false, from, to: from };
+  return { changed: from === null || Math.round(from * 100) !== Math.round(catalogPrice * 100), from, to: catalogPrice };
+}
+
+export async function enrichOne(card: EnrichInput, listed: number, env: { GEMINI_API_KEY?: string }, deps: { fetcher?: typeof fetch; now?: () => Date; mode?: EnrichMode; catalog?: Catalog } = {}): Promise<EnrichResult> {
+  const mode: EnrichMode = deps.mode ?? "waitlist";
+  const catalog = deps.catalog ?? await lookupCatalog(card, deps);
   const rarity = (card.rarity as RarityChoice | null) || mapRarity(catalog.sourceRarity);
   const priceForRank = catalog.price ?? card.marketPriceUsd ?? null;
   const base = baseRank(priceForRank, card.costBasisUsd, card.condition, rarity);
