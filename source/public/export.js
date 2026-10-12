@@ -143,11 +143,12 @@ async function sendCardTrader() {
       }
       renderCardTraderRows();
     }
-    $("ct-result").textContent = `Listed ${listed} card${listed === 1 ? "" : "s"} on CardTrader${failed ? ` · ${failed} not listed, see the Check column` : ""}.`;
+    $("ct-result").textContent = `Listed ${listed} card${listed === 1 ? "" : "s"} on CardTrader and moved ${listed === 1 ? "it" : "them"} to Listed${failed ? ` · ${failed} not listed, see the Check column` : ""}.`;
   } catch (error) {
     $("ct-error").textContent = `${error.message || error} Listed ${listed} before stopping.`;
   } finally {
     ctExport.busy = false;
     renderCardTraderRows();
+    if (listed) await refreshAll(); // listed cards have moved from Waitlist to Listed
   }
 }

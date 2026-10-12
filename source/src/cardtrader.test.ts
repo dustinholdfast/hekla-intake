@@ -60,3 +60,8 @@ test("creating a product sends exactly the approved product and reports what Car
   assert.deepEqual(calls, [{ url: "https://api.cardtrader.com/api/v2/products", method: "POST", body: JSON.stringify(row.product), auth: "Bearer tok" }]);
   await assert.rejects(createProduct("tok", row.product, (async () => new Response(JSON.stringify({ error: "price too low" }), { status: 422 })) as never), /CardTrader said: price too low/);
 });
+
+import { cardTraderListingFields } from "./airtable.ts";
+test("a confirmed listing writes the listing id and Status = Listed, and nothing else", () => {
+  assert.deepEqual(cardTraderListingFields(19799784), { "CardTrader Listing ID": "19799784", Status: "Listed" });
+});

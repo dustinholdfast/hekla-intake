@@ -1,7 +1,7 @@
 /**
  * CardTrader export. Matches Waitlist cards to CardTrader blueprints and, only after the seller approves a
  * batch, lists them through the seller's own token. Prices are the stored market price, unchanged.
- * Nothing here runs on a schedule and nothing here changes Status.
+ * Nothing here runs on a schedule. A card's Status becomes Listed only after CardTrader confirms its listing.
  */
 import { riftboundNumberKey } from "./preview.ts";
 import { effectiveGame, type Game } from "./sets.ts";

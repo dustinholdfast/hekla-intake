@@ -223,8 +223,8 @@ export async function rescanPage(env: Env, game: Game | null, offset: number | (
 }
 
 /**
- * CardTrader export. The export reads the listing id alongside the usual fields and may write that one
- * field only. It is kept out of READ_FIELDS so a base without the field still loads its queue.
+ * CardTrader export. The export reads the listing id alongside the usual fields. It is kept out of
+ * READ_FIELDS so a base without the field still loads its queue.
  */
 export const CARDTRADER_FIELD = "CardTrader Listing ID";
 export type ExportQueueCard = QueueCard & { cardTraderListingId: string | null };
@@ -237,10 +237,17 @@ export async function cardsForExport(env: Env, recordIds: string[]): Promise<Exp
   const byId = new Map(records.map((r) => [r.id, { ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]) }]));
   return ids.flatMap((id) => { const card = byId.get(id); return card ? [card] : []; });
 }
+/**
+ * What a successful CardTrader listing writes: the listing id, and Status = Listed. This is the one place
+ * intake changes Status, at Dustin's request (Oct 11). It runs only after CardTrader confirms the listing.
+ */
+export function cardTraderListingFields(listingId: number): Record<string, string> {
+  return { [CARDTRADER_FIELD]: String(listingId), Status: "Listed" };
+}
 export async function recordCardTraderListing(env: Env, recordId: string, listingId: number): Promise<void> {
   if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
   const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
-  await airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields: { [CARDTRADER_FIELD]: String(listingId) }, typecast: false }) });
+  await airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields: cardTraderListingFields(listingId), typecast: false }) });
 }
 
 /** Delete a single Waitlist record by id. */

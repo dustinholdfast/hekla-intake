@@ -201,7 +201,7 @@ app.post("/api/export/cardtrader/send", async (c) => {
       }
       const result: (typeof results)[number] = { id: row.id, name: row.name, listed: true, listingId: listing.productId, price: row.price };
       try { await recordCardTraderListing(c.var.tenantEnv, row.id, listing.productId); }
-      catch { result.warning = `Listed as ${listing.productId}, but the listing id could not be saved to Airtable. Add it by hand so this card is not listed twice.`; }
+      catch { result.warning = `Listed as ${listing.productId}, but Airtable could not be updated. Set this row to Listed and add the listing id by hand so it is not listed twice.`; }
       results.push(result);
       audit(c, "list", [{ id: row.id, marketplace: "cardtrader", listingId: listing.productId, blueprintId: row.product.blueprint_id, price: row.price, quantity: row.quantity } as { id: string }]);
     } catch (error) {
