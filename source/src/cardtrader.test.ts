@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildRow, createProduct, expansionCode, matchBlueprint, type Blueprint, type ExportCard } from "./cardtrader.ts";
+import { buildRow, createProduct, expansionCode, marketPrice, matchBlueprint, type Blueprint, type ExportCard, type Offer } from "./cardtrader.ts";
 
 const conditionProp = { name: "condition", possible_values: ["Mint", "Near Mint", "Slightly Played", "Moderately Played", "Played", "Poor"] };
 const blueprints: Blueprint[] = [
@@ -9,7 +9,7 @@ const blueprints: Blueprint[] = [
   { id: 400534, name: "Order Rune", version: "VEN", category_id: 258, expansion_id: 4521, fixed_properties: { collector_number: "R06" }, editable_properties: [conditionProp, { name: "riftbound_foil", possible_values: [true, false] }] },
   { id: 499999, name: "Vendetta Booster Box", category_id: 259, expansion_id: 4521, fixed_properties: {}, editable_properties: [] },
 ];
-const card = (over: Partial<ExportCard>): ExportCard => ({ id: "recAAAAAAAAAAAAAA", game: "Riftbound", setNumber: null, setIdentifier: "VEN", collectorNumber: "006", name: "", resolvedName: "Oasis Raider", finish: "Normal", condition: "NM", qty: 2, status: "Waitlist", marketPriceUsd: 0.05, cardTraderListingId: null, ...over });
+const card = (over: Partial<ExportCard>): ExportCard => ({ id: "recAAAAAAAAAAAAAA", game: "Riftbound", setNumber: null, setIdentifier: "VEN", collectorNumber: "006", name: "", resolvedName: "Oasis Raider", finish: "Normal", condition: "NM", qty: 2, status: "Waitlist", marketPriceUsd: 0.05, priceSource: "CardTrader market (Near Mint non-foil, 160 offers)", cardTraderListingId: null, ...over });
 const match = (number: string) => { const m = matchBlueprint(blueprints, 258, number); return "blueprint" in m ? m.blueprint.name : m.reason; };
 
 test("sets map to CardTrader expansion codes", () => {
@@ -18,7 +18,8 @@ test("sets map to CardTrader expansion codes", () => {
   assert.equal(expansionCode("Lorcana", { setNumber: "13", setIdentifier: null }), "lor13");
   assert.equal(expansionCode("Lorcana", { setNumber: "Q2", setIdentifier: null }), "quest2");
   assert.equal(expansionCode("Lorcana", { setNumber: "P", setIdentifier: null }), null);
-  assert.equal(expansionCode("Pokémon", { setNumber: null, setIdentifier: "SV08" }), null);
+  assert.equal(expansionCode("Pokémon", { setNumber: null, setIdentifier: "SV08" }), "sv08");
+  assert.equal(expansionCode("Magic: The Gathering", { setNumber: null, setIdentifier: "" }), null);
 });
 test("a plain number matches the main-set card, never the showcase card or the rune", () => {
   assert.equal(match("006"), "Oasis Raider");
@@ -41,6 +42,8 @@ test("rows that should not be listed are held back with a reason", () => {
   const reason = (over: Partial<ExportCard>, bp = blueprints[0]!) => { const r = buildRow(card(over), bp); return r.ready ? "ready" : r.reason; };
   assert.match(reason({ marketPriceUsd: null }), /No market price/);
   assert.match(reason({ marketPriceUsd: 0 }), /No market price/);
+  assert.match(reason({ priceSource: "Lorcast usd" }), /not from CardTrader yet/);
+  assert.match(reason({ priceSource: "CardTrader: no Near Mint foil offers in English right now; kept existing price" }), /not from CardTrader yet/);
   assert.match(reason({ condition: "XX" }), /condition XX/);
   assert.match(reason({ resolvedName: "Lux, Crownguard" }), /not "Lux, Crownguard"/);
   assert.match(reason({ collectorNumber: "SP6", resolvedName: "Lux, Crownguard", finish: "Normal" }, blueprints[1]), /single finish/);
@@ -64,4 +67,20 @@ test("creating a product sends exactly the approved product and reports what Car
 import { cardTraderListingFields } from "./airtable.ts";
 test("a confirmed listing writes the listing id and Status = Listed, and nothing else", () => {
   assert.deepEqual(cardTraderListingFields(19799784), { "CardTrader Listing ID": "19799784", Status: "Listed" });
+});
+
+const offer = (cents: number, condition: string, foil: boolean | undefined, language = "en", currency = "USD"): Offer => ({ price: { cents, currency }, properties_hash: { condition, riftbound_language: language, ...(foil === undefined ? {} : { riftbound_foil: foil }) } });
+test("market price is the median of the five cheapest matching offers", () => {
+  const offers = [offer(2, "Near Mint", false), offer(14, "Near Mint", false), offer(14, "Near Mint", false), offer(15, "Near Mint", false), offer(16, "Near Mint", false), offer(25, "Near Mint", false), offer(329, "Near Mint", false),
+    offer(1, "Near Mint", true), offer(1, "Slightly Played", false), offer(1, "Near Mint", false, "fr")];
+  assert.deepEqual(marketPrice(offers, { condition: "Near Mint", foil: false }), { price: 0.14, offers: 7, currency: "USD" }); // one $0.02 lowball does not set the price
+  assert.equal(marketPrice(offers, { condition: "Near Mint", foil: true })?.price, 0.01);
+  assert.equal(marketPrice(offers, { condition: "Slightly Played", foil: false })?.offers, 1);
+  assert.equal(marketPrice(offers, { condition: "Poor", foil: false }), null);
+  assert.equal(marketPrice([], { condition: "Near Mint", foil: false }), null);
+});
+test("a single-finish card is priced whatever finish the row says", () => {
+  const offers = [offer(2000, "Near Mint", undefined), offer(2165, "Near Mint", undefined), offer(2300, "Near Mint", undefined)];
+  assert.equal(marketPrice(offers, { condition: "Near Mint", foil: null })?.price, 21.65);
+  assert.equal(marketPrice(offers, { condition: "Near Mint", foil: true })?.price, 21.65);
 });

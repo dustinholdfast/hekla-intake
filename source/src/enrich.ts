@@ -1,11 +1,11 @@
 /**
- * Auto-sort: rarity/type (catalog), market price (real sources only), rank + recommendation.
+ * Auto-sort: rarity/type (catalog), market price (CardTrader only), rank + recommendation.
  * Rank = deterministic base (price, margin, condition, rarity) adjusted by Gemini within ±20.
  * Never writes Status. Recommendation is advisory.
  */
-import { tcgcsvPrice, TCGCSV_CATEGORY } from "./tcgcsv.ts";
+import { cardTraderPrice, type PriceLookup } from "./pricing.ts";
 import { RESOLVERS, type PreviewQuery } from "./preview.ts";
-import { effectiveGame, LISTED_CAP, type Game } from "./sets.ts";
+import { effectiveGame, type Game } from "./sets.ts";
 
 type J = Record<string, any>;
 export type Recommendation = "List" | "Hold" | "Skip";
@@ -34,41 +34,21 @@ export function mapRarity(raw: string | undefined | null): RarityChoice | null {
   if (r === "rare") return "Rare";
   return "Special";
 }
-const num = (v: unknown): number | null => { const n = typeof v === "string" ? Number.parseFloat(v) : typeof v === "number" ? v : NaN; return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
-const isFoil = (finish: string | null) => finish === "Foil" || finish === "Enchanted" || finish === "Special";
-
-export function extractCatalog(game: Game, raw: J | undefined, finish: string | null): Catalog {
-  if (!raw) return { found: false, price: null, priceSource: "price unavailable (no catalog match)" };
-  const foil = isFoil(finish);
+/** Name, type and rarity from the game's catalog. The price is filled in afterwards from CardTrader. */
+export function extractCatalog(game: Game, raw: J | undefined): Catalog {
+  const none = { price: null, priceSource: "" };
+  if (!raw) return { found: false, ...none };
   switch (game) {
-    case "Lorcana": {
-      const p = raw.prices ?? {};
-      const pick = foil ? num(p.usd_foil) : num(p.usd);
-      const price = pick ?? null;
-      return { found: true, name: [raw.name, raw.version].filter(Boolean).join(" - "), cardType: (raw.type ?? []).join(" "), sourceRarity: raw.rarity, price,
-        priceSource: price !== null ? `Lorcast ${foil ? "usd_foil" : "usd"}` : `price unavailable (Lorcast has no ${foil ? "foil" : "normal"} price)` };
-    }
-    case "Magic: The Gathering": {
-      const p = raw.prices ?? {};
-      const price = foil ? (num(p.usd_foil) ?? num(p.usd_etched)) : num(p.usd);
-      return { found: true, name: raw.name, cardType: raw.type_line ?? raw.card_faces?.[0]?.type_line, sourceRarity: raw.rarity, price,
-        priceSource: price !== null ? `Scryfall ${foil ? "usd_foil" : "usd"}` : `price unavailable (Scryfall has no ${foil ? "foil" : "normal"} price)` };
-    }
-    case "Pokémon": {
-      const prices: J = raw.tcgplayer?.prices ?? {};
-      const order = foil ? ["holofoil", "reverseHolofoil", "1stEditionHolofoil", "unlimitedHolofoil"] : ["normal", "unlimited", "1stEditionNormal", "holofoil"];
-      let price: number | null = null; let variant = "";
-      for (const k of order) { const v = num(prices[k]?.market) ?? num(prices[k]?.mid); if (v !== null) { price = v; variant = k; break; } }
-      return { found: true, name: raw.name, cardType: [raw.supertype, ...(raw.subtypes ?? [])].filter(Boolean).join(" "), sourceRarity: raw.rarity, price,
-        priceSource: price !== null ? `pokemontcg.io TCGplayer ${variant}` : "price unavailable (no TCGplayer price on pokemontcg.io)" };
-    }
-    case "Yu-Gi-Oh!": {
-      const price = num(raw.card_prices?.[0]?.tcgplayer_price);
-      return { found: true, name: raw.name, cardType: [raw.type, raw.race].filter(Boolean).join(" · "), sourceRarity: raw.card_sets?.[0]?.set_rarity, price,
-        priceSource: price !== null ? "YGOPRODeck tcgplayer_price (card-level, any printing)" : "price unavailable (YGOPRODeck)" };
-    }
+    case "Lorcana":
+      return { found: true, name: [raw.name, raw.version].filter(Boolean).join(" - "), cardType: (raw.type ?? []).join(" "), sourceRarity: raw.rarity, ...none };
+    case "Magic: The Gathering":
+      return { found: true, name: raw.name, cardType: raw.type_line ?? raw.card_faces?.[0]?.type_line, sourceRarity: raw.rarity, ...none };
+    case "Pokémon":
+      return { found: true, name: raw.name, cardType: [raw.supertype, ...(raw.subtypes ?? [])].filter(Boolean).join(" "), sourceRarity: raw.rarity, ...none };
+    case "Yu-Gi-Oh!":
+      return { found: true, name: raw.name, cardType: [raw.type, raw.race].filter(Boolean).join(" · "), sourceRarity: raw.card_sets?.[0]?.set_rarity, ...none };
     case "Riftbound":
-      return { found: true, name: raw.name, cardType: raw.classification?.type, sourceRarity: raw.classification?.rarity, price: null, priceSource: "price unavailable (no free Riftbound price source)" };
+      return { found: true, name: raw.name, cardType: raw.classification?.type, sourceRarity: raw.classification?.rarity, ...none };
   }
 }
 
@@ -85,11 +65,10 @@ export function baseRank(price: number | null, cost: number | null, condition: s
   return Math.round(clamp(score, 0, 100));
 }
 
-export function rulesDecision(base: number, price: number | null, listed: number, cap = LISTED_CAP): Decision {
+export function rulesDecision(base: number, price: number | null): Decision {
   let recommendation: Recommendation; let reason: string;
   if (price === null) { recommendation = "Hold"; reason = "No market price available; review manually."; }
   else if (price < 1) { recommendation = "Skip"; reason = `Market price $${price.toFixed(2)} is below listing threshold.`; }
-  else if (listed >= cap) { recommendation = "Hold"; reason = `L1 cap full (${listed}/${cap}); hold until a slot opens.`; }
   else if (base >= 55) { recommendation = "List"; reason = `Strong score ${base} at $${price.toFixed(2)}.`; }
   else if (base >= 30) { recommendation = "Hold"; reason = `Middling score ${base} at $${price.toFixed(2)}.`; }
   else { recommendation = "Skip"; reason = `Low score ${base} at $${price.toFixed(2)}.`; }
@@ -129,37 +108,35 @@ export const LISTED_LABELS: Record<Recommendation, string> = { List: "Keep", Hol
 export function listedRulesDecision(base: number, price: number | null): Decision {
   let recommendation: Recommendation; let reason: string;
   if (price === null) { recommendation = "Hold"; reason = "Watch: no market price found; verify the listing price."; }
-  else if (price < 0.25) { recommendation = "Skip"; reason = `Pull: $${price.toFixed(2)} is too low to hold a cap slot.`; }
+  else if (price < 0.25) { recommendation = "Skip"; reason = `Pull: $${price.toFixed(2)} is too low to be worth keeping listed.`; }
   else if (base >= 40) { recommendation = "List"; reason = `Keep: solid score ${base} at $${price.toFixed(2)}.`; }
   else { recommendation = "Hold"; reason = `Watch: modest score ${base} at $${price.toFixed(2)}.`; }
   return { rankScore: base, recommendation, reason, base, via: "rules" };
 }
 
-export function combine(base: number, gem: { rankScore: number; recommendation: Recommendation; reason: string }, listed: number, cap = LISTED_CAP, mode: EnrichMode = "waitlist"): Decision {
+export function combine(base: number, gem: { rankScore: number; recommendation: Recommendation; reason: string }): Decision {
   const rankScore = Math.round(clamp(base + clamp(gem.rankScore - base, -20, 20), 0, 100));
-  let recommendation = gem.recommendation; let reason = gem.reason;
-  if (mode === "waitlist" && recommendation === "List" && listed >= cap) { recommendation = "Hold"; reason = `Cap full (${listed}/${cap}). ${reason}`.slice(0, 140); }
-  return { rankScore, recommendation, reason, base, via: "gemini" };
+  return { rankScore, recommendation: gem.recommendation, reason: gem.reason, base, via: "gemini" };
 }
 
-function prompt(card: EnrichInput, cat: Catalog, base: number, listed: number, cap: number, price: number | null, mode: EnrichMode = "waitlist"): string {
+function prompt(card: EnrichInput, cat: Catalog, base: number, price: number | null, mode: EnrichMode = "waitlist"): string {
   const facts = {
     game: card.game, name: cat.name ?? card.name, cardType: cat.cardType ?? null, rarity: cat.sourceRarity ?? card.rarity, finish: card.finish,
-    condition: card.condition, qty: card.qty, costBasisUsd: card.costBasisUsd, marketPriceUsd: price, priceSource: cat.price !== null ? cat.priceSource : price !== null ? "existing Airtable price (Hekla)" : cat.priceSource,
-    listedCount: listed, listedCap: cap, slotsRemaining: Math.max(0, cap - listed), deterministicBaseRank: base,
+    condition: card.condition, qty: card.qty, costBasisUsd: card.costBasisUsd, marketPriceUsd: price, priceSource: cat.price !== null ? cat.priceSource : price !== null ? "existing Airtable price" : cat.priceSource,
+    deterministicBaseRank: base,
   };
   if (mode === "listed") return [
-    "This card is ALREADY LISTED by a small TCGplayer seller limited to a fixed number of listings per game (L1 cap).",
-    "Judge whether it deserves to keep its slot. rankScore 0-100: higher = stronger listing worth keeping; lower = weakest, pull first to free a slot.",
-    "recommendation: List = KEEP listed, Hold = WATCH/reprice, Skip = PULL (delist to free the slot). Use these exact words List/Hold/Skip.",
-    `Start from deterministicBaseRank and adjust by at most 20 points. ${listed >= cap ? "The cap is full, so be decisive about which cards are weakest." : ""} If marketPriceUsd is null, never claim a price.`,
+    "This card is ALREADY LISTED for sale on CardTrader by a small seller. marketPriceUsd is the going low price on CardTrader for the same card, finish and condition.",
+    "Judge whether it is worth keeping listed. rankScore 0-100: higher = stronger listing worth keeping; lower = weakest, not worth the handling.",
+    "recommendation: List = KEEP listed, Hold = WATCH/reprice, Skip = PULL (delist). Use these exact words List/Hold/Skip.",
+    "Start from deterministicBaseRank and adjust by at most 20 points. If marketPriceUsd is null, never claim a price.",
     "reason: one plain sentence, max 140 characters, starting with Keep:, Watch:, or Pull:. No markdown.",
     `Card: ${JSON.stringify(facts)}`,
   ].join("\n");
   return [
-    "You rank trading cards for a small TCGplayer seller who can only have a limited number of listings (L1 cap).",
-    "Decide rankScore (0-100, higher = list sooner) and a recommendation: List (worth a cap slot now), Hold (keep, revisit), Skip (not worth listing).",
-    `Start from deterministicBaseRank and adjust by at most 20 points. Consider margin over cost, condition, rarity, quantity, and remaining cap slots. If marketPriceUsd is null, never claim a price.`,
+    "You rank trading cards for a small seller who lists on CardTrader. marketPriceUsd is the going low price on CardTrader for the same card, finish and condition.",
+    "Decide rankScore (0-100, higher = list sooner) and a recommendation: List (worth listing now), Hold (keep, revisit), Skip (not worth listing).",
+    "Start from deterministicBaseRank and adjust by at most 20 points. Consider margin over cost, condition, rarity and quantity. If marketPriceUsd is null, never claim a price.",
     "reason: one plain sentence, max 140 characters, no markdown.",
     `Card: ${JSON.stringify(facts)}`,
   ].join("\n");
@@ -198,17 +175,17 @@ const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 /* ---------- orchestration ---------- */
 export type EnrichResult = { id: string; fields: Record<string, string | number | null>; decision: Decision; catalog: Catalog };
 
-/** Catalog facts and the finish-matched market price for one card. Throws on an upstream 5xx/429 so the caller retries later. */
-export async function lookupCatalog(card: EnrichInput, deps: { fetcher?: typeof fetch } = {}): Promise<Catalog> {
+/**
+ * Catalog facts for one card plus its CardTrader market price. Throws on an upstream 5xx/429 so the caller
+ * retries later. A missing catalog match does not stop pricing: CardTrader is matched by set and number.
+ */
+export async function lookupCatalog(card: EnrichInput, env: Env, deps: { price?: PriceLookup } = {}): Promise<Catalog> {
   const game = effectiveGame(card.game) ?? "Lorcana";
   const q: PreviewQuery = { game, set: (game === "Lorcana" ? card.setNumber : card.setIdentifier) ?? "", number: card.collectorNumber ?? "", name: (card.resolvedName || card.name || "").slice(0, 120) };
-  const preview = await RESOLVERS[game](q); // throws on upstream 5xx/429 → caller retries later
-  let catalog = extractCatalog(game, preview.found ? preview.raw : undefined, card.finish);
-  if (game === "Riftbound" && catalog.price === null) {
-    const t = await tcgcsvPrice(TCGCSV_CATEGORY.Riftbound, card.setIdentifier ?? "", { number: card.collectorNumber ?? "", name: catalog.name || card.resolvedName || card.name || "", finish: card.finish }, deps.fetcher);
-    catalog = { ...catalog, price: t.price, priceSource: t.source, ...(catalog.found ? {} : t.productName ? { found: true, name: t.productName } : {}) };
-  }
-  return catalog;
+  const preview = await RESOLVERS[game](q);
+  const catalog = extractCatalog(game, preview.found ? preview.raw : undefined);
+  const market = await (deps.price ?? cardTraderPrice)(env, card);
+  return { ...catalog, price: market.price, priceSource: market.source };
 }
 
 /** Has the market price moved? A missing catalog price is never a change, so an existing price is never cleared. */
@@ -218,17 +195,17 @@ export function priceMove(stored: number | null | undefined, catalogPrice: numbe
   return { changed: from === null || Math.round(from * 100) !== Math.round(catalogPrice * 100), from, to: catalogPrice };
 }
 
-export async function enrichOne(card: EnrichInput, listed: number, env: { GEMINI_API_KEY?: string }, deps: { fetcher?: typeof fetch; now?: () => Date; mode?: EnrichMode; catalog?: Catalog } = {}): Promise<EnrichResult> {
+export async function enrichOne(card: EnrichInput, env: Env, deps: { fetcher?: typeof fetch; now?: () => Date; mode?: EnrichMode; catalog?: Catalog; price?: PriceLookup } = {}): Promise<EnrichResult> {
   const mode: EnrichMode = deps.mode ?? "waitlist";
-  const catalog = deps.catalog ?? await lookupCatalog(card, deps);
+  const catalog = deps.catalog ?? await lookupCatalog(card, env, deps);
   const rarity = (card.rarity as RarityChoice | null) || mapRarity(catalog.sourceRarity);
   const priceForRank = catalog.price ?? card.marketPriceUsd ?? null;
   const base = baseRank(priceForRank, card.costBasisUsd, card.condition, rarity);
-  let decision = mode === "listed" ? listedRulesDecision(base, priceForRank) : rulesDecision(base, priceForRank, listed);
+  let decision = mode === "listed" ? listedRulesDecision(base, priceForRank) : rulesDecision(base, priceForRank);
   const key = env.GEMINI_API_KEY?.trim();
   if (key && catalog.found) {
-    const gem = validateGemini(await askGemini(key, prompt(card, catalog, base, listed, LISTED_CAP, priceForRank, mode), deps.fetcher));
-    if (gem) decision = combine(base, gem, listed, LISTED_CAP, mode);
+    const gem = validateGemini(await askGemini(key, prompt(card, catalog, base, priceForRank, mode), deps.fetcher));
+    if (gem) decision = combine(base, gem);
     else decision = { ...decision, reason: `${decision.reason} (rules; AI unavailable)`.slice(0, 140) };
   } else if (!catalog.found) {
     decision = { ...decision, recommendation: "Hold", reason: mode === "listed" ? "Watch: no catalog match for this set/number; check the entry." : "No catalog match for this set/number; check entry." };
@@ -241,7 +218,7 @@ export async function enrichOne(card: EnrichInput, listed: number, env: { GEMINI
     "Card Type": [catalog.cardType, catalog.sourceRarity && `(${catalog.sourceRarity})`].filter(Boolean).join(" ").slice(0, 200) || null,
     "Enriched At": (deps.now ?? (() => new Date()))().toISOString(),
   };
-  // Price: write only real catalog prices; never clear a price Hekla already set.
+  // Price: write only a real CardTrader price; never clear a price that is already there.
   if (catalog.price !== null) fields["Market Price USD"] = catalog.price;
   else if (card.marketPriceUsd != null) fields["Price Source"] = `${catalog.priceSource}; kept existing price`.slice(0, 200);
   if (!card.rarity && rarity) fields.Rarity = rarity;

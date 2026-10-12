@@ -14,10 +14,13 @@ export class CardTraderError extends Error {
   constructor(message: string, status: number) { super(message); this.status = status; }
 }
 
-/** CardTrader's game id and the category that holds single cards, for the games the export supports. */
-export const CARDTRADER_GAMES: Partial<Record<Game, { gameId: number; singlesCategoryId: number }>> = {
+/** CardTrader's game id and the category that holds single cards. */
+export const CARDTRADER_GAMES: Record<Game, { gameId: number; singlesCategoryId: number }> = {
   Lorcana: { gameId: 18, singlesCategoryId: 214 },
   Riftbound: { gameId: 22, singlesCategoryId: 258 },
+  "Magic: The Gathering": { gameId: 1, singlesCategoryId: 1 },
+  "Pokémon": { gameId: 5, singlesCategoryId: 73 },
+  "Yu-Gi-Oh!": { gameId: 4, singlesCategoryId: 44 },
 };
 
 export const CARDTRADER_CONDITION: Record<string, string> = { NM: "Near Mint", LP: "Slightly Played", MP: "Moderately Played", HP: "Played", DMG: "Poor" };
@@ -25,7 +28,7 @@ export const CARDTRADER_CONDITION: Record<string, string> = { NM: "Near Mint", L
 export type ExportCard = {
   id: string; game: string | null; setNumber: string | null; setIdentifier: string | null; collectorNumber: string | null;
   name: string; resolvedName: string | null; finish: string | null; condition: string | null; qty: number;
-  status: string | null; marketPriceUsd: number | null; cardTraderListingId: string | null;
+  status: string | null; marketPriceUsd: number | null; priceSource: string | null; cardTraderListingId: string | null;
 };
 export type Blueprint = { id: number; name: string; version?: string | null; category_id: number; expansion_id: number; fixed_properties?: J; editable_properties?: J[] };
 export type Product = { blueprint_id: number; price: number; quantity: number; error_mode: "strict"; user_data_field: string; properties: Record<string, string | boolean> };
@@ -33,10 +36,13 @@ export type ExportRow =
   | { id: string; ready: true; name: string; cardTraderName: string; condition: string; foil: boolean; quantity: number; price: number; product: Product }
   | { id: string; ready: false; name: string; reason: string };
 
-/** The CardTrader expansion code for a card's set, or null when the set has no single counterpart. */
-export function expansionCode(game: Game, card: Pick<ExportCard, "setNumber" | "setIdentifier">): string | null {
-  if (game === "Riftbound") return card.setIdentifier?.trim().toLowerCase() || null;
-  if (game === "Lorcana") {
+/**
+ * The CardTrader expansion code for a card's set, or null when the set has no single counterpart.
+ * Outside Lorcana the set identifier is used as typed, so it has to be CardTrader's own code for the set.
+ */
+export function expansionCode(game: Game, card: { setNumber?: string | null; setIdentifier?: string | null }): string | null {
+  if (game !== "Lorcana") return card.setIdentifier?.trim().toLowerCase() || null;
+  {
     const set = (card.setNumber ?? "").trim().toUpperCase();
     if (set === "1") return "ch1";
     if (/^\d+$/.test(set)) return `lor${Number(set)}`;
@@ -71,6 +77,7 @@ export function buildRow(card: ExportCard, blueprint: Blueprint): ExportRow {
   }
   const price = card.marketPriceUsd;
   if (price == null || !(price >= 0.01)) return no("No market price yet.");
+  if (!(card.priceSource ?? "").startsWith("CardTrader market")) return no("This price is not from CardTrader yet. Run Scan for changes first.");
   if (!Number.isInteger(card.qty) || card.qty < 1) return no("Quantity must be at least 1.");
   const editable = blueprint.editable_properties ?? [];
   const condition = CARDTRADER_CONDITION[card.condition ?? ""];
@@ -132,6 +139,71 @@ async function blueprintsFor(token: string, id: number): Promise<Blueprint[]> {
   return slim;
 }
 
+/** The one CardTrader blueprint for a card's game, set and printed number, or the reason there is none. */
+export async function findBlueprint(token: string, card: { game: string | null; setNumber?: string | null; setIdentifier?: string | null; collectorNumber: string | null }): Promise<{ blueprint: Blueprint } | { reason: string }> {
+  const game = effectiveGame(card.game);
+  if (!game) return { reason: `${card.game ?? "This game"} is not on CardTrader.` };
+  const config = CARDTRADER_GAMES[game];
+  const code = expansionCode(game, card);
+  const expansion = code ? await expansionId(token, config.gameId, code) : null;
+  if (!expansion) return { reason: code ? `CardTrader has no ${game} set with code ${code}.` : "This set has no single CardTrader counterpart." };
+  return matchBlueprint(await blueprintsFor(token, expansion), config.singlesCategoryId, card.collectorNumber);
+}
+
+/* ---------- market price ---------- */
+export type Offer = { price?: { cents?: number; currency?: string }; properties_hash?: J };
+export type MarketPrice = { price: number; offers: number; currency: string };
+
+/**
+ * The going low price: the median of the five cheapest offers for the same finish and condition, English only.
+ * One lowball listing cannot drag it down, and it stays close to what a buyer actually pays.
+ * Returns null when nobody offers this exact card, finish and condition.
+ */
+export function marketPrice(offers: Offer[], want: { condition: string; foil: boolean | null }): MarketPrice | null {
+  const matching = offers.filter((offer) => {
+    const props = offer.properties_hash ?? {};
+    const language = Object.entries(props).find(([key]) => key.endsWith("_language"))?.[1];
+    const foil = Object.entries(props).find(([key]) => key.endsWith("_foil"))?.[1];
+    return (language === undefined || language === "en") && props.condition === want.condition
+      && (want.foil === null || foil === undefined || Boolean(foil) === want.foil)
+      && typeof offer.price?.cents === "number" && offer.price.cents > 0;
+  });
+  if (matching.length === 0) return null;
+  const cheapest = matching.map((offer) => offer.price!.cents!).sort((a, b) => a - b).slice(0, 5);
+  return { price: cheapest[Math.floor((cheapest.length - 1) / 2)]! / 100, offers: matching.length, currency: String(matching[0]!.price?.currency ?? "") };
+}
+
+// CardTrader asks for about one marketplace call a second.
+let lastMarketCall = 0;
+async function marketplaceOffers(token: string, cacheKey: string, blueprintId: number): Promise<Offer[]> {
+  const cache = (globalThis as any).caches?.default as Cache | undefined;
+  const key = new Request(`https://hekla-cardtrader.cache/market/${cacheKey}/${blueprintId}`);
+  if (cache) { const hit = await cache.match(key); if (hit) return await hit.json() as Offer[]; }
+  const wait = lastMarketCall + 1000 - Date.now();
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  lastMarketCall = Date.now();
+  const body = await call(token, `/marketplace/products?blueprint_id=${blueprintId}&language=en`);
+  const offers: Offer[] = (Array.isArray(body[String(blueprintId)]) ? body[String(blueprintId)] : []).map((o: J) => ({ price: { cents: o.price?.cents, currency: o.price?.currency }, properties_hash: o.properties_hash }));
+  if (cache) await cache.put(key, new Response(JSON.stringify(offers), { headers: { "content-type": "application/json", "cache-control": "public, max-age=1800" } }));
+  return offers;
+}
+
+/** The CardTrader market price for one card, with a source line that always starts with "CardTrader". */
+export async function cardTraderMarket(token: string, cacheKey: string, card: { game: string | null; setNumber?: string | null; setIdentifier?: string | null; collectorNumber: string | null; finish: string | null; condition: string | null }): Promise<{ price: number | null; source: string }> {
+  const match = await findBlueprint(token, card);
+  if ("reason" in match) return { price: null, source: `CardTrader: ${match.reason.replace(/^CardTrader has /, "")}`.slice(0, 200) };
+  const condition = CARDTRADER_CONDITION[card.condition ?? ""];
+  if (!condition) return { price: null, source: `CardTrader: no price for condition ${card.condition ?? "blank"}` };
+  const wantFoil = card.finish === "Foil" || card.finish === "Special" || card.finish === "Enchanted";
+  const hasFoilSwitch = (match.blueprint.editable_properties ?? []).some((p) => typeof p.name === "string" && p.name.endsWith("_foil"));
+  const market = marketPrice(await marketplaceOffers(token, cacheKey, match.blueprint.id), { condition, foil: hasFoilSwitch ? wantFoil : null });
+  const what = `${condition}${hasFoilSwitch ? (wantFoil ? " foil" : " non-foil") : ""}`;
+  if (!market) return { price: null, source: `CardTrader: no ${what} offers in English right now` };
+  if (market.currency !== "USD") return { price: null, source: `CardTrader: prices are in ${market.currency || "another currency"}, not USD` };
+  const note = !hasFoilSwitch && !wantFoil ? "; single finish on CardTrader, check Finish" : "";
+  return { price: market.price, source: `CardTrader market (${what}, ${market.offers} offer${market.offers === 1 ? "" : "s"}${note})` };
+}
+
 /** What each card would become on CardTrader. Read-only: nothing is listed. */
 export async function previewExport(token: string, cards: ExportCard[]): Promise<ExportRow[]> {
   const rows: ExportRow[] = [];
@@ -140,13 +212,7 @@ export async function previewExport(token: string, cards: ExportCard[]): Promise
     const no = (reason: string) => { rows.push({ id: card.id, ready: false, name, reason }); };
     if (card.status !== "Waitlist") { no("Only Waitlist cards can be exported."); continue; }
     if (card.cardTraderListingId) { no(`Already listed on CardTrader (listing ${card.cardTraderListingId}).`); continue; }
-    const game = effectiveGame(card.game);
-    const config = game ? CARDTRADER_GAMES[game] : undefined;
-    if (!game || !config) { no(`${card.game ?? "This game"} is not set up for CardTrader export yet.`); continue; }
-    const code = expansionCode(game, card);
-    const expansion = code ? await expansionId(token, config.gameId, code) : null;
-    if (!expansion) { no(code ? `CardTrader has no ${game} set with code ${code}.` : "This set has no single CardTrader counterpart; list it by hand."); continue; }
-    const match = matchBlueprint(await blueprintsFor(token, expansion), config.singlesCategoryId, card.collectorNumber);
+    const match = await findBlueprint(token, card);
     if ("reason" in match) { no(match.reason); continue; }
     rows.push(buildRow(card, match.blueprint));
   }

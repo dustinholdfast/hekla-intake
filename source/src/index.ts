@@ -27,7 +27,7 @@ import { cleanToken, ConnectionError, connectionSecret, connectionsReady, connec
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
-import { canonicalGame, CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, LISTED_CAP, RARITIES, SETS, type Game } from "./sets.ts";
+import { canonicalGame, CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, RARITIES, SETS, type Game } from "./sets.ts";
 import { listTenantPlans, listTenants, recordAudit, setCompPlan, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
 
 type Variables = { tenant: Tenant; tenantEnv: Env; userId: string; orgRole: string | null };
@@ -105,7 +105,6 @@ app.get("/api/session", (c) => {
     role: c.var.orgRole,
     plan: c.var.tenant.plan,
     platformAdmin: isPlatformAdmin(c.env, c.var.userId),
-    cap: LISTED_CAP,
     baseId: c.var.tenant.airtableBaseId,
     tableId: c.var.tenant.airtableTableId,
     games: GAMES,

@@ -9,7 +9,7 @@ import {
   type DraftCard,
   type PrintingRef,
 } from "./fields.ts";
-import { effectiveGame, LISTED_CAP, setName, type Game, type Status } from "./sets.ts";
+import { effectiveGame, setName, type Game, type Status } from "./sets.ts";
 
 const READ_FIELDS = [
   "Card Name", "Resolved Name", "Game", "Set #", "Set Identifier", "Collector Number",
@@ -30,7 +30,7 @@ export type QueueCard = {
   marketPriceUsd: number | null; notes: string | null; priority: number | null; createdTime: string;
   autoRank: number | null; rarity: string | null; costBasisUsd: number | null; cardType: string | null; recommendation: string | null; rankReason: string | null; enrichedAt: string | null; priceSource: string | null;
 };
-export type Summary = { cap: number; listedQty: number; waitlistQty: number; remaining: number; counts: Record<Status, number>; truncated: boolean };
+export type Summary = { listedQty: number; waitlistQty: number; counts: Record<Status, number>; truncated: boolean };
 
 function tokenOf(env: Env): string { const token = env.AIRTABLE_API_KEY?.trim() || env.AIRTABLE_PAT?.trim(); if (!token) throw new AirtableError("Set AIRTABLE_API_KEY (or AIRTABLE_PAT) before intake can read or write.", 503); return token; }
 function endpoint(env: Env): string { const baseId = env.AIRTABLE_BASE_ID; const tableId = env.AIRTABLE_TABLE_ID; return `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableId)}`; }
@@ -69,7 +69,7 @@ function storedGame(value: unknown): string { const text = textField(value); ret
 function sortQueue(cards: QueueCard[], status: Status): QueueCard[] { const copy = [...cards]; copy.sort((a, b) => { if (status === "Waitlist") { const ar = a.autoRank ?? -1; const br = b.autoRank ?? -1; if (ar !== br) return br - ar; const ap = a.priority ?? Number.POSITIVE_INFINITY; const bp = b.priority ?? Number.POSITIVE_INFINITY; if (ap !== bp) return ap - bp; } if (status === "Listed") { const ar = a.autoRank ?? 101; const br = b.autoRank ?? 101; if (ar !== br) return ar - br; } return b.createdTime.localeCompare(a.createdTime); }); return copy; }
 
 export async function listByStatus(env: Env, status: Status, game: Game): Promise<{ cards: QueueCard[]; truncated: boolean }> { const formula = `AND({Status}=${formulaString(status)},${gameFormula(game)})`; const { records, truncated } = await listRecords(env, formula); const cards = records.map(toQueueCard).filter((card) => card.status === status && cardMatchesGame(card.game, game)); return { cards: sortQueue(cards, status), truncated }; }
-export async function summary(env: Env, game: Game): Promise<Summary> { const { records, truncated } = await listRecords(env, gameFormula(game), ["Status", "Qty", "Game"]); const counts: Record<Status, number> = { Waitlist: 0, Listed: 0, Sold: 0, Skip: 0 }; let listedQty = 0; let waitlistQty = 0; for (const record of records) { if (!cardMatchesGame(textField(record.fields.Game), game)) continue; const status = textField(record.fields.Status) as Status | null; const qty = numberField(record.fields.Qty) ?? 0; if (status && status in counts) counts[status] += 1; if (status === "Listed") listedQty += qty; if (status === "Waitlist") waitlistQty += qty; } return { cap: LISTED_CAP, listedQty, waitlistQty, remaining: LISTED_CAP - listedQty, counts, truncated }; }
+export async function summary(env: Env, game: Game): Promise<Summary> { const { records, truncated } = await listRecords(env, gameFormula(game), ["Status", "Qty", "Game"]); const counts: Record<Status, number> = { Waitlist: 0, Listed: 0, Sold: 0, Skip: 0 }; let listedQty = 0; let waitlistQty = 0; for (const record of records) { if (!cardMatchesGame(textField(record.fields.Game), game)) continue; const status = textField(record.fields.Status) as Status | null; const qty = numberField(record.fields.Qty) ?? 0; if (status && status in counts) counts[status] += 1; if (status === "Listed") listedQty += qty; if (status === "Waitlist") waitlistQty += qty; } return { listedQty, waitlistQty, counts, truncated }; }
 
 function orEquals(field: string, values: string[]): string { const clauses = [...new Set(values)].map((value) => `{${field}}=${formulaString(value)}`); return clauses.length === 1 ? (clauses[0] ?? "FALSE()") : `OR(${clauses.join(",")})`; }
 function setClause(card: PrintingRef): string { if (effectiveGame(card.game) === "Lorcana") return `{Set #}=${formulaString(card.setNumber ?? "")}`; const identifier = (card.setIdentifier ?? "").trim().toLowerCase(); return `LOWER({Set Identifier}&"")=${formulaString(identifier)}`; }
@@ -100,12 +100,6 @@ export async function editCard(env: Env, recordId: string, input: EditInput): Pr
 import { assertEnrichFields, enrichOne, lookupCatalog, priceMove, type EnrichMode, type EnrichResult } from "./enrich.ts";
 export const ENRICH_BATCH = 25;
 
-/** Listed qty for one game — matches the per-game L1 cap card in the UI. */
-async function listedCount(env: Env, game: Game): Promise<number> {
-  const { records } = await listRecords(env, `AND({Status}='Listed',${gameFormula(game)})`, ["Qty", "Status", "Game"]);
-  return records.filter((r) => cardMatchesGame(textField(r.fields.Game), game)).reduce((sum, r) => sum + (numberField(r.fields.Qty) ?? 0), 0);
-}
-
 async function applyEnrichment(env: Env, results: EnrichResult[]): Promise<number> {
   let written = 0;
   for (let i = 0; i < results.length; i += 10) {
@@ -120,15 +114,10 @@ export type EnrichSummary = { picked: number; enriched: number; failed: { id: st
 
 async function enrichCards(env: Env, cards: QueueCard[], mode: EnrichMode = "waitlist"): Promise<EnrichSummary> {
   const wanted = mode === "listed" ? "Listed" : "Waitlist";
-  const listedByGame = new Map<Game, number>();
   const results: EnrichResult[] = []; const failed: { id: string; error: string }[] = [];
   for (const card of cards) {
     if (card.status !== wanted) { failed.push({ id: card.id, error: `Not a ${wanted} row.` }); continue; }
-    try {
-      const game = effectiveGame(card.game) ?? "Lorcana";
-      if (!listedByGame.has(game)) listedByGame.set(game, await listedCount(env, game));
-      results.push(await enrichOne(card, listedByGame.get(game) ?? 0, env, { mode }));
-    }
+    try { results.push(await enrichOne(card, env, { mode })); }
     catch (error) { failed.push({ id: card.id, error: error instanceof Error ? error.message : "lookup failed" }); }
   }
   const enriched = await applyEnrichment(env, results);
@@ -184,12 +173,18 @@ export async function enrichPendingListed(env: Env, limit = ENRICH_BATCH): Promi
 }
 
 /**
- * Re-scan: re-check the catalog price of open (Waitlist and Listed) rows and re-rank only the ones whose
- * price moved, or that were never sorted. Unchanged rows cost one catalog lookup and no AI call or write.
+ * Re-scan: re-check the CardTrader price of open (Waitlist and Listed) rows and re-rank only the ones whose
+ * price moved, that were never sorted, or that were last priced from somewhere other than CardTrader.
+ * Unchanged rows cost the lookups and no AI call or write.
  */
 export const RESCAN_BATCH = 20;
 export type PriceMove = { id: string; name: string; status: string | null; priceFrom: number | null; priceTo: number | null; rankFrom: number | null; rankTo: number; recommendation: string };
 export type RescanSummary = { total: number; offset: number; done: number; nextOffset: number | null; scanned: number; changed: PriceMove[]; failed: { id: string; error: string }[]; ai: boolean };
+
+/** Rows last priced from any other source are re-assessed on the next scan, even if the number happens to match. */
+export function pricedByCardTrader(priceSource: string | null | undefined): boolean {
+  return (priceSource ?? "").startsWith("CardTrader");
+}
 
 /** The page the cron scans this run: one page per 10-minute slot, wrapping, so every row comes round. */
 export function rescanSlotOffset(total: number, nowMs: number, size = RESCAN_BATCH, slotMs = 600_000): number {
@@ -204,16 +199,13 @@ export async function rescanPage(env: Env, game: Game | null, offset: number | (
     .filter((c) => (c.status === "Waitlist" || c.status === "Listed") && (!game || cardMatchesGame(c.game, game)))
     .sort((a, b) => a.id.localeCompare(b.id));
   const { start, end, nextOffset } = pageWindow(cards.length, typeof offset === "function" ? offset(cards.length) : offset, RESCAN_BATCH);
-  const listedByGame = new Map<Game, number>();
   const results: EnrichResult[] = []; const changed: PriceMove[] = []; const failed: { id: string; error: string }[] = [];
   for (const card of cards.slice(start, end)) {
     try {
-      const catalog = await lookupCatalog(card);
+      const catalog = await lookupCatalog(card, env);
       const move = priceMove(card.marketPriceUsd, catalog.price);
-      if (!move.changed && card.enrichedAt) continue;
-      const cardGame = effectiveGame(card.game) ?? "Lorcana";
-      if (!listedByGame.has(cardGame)) listedByGame.set(cardGame, await listedCount(env, cardGame));
-      const result = await enrichOne(card, listedByGame.get(cardGame) ?? 0, env, { mode: card.status === "Listed" ? "listed" : "waitlist", catalog });
+      if (!move.changed && card.enrichedAt && pricedByCardTrader(card.priceSource)) continue;
+      const result = await enrichOne(card, env, { mode: card.status === "Listed" ? "listed" : "waitlist", catalog });
       results.push(result);
       changed.push({ id: card.id, name: card.resolvedName || card.name || catalog.name || card.collectorNumber || card.id, status: card.status, priceFrom: move.from, priceTo: move.to, rankFrom: card.autoRank, rankTo: result.decision.rankScore, recommendation: result.decision.recommendation });
     } catch (error) { failed.push({ id: card.id, error: error instanceof Error ? error.message : "lookup failed" }); }

@@ -68,8 +68,6 @@ export type Rarity = (typeof RARITIES)[number];
 export const STATUSES = ["Waitlist", "Listed", "Sold", "Skip"] as const;
 export type Status = (typeof STATUSES)[number];
 
-/** Airtable Listed qty compared with this cap. Not live TCGPlayer inventory. */
-export const LISTED_CAP = 100;
 
 export const DEFAULT_BASE_ID = "app4Tjz72sZtVMQyp";
 export const DEFAULT_TABLE_ID = "tblvHPu7dgDHA91bc";

@@ -2,6 +2,7 @@
 interface Env {
   /** Never Worker vars: tenantEnv() fills these from the signed-in tenant's row. */
   AIRTABLE_BASE_ID: string;
+  TENANT_ID?: string;
   AIRTABLE_TABLE_ID: string;
   AIRTABLE_API_KEY?: string;
   AIRTABLE_PAT?: string;

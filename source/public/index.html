@@ -18,7 +18,7 @@
     <div class="login-card">
       <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
       <h1>Sign in to intake</h1>
-      <p>Private intake for Lorcana, Magic, Riftbound, Pokémon, and Yu-Gi-Oh!. Hekla ranks them. This app never lists on TCGPlayer.</p>
+      <p>Private intake for Lorcana, Magic, Riftbound, Pokémon, and Yu-Gi-Oh!. Cards are priced from CardTrader and listed there only when you approve.</p>
       <div id="clerk-mount"></div>
       <p id="login-error" class="error" role="alert"></p>
       <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
@@ -39,11 +39,10 @@
         <button type="button" data-status="Sold">Sold <em data-count="Sold">0</em></button>
         <button type="button" data-status="Skip">Skip <em data-count="Skip">0</em></button>
       </nav>
-      <section class="cap" aria-label="Listing cap">
-        <div class="cap-label">L1 cap · <span data-cap-game>Lorcana</span> listed</div>
-        <div class="cap-num"><span data-cap="listed">–</span> <small>/ <span data-cap="max">100</span></small></div>
-        <div class="bar" aria-hidden="true"><i data-cap="bar" data-pct="0"></i></div>
-        <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> waitlist qty. Not live TCGPlayer inventory.</p>
+      <section class="cap" aria-label="Inventory">
+        <div class="cap-label"><span data-cap-game>Lorcana</span> listed on CardTrader</div>
+        <div class="cap-num"><span data-cap="listed">–</span> <small>cards</small></div>
+        <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> cards waiting on the Waitlist.</p>
         <p id="cap-error" class="error"></p>
       </section>
       <a class="airtable-link text-link" href="https://airtable.com/app4Tjz72sZtVMQyp/tblvHPu7dgDHA91bc" target="_blank" rel="noopener noreferrer">Open Waitlist in Airtable</a>
@@ -55,13 +54,12 @@
       <header class="top">
         <div>
           <h1>Intake</h1>
-          <p>Add cards for Hekla to rank. You greenlight listing separately — nothing here posts to TCGPlayer.</p>
+          <p>Add cards, price them from CardTrader, and list them there when you approve.</p>
         </div>
-        <section class="mobile-cap" aria-label="Listing cap">
-          <div class="cap-label">L1 cap · <span data-cap-game>Lorcana</span> listed</div>
-          <div class="cap-num"><span data-cap="listed">–</span> <small>/ <span data-cap="max">100</span></small></div>
-          <div class="bar" aria-hidden="true"><i data-cap="bar" data-pct="0"></i></div>
-          <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> waitlist qty. Not live TCGPlayer inventory.</p>
+        <section class="mobile-cap" aria-label="Inventory">
+          <div class="cap-label"><span data-cap-game>Lorcana</span> listed on CardTrader</div>
+          <div class="cap-num"><span data-cap="listed">–</span> <small>cards</small></div>
+          <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> cards waiting on the Waitlist.</p>
         </section>
       </header>
 
@@ -165,7 +163,7 @@
               <tbody id="queue-body"></tbody>
             </table>
           </div>
-          <p class="footnote">Listed, Sold, and Skip are shown so you can see where a card went. Intake moves a card to Listed only when you list it on CardTrader. Market price and rank are Hekla’s, shown only when Airtable already has them. <a class="airtable-link" href="https://airtable.com/app4Tjz72sZtVMQyp/tblvHPu7dgDHA91bc" target="_blank" rel="noopener noreferrer">Open the Waitlist table</a></p>
+          <p class="footnote">Listed, Sold, and Skip are shown so you can see where a card went. Intake moves a card to Listed only when you list it on CardTrader. Market price is the going low price on CardTrader. <a class="airtable-link" href="https://airtable.com/app4Tjz72sZtVMQyp/tblvHPu7dgDHA91bc" target="_blank" rel="noopener noreferrer">Open the Waitlist table</a></p>
         </section>
       </div>
     </main>
@@ -177,7 +175,7 @@
       <h3>Already in the queue</h3>
       <p id="dupe-copy">Same game, set, collector number, and finish is already Waitlist or Listed. Merging adds your quantity onto that row. Adding anyway creates a second row. Neither lists the card.</p>
       <div id="dupe-list" class="choice-list"></div>
-      <p id="dupe-listed" class="warn" hidden>A match is already Listed. Merging increases the Airtable listed quantity. It still does not create a TCGPlayer listing.</p>
+      <p id="dupe-listed" class="warn" hidden>A match is already Listed. Merging increases the Airtable listed quantity. It does not change the CardTrader listing.</p>
       <div class="actions">
         <button id="dupe-merge" class="primary" type="button" value="merge">Merge qty</button>
         <button id="dupe-add" class="ghost" type="button" value="add">Add anyway</button>

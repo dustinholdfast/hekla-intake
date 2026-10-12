@@ -88,6 +88,7 @@ export async function listTenants(env: Env): Promise<Tenant[]> {
 export function tenantEnv(env: Env, tenant: Tenant): Env {
   return {
     ...env,
+    TENANT_ID: tenant.id,
     AIRTABLE_BASE_ID: tenant.airtableBaseId,
     AIRTABLE_TABLE_ID: tenant.airtableTableId,
     HEKLA_WEBHOOK_URL: tenant.botWebhookUrl ?? undefined,

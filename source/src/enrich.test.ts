@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertEnrichFields, baseRank, combine, enrichOne, extractCatalog, mapRarity, rulesDecision, validateGemini } from "./enrich.ts";
+import { assertEnrichFields, baseRank, combine, enrichOne, extractCatalog, listedRulesDecision, LISTED_LABELS, lookupCatalog, mapRarity, priceMove, rulesDecision, validateGemini } from "./enrich.ts";
+import { pageWindow, pricedByCardTrader, rescanSlotOffset, RESCAN_BATCH } from "./airtable.ts";
+import { riftboundNumberKey } from "./preview.ts";
+
+const env = (over: Record<string, unknown> = {}) => over as unknown as Env;
+const noPrice = async () => ({ price: null, source: "CardTrader: no Near Mint non-foil offers in English right now" });
+const priced = (price: number) => async () => ({ price, source: "CardTrader market (Near Mint foil, 12 offers)" });
 
 test("rarity maps onto Airtable choices only", () => {
   assert.equal(mapRarity("Enchanted"), "Enchanted");
@@ -11,17 +17,15 @@ test("rarity maps onto Airtable choices only", () => {
   assert.equal(mapRarity(""), null);
 });
 
-test("price is picked by finish and never invented", () => {
-  const mtg = { name: "X", type_line: "Creature", rarity: "rare", prices: { usd: "1.50", usd_foil: "4.00" } };
-  assert.equal(extractCatalog("Magic: The Gathering", mtg, "Normal").price, 1.5);
-  assert.equal(extractCatalog("Magic: The Gathering", mtg, "Foil").price, 4);
-  assert.equal(extractCatalog("Magic: The Gathering", { ...mtg, prices: { usd: null } }, "Normal").price, null);
-  const lor = extractCatalog("Lorcana", { name: "Elsa", version: "Spirit of Winter", type: ["Character"], rarity: "Enchanted", prices: { usd_foil: "952.84" } }, "Normal");
-  assert.equal(lor.price, null); assert.match(lor.priceSource, /unavailable/);
-  const pk = extractCatalog("Pokémon", { name: "P", tcgplayer: { prices: { normal: { market: 0.2 }, reverseHolofoil: { market: 0.9 } } } }, "Foil");
-  assert.equal(pk.price, 0.9);
-  assert.equal(extractCatalog("Riftbound", { name: "R", classification: { type: "Unit", rarity: "Rare" } }, "Normal").price, null);
-  assert.equal(extractCatalog("Yu-Gi-Oh!", { name: "Y", card_prices: [{ tcgplayer_price: "0.16" }] }, "Normal").price, 0.16);
+test("catalogs supply name, type and rarity but never a price", () => {
+  const mtg = extractCatalog("Magic: The Gathering", { name: "X", type_line: "Creature", rarity: "rare", prices: { usd: "1.50", usd_foil: "4.00" } });
+  assert.deepEqual([mtg.found, mtg.name, mtg.cardType, mtg.sourceRarity, mtg.price], [true, "X", "Creature", "rare", null]);
+  const lor = extractCatalog("Lorcana", { name: "Elsa", version: "Spirit of Winter", type: ["Character"], rarity: "Enchanted", prices: { usd_foil: "952.84" } });
+  assert.deepEqual([lor.name, lor.price], ["Elsa - Spirit of Winter", null]);
+  assert.equal(extractCatalog("Pokémon", { name: "P", supertype: "Pokémon", subtypes: ["Basic"] }).cardType, "Pokémon Basic");
+  assert.equal(extractCatalog("Yu-Gi-Oh!", { name: "Y", card_prices: [{ any_price: "0.16" }] }).price, null);
+  assert.equal(extractCatalog("Riftbound", { name: "R", classification: { type: "Unit", rarity: "Rare" } }).sourceRarity, "Rare");
+  assert.deepEqual(extractCatalog("Lorcana", undefined), { found: false, price: null, priceSource: "" });
 });
 
 test("deterministic rank is stable and bounded", () => {
@@ -40,13 +44,14 @@ test("Gemini output is allowlisted", () => {
   assert.equal(validateGemini("nope"), null);
 });
 
-test("Gemini adjusts base by at most ±20 and respects cap", () => {
-  assert.equal(combine(40, { rankScore: 95, recommendation: "List", reason: "r" }, 10).rankScore, 60);
-  assert.equal(combine(40, { rankScore: 0, recommendation: "Skip", reason: "r" }, 10).rankScore, 20);
-  assert.equal(combine(60, { rankScore: 70, recommendation: "List", reason: "r" }, 100).recommendation, "Hold");
-  assert.equal(rulesDecision(70, 20, 100).recommendation, "Hold");
-  assert.equal(rulesDecision(70, null, 0).recommendation, "Hold");
-  assert.equal(rulesDecision(10, 0.5, 0).recommendation, "Skip");
+test("Gemini adjusts base by at most ±20, and no listing cap holds a card back", () => {
+  assert.equal(combine(40, { rankScore: 95, recommendation: "List", reason: "r" }).rankScore, 60);
+  assert.equal(combine(40, { rankScore: 0, recommendation: "Skip", reason: "r" }).rankScore, 20);
+  assert.equal(combine(60, { rankScore: 70, recommendation: "List", reason: "r" }).recommendation, "List");
+  assert.equal(rulesDecision(70, 20).recommendation, "List");
+  assert.equal(rulesDecision(40, 5).recommendation, "Hold");
+  assert.equal(rulesDecision(70, null).recommendation, "Hold");
+  assert.equal(rulesDecision(10, 0.5).recommendation, "Skip");
 });
 
 test("enrichment never writes Status", () => {
@@ -55,7 +60,7 @@ test("enrichment never writes Status", () => {
   assertEnrichFields({ "Auto Rank": 50, Recommendation: "Hold", Rarity: "Rare" });
 });
 
-test("enrichOne end-to-end with mocked catalog + Gemini", async () => {
+test("enrichOne end-to-end: catalog facts, CardTrader price, Gemini adjustment", async () => {
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string) => {
     if (String(url).includes("scryfall")) return new Response(JSON.stringify({ object: "card", name: "Ancestral Katana", type_line: "Artifact — Equipment", rarity: "common", prices: { usd: "0.10", usd_foil: "0.40" } }));
@@ -64,8 +69,9 @@ test("enrichOne end-to-end with mocked catalog + Gemini", async () => {
   const gem = (async () => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ rankScore: 5, recommendation: "Skip", reason: "Bulk common." }) }] } }] }))) as unknown as typeof fetch;
   try {
     const r = await enrichOne({ id: "recAAAAAAAAAAAAAA", game: "Magic: The Gathering", setNumber: null, setIdentifier: "NEO", collectorNumber: "1", name: "", finish: "Foil", condition: "NM", qty: 1, costBasisUsd: null, rarity: null, resolvedName: null },
-      3, { GEMINI_API_KEY: "test" }, { fetcher: gem, now: () => new Date("2026-10-10T14:00:00Z") });
-    assert.equal(r.fields["Market Price USD"], 0.4);
+      env({ GEMINI_API_KEY: "test" }), { fetcher: gem, price: priced(0.55), now: () => new Date("2026-10-10T14:00:00Z") });
+    assert.equal(r.fields["Market Price USD"], 0.55); // CardTrader's price, not the catalog's 0.40
+    assert.match(String(r.fields["Price Source"]), /^CardTrader market/);
     assert.equal(r.fields.Recommendation, "Skip");
     assert.equal(r.fields.Rarity, "Common");
     assert.equal(r.fields["Resolved Name"], "Ancestral Katana");
@@ -75,25 +81,32 @@ test("enrichOne end-to-end with mocked catalog + Gemini", async () => {
   } finally { globalThis.fetch = realFetch; }
 });
 
-test("missing catalog price keeps Hekla's existing price", async () => {
+test("no CardTrader price keeps the existing price and says so", async () => {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(JSON.stringify({ items: [{ name: "Ol' Poro", collector_number: 29, classification: { type: "Unit", rarity: "Common" }, metadata: {} }], pages: 1 }))) as typeof fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ items: [{ name: "Ol' Poro", riftbound_id: "ven-029-166", collector_number: 29, classification: { type: "Unit", rarity: "Common" }, metadata: {} }], pages: 1 }))) as typeof fetch;
   try {
-    const r = await enrichOne({ id: "recBBBBBBBBBBBBBB", game: "Riftbound", setNumber: null, setIdentifier: "VEN", collectorNumber: "029", name: "Ol' Poro", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: "Common", resolvedName: "Ol' Poro", marketPriceUsd: 0.06 }, 0, {});
+    const r = await enrichOne({ id: "recBBBBBBBBBBBBBB", game: "Riftbound", setNumber: null, setIdentifier: "VEN", collectorNumber: "029", name: "Ol' Poro", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: "Common", resolvedName: "Ol' Poro", marketPriceUsd: 0.06 }, env(), { price: noPrice });
     assert.ok(!("Market Price USD" in r.fields));
-    assert.match(String(r.fields["Price Source"]), /kept existing/);
+    assert.match(String(r.fields["Price Source"]), /^CardTrader: .*kept existing price$/);
     assert.equal(r.decision.via, "rules");
   } finally { globalThis.fetch = realFetch; }
 });
 
-import { combine as combine2, listedRulesDecision, LISTED_LABELS } from "./enrich.ts";
-import { pageWindow } from "./airtable.ts";
-test("listed mode: keep/watch/pull rules and no cap override", () => {
+test("without a connected CardTrader account there is no price, only a reason", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ name: "Rafiki", version: "Mysterious Sage", type: ["Character"], rarity: "Uncommon", prices: { usd: "0.08" } }))) as typeof fetch;
+  try {
+    const catalog = await lookupCatalog({ id: "recDDDDDDDDDDDDDD", game: "Lorcana", setNumber: "1", setIdentifier: null, collectorNumber: "54", name: "Rafiki", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: null, resolvedName: null }, env());
+    assert.equal(catalog.price, null);
+    assert.match(catalog.priceSource, /^CardTrader: not connected/);
+    assert.equal(catalog.name, "Rafiki - Mysterious Sage");
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("listed mode: keep/watch/pull rules", () => {
   assert.equal(listedRulesDecision(50, 3).recommendation, "List");
   assert.equal(listedRulesDecision(20, 0.1).recommendation, "Skip");
   assert.equal(listedRulesDecision(30, null).recommendation, "Hold");
-  assert.equal(combine2(60, { rankScore: 70, recommendation: "List", reason: "Keep: good." }, 100, 100, "listed").recommendation, "List");
-  assert.equal(combine2(60, { rankScore: 70, recommendation: "List", reason: "r" }, 100, 100, "waitlist").recommendation, "Hold");
   assert.deepEqual(LISTED_LABELS, { List: "Keep", Hold: "Watch", Skip: "Pull" });
 });
 test("listed paging covers all 68 rows in order", () => {
@@ -105,42 +118,27 @@ test("listed paging covers all 68 rows in order", () => {
 });
 test("listed enrichment never writes Status", async () => {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(JSON.stringify({ name: "Rafiki", version: "Mysterious Sage", type: ["Character"], rarity: "Uncommon", prices: { usd: "0.08" } }))) as typeof fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ name: "Rafiki", version: "Mysterious Sage", type: ["Character"], rarity: "Uncommon" }))) as typeof fetch;
   try {
-    const r = await enrichOne({ id: "recCCCCCCCCCCCCCC", game: "Lorcana", setNumber: "1", setIdentifier: null, collectorNumber: "54", name: "Rafiki", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: "Uncommon", resolvedName: "Rafiki - Mysterious Sage" }, 100, {}, { mode: "listed" });
+    const r = await enrichOne({ id: "recCCCCCCCCCCCCCC", game: "Lorcana", setNumber: "1", setIdentifier: null, collectorNumber: "54", name: "Rafiki", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: "Uncommon", resolvedName: "Rafiki - Mysterious Sage" }, env(), { mode: "listed", price: priced(0.08) });
     assert.equal(r.fields.Recommendation, "Skip");
     assert.match(String(r.fields["Rank Reason"]), /^Pull:/);
     assert.ok(!("Status" in r.fields) && !("Rank Score" in r.fields));
   } finally { globalThis.fetch = realFetch; }
 });
 
-import { matchPrice } from "./tcgcsv.ts";
-test("tcgcsv matcher picks by number then finish, never invents", () => {
-  const products = [
-    { productId: 1, name: "Blazing Scorcher", extendedData: [{ name: "Number", value: "001/298" }] },
-    { productId: 2, name: "Blazing Scorcher (Alternate Art)", extendedData: [{ name: "Number", value: "001/298" }] },
-    { productId: 3, name: "Booster Box", extendedData: [] },
-  ];
-  const prices = [
-    { productId: 1, subTypeName: "Normal", marketPrice: 0.08 }, { productId: 1, subTypeName: "Foil", marketPrice: 0.22 },
-    { productId: 2, subTypeName: "Foil", marketPrice: 9.5 },
-  ];
-  assert.equal(matchPrice(products, prices, { number: "1", name: "Blazing Scorcher", finish: "Normal" }).price, 0.08);
-  assert.equal(matchPrice(products, prices, { number: "001", name: "", finish: "Foil" }).price, 0.22);
-  assert.equal(matchPrice(products, prices, { number: "", name: "Blazing Scorcher", finish: "Foil" }).price, 0.22);
-  assert.equal(matchPrice(products, prices, { number: "77", name: "Nope", finish: "Normal" }).price, null);
-  assert.equal(matchPrice(products, [{ productId: 1, subTypeName: "Normal", marketPrice: null }], { number: "1", name: "", finish: "Normal" }).price, null);
-});
-
-import { lookupCatalog as _lookupCatalog, priceMove } from "./enrich.ts";
-import { rescanSlotOffset, RESCAN_BATCH } from "./airtable.ts";
-test("price move: only a real, different catalog price counts as a change", () => {
+test("price move: only a real, different price counts as a change", () => {
   assert.deepEqual(priceMove(1.2, 1.45), { changed: true, from: 1.2, to: 1.45 });
   assert.deepEqual(priceMove(null, 0.5), { changed: true, from: null, to: 0.5 });
   assert.equal(priceMove(1.2, 1.2).changed, false);
   assert.equal(priceMove(0.1 + 0.2, 0.3).changed, false);
   assert.deepEqual(priceMove(4.25, null), { changed: false, from: 4.25, to: 4.25 });
   assert.deepEqual(priceMove(undefined, null), { changed: false, from: null, to: null });
+});
+test("a row priced from any other source is re-assessed on the next scan", () => {
+  assert.equal(pricedByCardTrader("CardTrader market (Near Mint non-foil, 160 offers)"), true);
+  assert.equal(pricedByCardTrader("CardTrader: no Near Mint foil offers in English right now"), true);
+  for (const old of ["Lorcast usd", "price unavailable (no catalog match)", "", null, undefined]) assert.equal(pricedByCardTrader(old), false);
 });
 test("cron re-scan visits every page in turn and wraps", () => {
   const slot = 600_000; const seen = new Set<number>();
@@ -150,17 +148,16 @@ test("cron re-scan visits every page in turn and wraps", () => {
   assert.equal(rescanSlotOffset(RESCAN_BATCH, 5 * slot), 0);
   assert.equal(rescanSlotOffset(0, 5 * slot), 0);
 });
-test("enrichOne re-ranks from a supplied catalog without a lookup, and still never writes Status", async () => {
-  assert.equal(typeof _lookupCatalog, "function");
+test("enrichOne re-ranks from a supplied catalog without any lookup, and still never writes Status", async () => {
   const card = { id: "rec1", game: "Lorcana", setNumber: "1", setIdentifier: null, collectorNumber: "1", name: "Test", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: "Rare", resolvedName: "Test", marketPriceUsd: 1 };
-  const r = await enrichOne(card, 0, {}, { mode: "listed", catalog: { found: true, name: "Test", price: 9.5, priceSource: "Lorcast usd" }, fetcher: (() => { throw new Error("no network in a re-rank"); }) as never, now: () => new Date("2026-10-11T00:00:00Z") });
+  const boom = (() => { throw new Error("no lookups in a re-rank"); }) as never;
+  const r = await enrichOne(card, env(), { mode: "listed", catalog: { found: true, name: "Test", price: 9.5, priceSource: "CardTrader market (Near Mint non-foil, 3 offers)" }, fetcher: boom, price: boom, now: () => new Date("2026-10-11T00:00:00Z") });
   assert.equal(r.fields["Market Price USD"], 9.5);
   assert.equal(r.fields.Status, undefined);
   assert.match(String(r.fields["Rank Reason"]), /^(Keep|Watch|Pull):/);
   assertEnrichFields(r.fields);
 });
 
-import { riftboundNumberKey } from "./preview.ts";
 test("riftbound numbers keep their prefix so 006, SP6 and R06 stay different cards", () => {
   assert.equal(riftboundNumberKey("006"), "6");
   assert.equal(riftboundNumberKey("6/166"), "6");
@@ -170,22 +167,4 @@ test("riftbound numbers keep their prefix so 006, SP6 and R06 stay different car
   assert.equal(riftboundNumberKey("R06a"), "r6a");
   assert.equal(riftboundNumberKey("019a/166"), "19a");
   assert.notEqual(riftboundNumberKey("006"), riftboundNumberKey("SP6/006"));
-});
-test("tcgcsv matcher does not price a main-set card from the showcase card with the same number", () => {
-  const products = [
-    { productId: 1, name: "Lux, Crownguard", extendedData: [{ name: "Number", value: "SP6/006" }] },
-    { productId: 2, name: "Oasis Raider", extendedData: [{ name: "Number", value: "006/166" }] },
-    { productId: 3, name: "Order Rune", extendedData: [{ name: "Number", value: "R06" }] },
-  ];
-  const prices = [
-    { productId: 1, subTypeName: "Foil", marketPrice: 21.65 },
-    { productId: 2, subTypeName: "Normal", marketPrice: 0.05 }, { productId: 2, subTypeName: "Foil", marketPrice: 0.13 },
-    { productId: 3, subTypeName: "Normal", marketPrice: 0.11 }, { productId: 3, subTypeName: "Foil", marketPrice: 9.51 },
-  ];
-  assert.deepEqual([matchPrice(products, prices, { number: "006", name: "", finish: "Normal" }).price, matchPrice(products, prices, { number: "006", name: "", finish: "Foil" }).price], [0.05, 0.13]);
-  // Even a stale stored name must not pull a plain number over to the showcase card.
-  assert.equal(matchPrice(products, prices, { number: "006", name: "Lux, Crownguard", finish: "Foil" }).productName, "Oasis Raider");
-  assert.equal(matchPrice(products, prices, { number: "SP6", name: "", finish: "Foil" }).price, 21.65);
-  assert.equal(matchPrice(products, prices, { number: "SP6/006", name: "", finish: "Normal" }).mismatch, true);
-  assert.equal(matchPrice(products, prices, { number: "R06", name: "", finish: "Foil" }).price, 9.51);
 });

@@ -419,24 +419,15 @@ async function loadSummary() {
   const { response, data } = await api(`/api/summary?game=${encodeURIComponent(game)}`);
   if (generation !== summaryGeneration) return;
   if (!response.ok) {
-    $("cap-error").textContent = data.error || "Cap unavailable.";
+    $("cap-error").textContent = data.error || "Counts unavailable.";
     return;
   }
-  const cap = data.cap || 100;
   const listed = data.listedQty || 0;
   document.querySelectorAll("[data-cap=listed]").forEach((node) => {
     node.textContent = String(listed);
   });
-  document.querySelectorAll("[data-cap=max]").forEach((node) => {
-    node.textContent = String(cap);
-  });
   document.querySelectorAll("[data-cap=waitlist]").forEach((node) => {
     node.textContent = String(data.waitlistQty || 0);
-  });
-  const bucket = listed <= 0 ? 0 : Math.min(100, Math.max(5, Math.round((listed / cap) * 20) * 5));
-  document.querySelectorAll("[data-cap=bar]").forEach((node) => {
-    node.dataset.pct = String(bucket);
-    node.parentElement?.classList.toggle("over", listed > cap);
   });
   for (const status of ["Waitlist", "Listed", "Sold", "Skip"]) {
     document.querySelectorAll(`[data-count=${status}]`).forEach((node) => {
@@ -1097,7 +1088,7 @@ function openHekla(action) {
     $("hekla-send").textContent = "Send to Hekla";
   } else {
     $("hekla-title").textContent = "Greenlight shortlist";
-    $("hekla-copy").textContent = "This tells Hekla you approve the shortlist. Listing still happens in Hekla after your go. Intake will not mark anything Listed and will not call TCGPlayer.";
+    $("hekla-copy").textContent = "This tells Hekla you approve the shortlist. Sending this note lists nothing and changes no Status.";
     $("hekla-send").textContent = "Send greenlight";
   }
   $("hekla-dialog").showModal();
