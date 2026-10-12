@@ -133,6 +133,7 @@
               <button id="ask-process" class="ghost" type="button">Auto-sort pending</button>
               <button id="rerank-listed" class="ghost" type="button" hidden>Re-rank listed cards</button>
               <button id="rescan" class="ghost" type="button">Scan for changes</button>
+              <button id="ct-export" class="ghost" type="button">Export to CardTrader</button>
               <button id="ask-greenlight" class="ghost" type="button">Greenlight shortlist</button>
             </div>
           </div>
@@ -218,6 +219,33 @@
     </form>
   </dialog>
 
+  <dialog id="ct-dialog">
+    <form method="dialog">
+      <h3>Export to CardTrader</h3>
+      <p id="ct-intro" class="lede"></p>
+      <fieldset class="dup-policy" id="ct-scope">
+        <legend>Cards to check</legend>
+        <label><input type="radio" name="ctScope" value="list" /> <span id="ct-scope-list"></span></label>
+        <label><input type="radio" name="ctScope" value="shown" /> <span id="ct-scope-shown"></span></label>
+      </fieldset>
+      <div class="actions">
+        <button id="ct-check" class="ghost" type="button">Check against CardTrader</button>
+        <button id="ct-send" class="primary" type="button" disabled>List on CardTrader</button>
+        <button id="ct-close" class="ghost" type="button">Close</button>
+      </div>
+      <p id="ct-error" class="error" role="alert"></p>
+      <p id="ct-result" class="flash" role="status"></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th></th><th>Card</th><th>On CardTrader</th><th>Cond</th><th>Finish</th><th>Qty</th><th>Price</th><th>Check</th></tr>
+          </thead>
+          <tbody id="ct-body"></tbody>
+        </table>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="hekla-dialog">
     <form method="dialog">
       <h3 id="hekla-title">Hekla</h3>
@@ -235,5 +263,6 @@
 
   <script src="/session.js"></script>
   <script src="/app.js"></script>
+  <script src="/export.js"></script>
 </body>
 </html>

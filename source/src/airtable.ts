@@ -222,6 +222,27 @@ export async function rescanPage(env: Env, game: Game | null, offset: number | (
   return { total: cards.length, offset: start, done: end, nextOffset, scanned: end - start, changed, failed, ai: Boolean(env.GEMINI_API_KEY?.trim()) };
 }
 
+/**
+ * CardTrader export. The export reads the listing id alongside the usual fields and may write that one
+ * field only. It is kept out of READ_FIELDS so a base without the field still loads its queue.
+ */
+export const CARDTRADER_FIELD = "CardTrader Listing ID";
+export type ExportQueueCard = QueueCard & { cardTraderListingId: string | null };
+export async function cardsForExport(env: Env, recordIds: string[]): Promise<ExportQueueCard[]> {
+  const ids = [...new Set(recordIds)];
+  if (ids.some((id) => !/^rec[A-Za-z0-9]{14}$/.test(id))) throw new AirtableError("That record id is not an Airtable row.", 400);
+  if (ids.length === 0) return [];
+  const formula = `OR(${ids.map((id) => `RECORD_ID()='${id}'`).join(",")})`;
+  const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD]);
+  const byId = new Map(records.map((r) => [r.id, { ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]) }]));
+  return ids.flatMap((id) => { const card = byId.get(id); return card ? [card] : []; });
+}
+export async function recordCardTraderListing(env: Env, recordId: string, listingId: number): Promise<void> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
+  await airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields: { [CARDTRADER_FIELD]: String(listingId) }, typecast: false }) });
+}
+
 /** Delete a single Waitlist record by id. */
 export function assertDeletable(recordId: string, status: string | null): void {
   if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);

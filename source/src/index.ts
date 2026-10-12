@@ -2,6 +2,7 @@ import { clerkMiddleware, getAuth } from "@clerk/hono";
 import { Hono, type Context } from "hono";
 import {
   AirtableError,
+  cardsForExport,
   createCards,
   deleteCard,
   editCard,
@@ -14,13 +15,15 @@ import {
   listByStatus,
   listOpenPrintings,
   mergeQty,
+  recordCardTraderListing,
   rescanPage,
   rescanSlotOffset,
   summary,
   type QueueCard,
 } from "./airtable.ts";
 import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
-import { cleanToken, ConnectionError, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
+import { CardTraderError, createProduct, deleteProduct, previewExport } from "./cardtrader.ts";
+import { cleanToken, ConnectionError, connectionSecret, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
@@ -147,6 +150,68 @@ app.delete("/api/connections/cardtrader", async (c) => {
   if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can disconnect CardTrader." }, 403);
   if (await deleteConnection(c.env, c.var.tenant.id, "cardtrader")) audit(c, "disconnect", [{ id: "cardtrader" }]);
   return c.json({ cardtrader: { connected: false } });
+});
+
+// CardTrader export. Preview is read-only. Send lists cards for sale, so it is limited to organization
+// admins and to the batch they just reviewed; every row is re-checked on the server before it is sent.
+const EXPORT_BATCH = 15;
+
+function readRecordIds(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > EXPORT_BATCH) return null;
+  return value.every((id) => typeof id === "string") ? value as string[] : null;
+}
+
+async function cardTraderToken(c: AppContext): Promise<string> {
+  const token = await connectionSecret(c.env, c.var.tenant.id, "cardtrader");
+  if (!token) throw new ConnectionError("Connect CardTrader in Settings first.", 409);
+  return token;
+}
+
+app.post("/api/export/cardtrader/preview", async (c) => {
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const ids = readRecordIds(body.value.recordIds);
+  if (!ids) return c.json({ error: `Send 1 to ${EXPORT_BATCH} record ids.` }, 400);
+  const token = await cardTraderToken(c);
+  const rows = await previewExport(token, await cardsForExport(c.var.tenantEnv, ids));
+  return c.json({ canSend: canManageConnections(c), rows: rows.map((row) => (row.ready ? { ...row, product: undefined } : row)) });
+});
+
+app.post("/api/export/cardtrader/send", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can list cards on CardTrader." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const ids = readRecordIds(body.value.recordIds);
+  if (!ids) return c.json({ error: `Send 1 to ${EXPORT_BATCH} record ids.` }, 400);
+  const token = await cardTraderToken(c);
+  const rows = await previewExport(token, await cardsForExport(c.var.tenantEnv, ids));
+  const results: { id: string; name: string; listed: boolean; listingId?: number; price?: number; reason?: string; warning?: string }[] = [];
+  let stopped: string | null = null;
+  for (const row of rows) {
+    if (stopped) { results.push({ id: row.id, name: row.name, listed: false, reason: stopped }); continue; }
+    if (!row.ready) { results.push({ id: row.id, name: row.name, listed: false, reason: row.reason }); continue; }
+    try {
+      const listing = await createProduct(token, row.product);
+      if (listing.currency !== "USD") {
+        // Prices here are US dollars. If the account prices in anything else, undo and stop before listing more.
+        const removed = await deleteProduct(token, listing.productId).then(() => true, () => false);
+        stopped = `Your CardTrader account prices in ${listing.currency || "another currency"}, not USD, so nothing was listed.`;
+        results.push({ id: row.id, name: row.name, listed: false, reason: removed ? stopped : `${stopped} Listing ${listing.productId} could not be removed; delete it on CardTrader.` });
+        continue;
+      }
+      const result: (typeof results)[number] = { id: row.id, name: row.name, listed: true, listingId: listing.productId, price: row.price };
+      try { await recordCardTraderListing(c.var.tenantEnv, row.id, listing.productId); }
+      catch { result.warning = `Listed as ${listing.productId}, but the listing id could not be saved to Airtable. Add it by hand so this card is not listed twice.`; }
+      results.push(result);
+      audit(c, "list", [{ id: row.id, marketplace: "cardtrader", listingId: listing.productId, blueprintId: row.product.blueprint_id, price: row.price, quantity: row.quantity } as { id: string }]);
+    } catch (error) {
+      const reason = error instanceof CardTraderError ? error.message : "Could not list this card.";
+      results.push({ id: row.id, name: row.name, listed: false, reason });
+      if (error instanceof CardTraderError && (error.status === 401 || error.status === 429)) stopped = "Stopped after an earlier CardTrader error.";
+    }
+  }
+  console.log("cardtrader send", JSON.stringify({ tenant: c.var.tenant.id, by: c.var.userId, asked: ids.length, listed: results.filter((r) => r.listed).length }));
+  return c.json({ results });
 });
 
 app.get("/api/summary", async (c) => {
@@ -444,7 +509,8 @@ app.get("*", async (c) => {
 });
 
 app.onError((error, c) => {
-  if (error instanceof ConnectionError) return c.json({ error: error.message }, error.status === 503 ? 503 : 400);
+  if (error instanceof ConnectionError) return c.json({ error: error.message }, error.status === 503 ? 503 : error.status === 409 ? 409 : 400);
+  if (error instanceof CardTraderError) return c.json({ error: error.message }, 502);
   if (error instanceof AirtableError) {
     const status = error.status === 503 ? 503 : error.status >= 500 ? 502 : 400;
     return c.json({ error: error.message }, status);

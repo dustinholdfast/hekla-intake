@@ -23,7 +23,7 @@ export type TenantPlan = {
   createdAt: string;
 };
 
-export type AuditAction = "create" | "merge" | "edit" | "delete" | "connect" | "disconnect";
+export type AuditAction = "create" | "merge" | "edit" | "delete" | "connect" | "disconnect" | "list";
 export type AuditEntry = { tenantId: string; userId: string; action: AuditAction; recordId: string; snapshot?: unknown };
 
 const TENANT_COLUMNS = "id, clerk_org_id, name, airtable_base_id, airtable_table_id, bot_webhook_url, plan";

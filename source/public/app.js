@@ -473,10 +473,24 @@ function markTabs() {
   $("rerank-listed").hidden = state.status !== "Listed";
   $("ask-process").hidden = state.status === "Listed";
   $("rescan").hidden = state.status !== "Waitlist" && state.status !== "Listed";
+  $("ct-export").hidden = state.status !== "Waitlist";
   document.querySelectorAll("[data-status]").forEach((button) => {
     const on = button.dataset.status === state.status;
     button.classList.toggle("on", on);
     button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+/** The cards in the queue for the selected game, after the search box filter. */
+function shownCards() {
+  const query = state.search.trim().toLowerCase();
+  return cardsForGame(state.cards, state.game).filter((card) => {
+    if (!query) return true;
+    return [card.name, card.cardName, card.resolvedName, card.collectorNumber, card.setNumber, card.setIdentifier, card.setName, card.game, card.finish, card.condition, card.notes, card.id]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(query);
   });
 }
 
@@ -486,15 +500,7 @@ function renderQueue() {
     body.replaceChildren();
     return;
   }
-  const query = state.search.trim().toLowerCase();
-  const rows = cardsForGame(state.cards, state.game).filter((card) => {
-    if (!query) return true;
-    return [card.name, card.cardName, card.resolvedName, card.collectorNumber, card.setNumber, card.setIdentifier, card.setName, card.game, card.finish, card.condition, card.notes, card.id]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase()
-      .includes(query);
-  });
+  const rows = shownCards();
   body.replaceChildren();
   if (rows.length === 0) {
     const tr = document.createElement("tr");
