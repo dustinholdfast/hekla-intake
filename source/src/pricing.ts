@@ -6,7 +6,7 @@ import { cardTraderMarket } from "./cardtrader.ts";
 import { connectionSecret } from "./connections.ts";
 
 export type PricedCard = { game: string | null; setNumber?: string | null; setIdentifier?: string | null; collectorNumber: string | null; finish: string | null; condition: string | null };
-export type PriceLookup = (env: Env, card: PricedCard) => Promise<{ price: number | null; source: string }>;
+export type PriceLookup = (env: Env, card: PricedCard) => Promise<{ price: number | null; source: string; card?: { name: string; rarity: string | null } }>;
 
 const TOKEN_MS = 60_000;
 const tokens = new Map<string, { token: string | null; at: number }>();

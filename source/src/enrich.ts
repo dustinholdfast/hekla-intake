@@ -182,9 +182,20 @@ export type EnrichResult = { id: string; fields: Record<string, string | number 
 export async function lookupCatalog(card: EnrichInput, env: Env, deps: { price?: PriceLookup } = {}): Promise<Catalog> {
   const game = effectiveGame(card.game) ?? "Lorcana";
   const q: PreviewQuery = { game, set: (game === "Lorcana" ? card.setNumber : card.setIdentifier) ?? "", number: card.collectorNumber ?? "", name: (card.resolvedName || card.name || "").slice(0, 120) };
-  const preview = await RESOLVERS[game](q);
-  const catalog = extractCatalog(game, preview.found ? preview.raw : undefined);
+  // The catalog adds type text and the preview, but is not required: when it is down or does not know
+  // the card, CardTrader's own record of the card at that set and number supplies the name and rarity.
+  let catalog: Catalog;
+  let catalogError: Error | null = null;
+  try {
+    const preview = await RESOLVERS[game](q);
+    catalog = extractCatalog(game, preview.found ? preview.raw : undefined);
+  } catch (error) {
+    catalogError = error instanceof Error ? error : new Error("catalog lookup failed");
+    catalog = extractCatalog(game, undefined);
+  }
   const market = await (deps.price ?? cardTraderPrice)(env, card);
+  if (!catalog.found && market.card) catalog = { found: true, name: market.card.name, sourceRarity: market.card.rarity ?? undefined, price: null, priceSource: "" };
+  else if (catalogError && !catalog.found) throw catalogError; // neither source knows the card: retry later
   return { ...catalog, price: market.price, priceSource: market.source };
 }
 

@@ -14,9 +14,32 @@ export const PREVIEW_IMAGE_HOSTS = [
 const UA = { "user-agent": "HeklaIntake/1.0 (private card intake)", accept: "application/json" };
 type J = Record<string, any>;
 
+/**
+ * Catalog hosts that just timed out or failed are skipped for a while, so one dead catalog costs one
+ * timeout, not one per card. Per isolate; it clears itself.
+ */
+const DOWN_MS = 10 * 60_000;
+const downUntil = new Map<string, number>();
+export const catalogHealth = {
+  isDown: (host: string) => (downUntil.get(host) ?? 0) > Date.now(),
+  clear: () => downUntil.clear(),
+};
+
 async function getJson(url: string): Promise<J | null> {
-  const r = await fetch(url, { headers: UA, signal: AbortSignal.timeout(7000) });
-  if (!r.ok) { await r.body?.cancel(); if (r.status >= 500 || r.status === 429) throw new Error(`upstream ${r.status}`); return null; }
+  const host = new URL(url).host;
+  if (catalogHealth.isDown(host)) throw new Error(`${host} is not responding; skipped for now`);
+  let r: Response;
+  try {
+    r = await fetch(url, { headers: UA, signal: AbortSignal.timeout(7000) });
+  } catch (error) {
+    downUntil.set(host, Date.now() + DOWN_MS);
+    throw new Error(`${host} did not answer: ${error instanceof Error ? error.message : "request failed"}`);
+  }
+  if (!r.ok) {
+    await r.body?.cancel();
+    if (r.status >= 500 || r.status === 429) { downUntil.set(host, Date.now() + DOWN_MS); throw new Error(`${host} answered ${r.status}`); }
+    return null;
+  }
   return await r.json() as J;
 }
 const clean = (s: unknown) => (typeof s === "string" ? s.trim() : "");

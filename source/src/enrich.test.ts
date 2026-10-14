@@ -168,3 +168,25 @@ test("riftbound numbers keep their prefix so 006, SP6 and R06 stay different car
   assert.equal(riftboundNumberKey("019a/166"), "19a");
   assert.notEqual(riftboundNumberKey("006"), riftboundNumberKey("SP6/006"));
 });
+
+import { catalogHealth } from "./preview.ts";
+test("a dead catalog does not stop pricing: CardTrader names the card instead", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); }) as typeof fetch;
+  catalogHealth.clear();
+  try {
+    const card = { id: "recEEEEEEEEEEEEEE", game: "Riftbound", setNumber: null, setIdentifier: "VEN", collectorNumber: "006", name: "", finish: "Normal", condition: "NM", qty: 1, costBasisUsd: null, rarity: null, resolvedName: null };
+    const viaCardTrader = async () => ({ price: 0.14, source: "CardTrader market (Near Mint non-foil, 160 offers)", card: { name: "Oasis Raider", rarity: "Common" } });
+    const r = await enrichOne(card, env(), { price: viaCardTrader });
+    assert.equal(r.fields["Market Price USD"], 0.14);
+    assert.equal(r.fields["Resolved Name"], "Oasis Raider");
+    assert.equal(r.fields.Rarity, "Common");
+    assert.notEqual(r.fields.Recommendation, undefined);
+    const before = calls;
+    await enrichOne({ ...card, id: "recFFFFFFFFFFFFFF" }, env(), { price: viaCardTrader });
+    assert.equal(calls, before, "the dead catalog is skipped, not waited on again");
+    // When neither source knows the card, the row fails so it is retried later.
+    await assert.rejects(enrichOne({ ...card, id: "recGGGGGGGGGGGGGG" }, env(), { price: noPrice }), /not responding|did not answer/);
+  } finally { globalThis.fetch = realFetch; catalogHealth.clear(); }
+});

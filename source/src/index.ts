@@ -542,7 +542,7 @@ export default {
         try {
           const scoped = tenantEnv(env, tenant);
           const r = await enrichPending(scoped);
-          console.log("cron enrich", JSON.stringify({ tenant: tenant.id, picked: r.picked, enriched: r.enriched, failed: r.failed.length, ai: r.ai }));
+          console.log("cron enrich", JSON.stringify({ tenant: tenant.id, picked: r.picked, enriched: r.enriched, failed: r.failed.length, firstError: r.failed[0]?.error, ai: r.ai }));
           // Failed Waitlist rows stay pending and are re-picked every run; always leave Listed a budget.
           {
             const l = await enrichPendingListed(scoped, Math.max(10, 25 - r.enriched));
@@ -550,7 +550,7 @@ export default {
           }
           // Then re-check prices on one page of already-sorted rows; the page moves on every run.
           const s = await rescanPage(scoped, null, (total) => rescanSlotOffset(total, Date.now()));
-          console.log("cron rescan", JSON.stringify({ tenant: tenant.id, offset: s.offset, total: s.total, scanned: s.scanned, changed: s.changed.length, failed: s.failed.length }));
+          console.log("cron rescan", JSON.stringify({ tenant: tenant.id, offset: s.offset, total: s.total, scanned: s.scanned, changed: s.changed.length, failed: s.failed.length, firstError: s.failed[0]?.error }));
         } catch (e) { console.error("cron enrich failed", tenant.id, e instanceof Error ? e.message : e); }
       }
     })());

@@ -189,14 +189,27 @@ async function marketplaceOffers(token: string, cacheKey: string, blueprintId: n
 }
 
 /** The CardTrader market price for one card, with a source line that always starts with "CardTrader". */
-export async function cardTraderMarket(token: string, cacheKey: string, card: { game: string | null; setNumber?: string | null; setIdentifier?: string | null; collectorNumber: string | null; finish: string | null; condition: string | null }): Promise<{ price: number | null; source: string }> {
+export async function cardTraderMarket(token: string, cacheKey: string, card: { game: string | null; setNumber?: string | null; setIdentifier?: string | null; collectorNumber: string | null; finish: string | null; condition: string | null }): Promise<{ price: number | null; source: string; card?: MatchedCard }> {
   const match = await findBlueprint(token, card);
   if ("reason" in match) return { price: null, source: `CardTrader: ${match.reason.replace(/^CardTrader has /, "")}`.slice(0, 200) };
+  const matched = matchedCard(match.blueprint);
+  const priced = await priceBlueprint(token, cacheKey, match.blueprint, card);
+  return { ...priced, card: matched };
+}
+
+/** The card CardTrader has at that number: enough to name and rate a card when its game's catalog is down. */
+export type MatchedCard = { name: string; rarity: string | null };
+export function matchedCard(blueprint: Blueprint): MatchedCard {
+  const rarity = Object.entries(blueprint.fixed_properties ?? {}).find(([key]) => key.endsWith("_rarity"))?.[1];
+  return { name: blueprint.name, rarity: typeof rarity === "string" && rarity ? rarity : null };
+}
+
+async function priceBlueprint(token: string, cacheKey: string, blueprint: Blueprint, card: { finish: string | null; condition: string | null }): Promise<{ price: number | null; source: string }> {
   const condition = CARDTRADER_CONDITION[card.condition ?? ""];
   if (!condition) return { price: null, source: `CardTrader: no price for condition ${card.condition ?? "blank"}` };
   const wantFoil = card.finish === "Foil" || card.finish === "Special" || card.finish === "Enchanted";
-  const hasFoilSwitch = (match.blueprint.editable_properties ?? []).some((p) => typeof p.name === "string" && p.name.endsWith("_foil"));
-  const market = marketPrice(await marketplaceOffers(token, cacheKey, match.blueprint.id), { condition, foil: hasFoilSwitch ? wantFoil : null });
+  const hasFoilSwitch = (blueprint.editable_properties ?? []).some((p) => typeof p.name === "string" && p.name.endsWith("_foil"));
+  const market = marketPrice(await marketplaceOffers(token, cacheKey, blueprint.id), { condition, foil: hasFoilSwitch ? wantFoil : null });
   const what = `${condition}${hasFoilSwitch ? (wantFoil ? " foil" : " non-foil") : ""}`;
   if (!market) return { price: null, source: `CardTrader: no ${what} offers in English right now` };
   if (market.currency !== "USD") return { price: null, source: `CardTrader: prices are in ${market.currency || "another currency"}, not USD` };
