@@ -52,10 +52,34 @@ export function expansionCode(game: Game, card: { setNumber?: string | null; set
   return null; // Lorcana "P" spans several CardTrader promo sets
 }
 
-const sameName = (a: string | null | undefined, b: string | null | undefined) => {
-  const norm = (s: string | null | undefined) => (s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-  return norm(a) === norm(b);
+/** Lowercased word tokens; dashes, en/em-dashes, commas, apostrophes and other punctuation are separators. */
+const nameTokens = (s: string | null | undefined): string[] =>
+  (s ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/['\u2019`]/g, "").split(/[^a-z0-9]+/).filter(Boolean);
+const containsSeq = (hay: string[], needle: string[]) => {
+  for (let i = 0; i + needle.length <= hay.length; i++) if (needle.every((t, j) => hay[i + j] === t)) return true;
+  return false;
 };
+/** Both sides of a "Name - Subtitle" split (hyphen, en-dash or em-dash surrounded by spaces). */
+const dashParts = (s: string) => s.split(/\s+[-\u2013\u2014]\s+/).map((p) => p.trim()).filter(Boolean);
+
+/**
+ * Whether a stored card name and a CardTrader name refer to the same card. Accepts equal names after
+ * normalizing, a stored name equal to either side of a " - " split (champion/character prefix or
+ * Lorcana version), or one name containing the other as a full token sequence of at least two words.
+ */
+export function namesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ta = nameTokens(a), tb = nameTokens(b);
+  if (!ta.length || !tb.length) return false;
+  const eq = (x: string[], y: string[]) => x.length === y.length && x.every((t, i) => t === y[i]);
+  if (eq(ta, tb) || ta.join("") === tb.join("")) return true;
+  for (const [x, y] of [[a ?? "", tb], [b ?? "", ta]] as const) {
+    const parts = dashParts(x);
+    if (parts.length > 1 && parts.some((p) => eq(nameTokens(p), y))) return true;
+  }
+  const [short, long] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  return short.length >= 2 && containsSeq(long, short);
+}
+const sameName = namesMatch;
 const displayName = (b: Blueprint) => [b.name, b.version].filter(Boolean).join(" · ");
 
 /** Exactly one single card in the expansion with this printed number, or the reason there is not. */
@@ -72,7 +96,7 @@ export function matchBlueprint(blueprints: Blueprint[], singlesCategoryId: numbe
 export function buildRow(card: ExportCard, blueprint: Blueprint): ExportRow {
   const name = card.resolvedName || card.name || card.collectorNumber || card.id;
   const no = (reason: string): ExportRow => ({ id: card.id, ready: false, name, reason });
-  if (card.resolvedName && !sameName(card.resolvedName, blueprint.name) && !sameName(card.resolvedName, `${blueprint.name}${blueprint.version ?? ""}`)) {
+  if (card.resolvedName && !sameName(card.resolvedName, blueprint.name) && !sameName(card.resolvedName, `${blueprint.name} - ${blueprint.version ?? ""}`)) {
     return no(`CardTrader has "${displayName(blueprint)}" at this number, not "${card.resolvedName}". Check the set and number.`);
   }
   const price = card.marketPriceUsd;

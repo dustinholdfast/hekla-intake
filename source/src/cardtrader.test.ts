@@ -84,3 +84,19 @@ test("a single-finish card is priced whatever finish the row says", () => {
   assert.equal(marketPrice(offers, { condition: "Near Mint", foil: null })?.price, 21.65);
   assert.equal(marketPrice(offers, { condition: "Near Mint", foil: true })?.price, 21.65);
 });
+
+import { namesMatch } from "./cardtrader.ts";
+test("namesMatch accepts prefixes/versions and punctuation, rejects different cards", () => {
+  assert.ok(namesMatch("Curator of the Sands", "Nasus - Curator of the Sands"));
+  assert.ok(namesMatch("Nasus", "Nasus - Curator of the Sands"));
+  assert.ok(namesMatch("nasus – curator of the sands", "Nasus - Curator of the Sands"));
+  assert.ok(namesMatch("Mickey Mouse - Brave Little Tailor", "Mickey Mouse, Brave Little Tailor"));
+  assert.ok(namesMatch("Mickey Mouse", "Mickey Mouse - Brave Little Tailor"));
+  assert.ok(namesMatch("Ol' Poro", "Ol Poro"));
+  assert.ok(namesMatch("  Black   Lotus ", "black lotus"));
+  assert.ok(!namesMatch("Curator of the Sands", "Nasus - Guardian of the Sands"));
+  assert.ok(!namesMatch("Punching Poro", "Affectionate Poro"));
+  assert.ok(!namesMatch("Poro", "Punching Poro"));
+  assert.ok(!namesMatch("Mickey Mouse", "Minnie Mouse - Beloved Princess"));
+  assert.ok(!namesMatch("", "Nasus"));
+});
