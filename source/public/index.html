@@ -79,7 +79,9 @@
                 <select id="set" name="setNumber"></select>
               </label>
               <label id="set-identifier-field" class="field" for="set-identifier" hidden>Set identifier
-                <input id="set-identifier" name="setIdentifier" autocomplete="off" />
+                <input id="set-identifier" name="setIdentifier" autocomplete="off" list="set-options" spellcheck="false" autocapitalize="off" placeholder="Set code" />
+                <datalist id="set-options"></datalist>
+                <small id="set-hint" class="hint"></small>
               </label>
               <label>Finish
                 <select id="finish" name="finish"></select>

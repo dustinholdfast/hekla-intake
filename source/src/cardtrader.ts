@@ -328,3 +328,32 @@ export async function setWebhookUrl(token: string, url: string, fetcher?: typeof
   const b = await call(token, "/app", { method: "PATCH", body: JSON.stringify({ webhook_url: url }) }, fetcher);
   return typeof b.webhook_url === "string" && b.webhook_url ? b.webhook_url : null;
 }
+
+/* ---------- set list for intake ---------- */
+export type SetOption = { code: string; name: string };
+
+/**
+ * CardTrader's expansions for one game, as {code, name}, newest first (CardTrader ids grow over time).
+ * Outside Lorcana the Set Identifier must be CardTrader's own code (see expansionCode), so this is the list
+ * the intake form offers. Uses the same 24-hour catalogue cache as blueprint lookup.
+ */
+export async function expansionsFor(token: string, game: Game): Promise<SetOption[]> {
+  const all = await cachedCatalogue(token, "/expansions", 24 * 3600) as unknown as J[];
+  return setOptions(Array.isArray(all) ? all : [], CARDTRADER_GAMES[game].gameId);
+}
+export function setOptions(expansions: J[], gameId: number): SetOption[] {
+  const seen = new Set<string>();
+  return expansions
+    .filter((e) => e && e.game_id === gameId && typeof e.code === "string" && e.code.trim() && typeof e.name === "string")
+    .sort((a, b) => Number(b.id) - Number(a.id))
+    .map((e) => ({ code: String(e.code).trim().toLowerCase(), name: String(e.name).trim() }))
+    .filter((s) => (seen.has(s.code) ? false : (seen.add(s.code), true)));
+}
+
+/** "fdn", "FDN", "fdn — Foundations" or the exact set name → the code, if it is one of the options. */
+export function resolveSetInput(input: string, options: SetOption[]): string | null {
+  const raw = input.trim().toLowerCase();
+  if (!raw) return null;
+  const head = raw.split(/\s+[—–-]\s+/)[0]!.trim();
+  return options.find((o) => o.code === head || o.code === raw)?.code ?? options.find((o) => o.name.toLowerCase() === raw)?.code ?? null;
+}
