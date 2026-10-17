@@ -36,7 +36,7 @@ import { getState, listSales, setState } from "./salesdb.ts";
 import { confirmedMatches, confirmMatch, latestSnapshot, logAction, recentActions, removeMatch, saveSnapshot, type ReconAction } from "./recondb.ts";
 import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
 import { parseTcgExport } from "./tcgcsv.ts";
-import { buildView, expectedQty, filterView, planCardTraderSet, tcgplayerAdjustCsv, viewCsv, type ViewFilter } from "./threeway.ts";
+import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, tcgplayerAdjustCsv, viewCounts, viewCsv, type PendingTcg, type ViewFilter } from "./threeway.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
@@ -704,6 +704,8 @@ app.post("/api/reconcile", async (c) => {
 
 type CtCache = { at: string; listings: CtListing[] };
 const CT_CACHE = "reconcile:ct_listings";
+// Rows put in a downloaded TCGplayer import: hidden as pending until a newer export or 24 hours (threeway.livePending).
+const TCG_PENDING = "reconcile:tcg_pending";
 
 async function reconView(c: AppContext) {
   const id = c.var.tenant.id;
@@ -711,11 +713,14 @@ async function reconView(c: AppContext) {
     reconcileRows(c.var.tenantEnv), getState<CtCache>(c.env, id, CT_CACHE), latestSnapshot(c.env, id), confirmedMatches(c.env, id),
   ]);
   const view = buildView(rows, cache?.listings ?? null, snapshot?.rows ?? null, confirmed, { ct: cache?.at ?? null, tcg: snapshot?.info.uploadedAt ?? null });
-  return { view, hasSkuColumn, snapshot: snapshot?.info ?? null, prices: new Map(rows.map((r) => [r.id, r.marketPriceUsd])) };
+  const pending = livePending(await getState<PendingTcg>(c.env, id, TCG_PENDING), snapshot?.info.uploadedAt ?? null, Date.now());
+  applyPending(view.rows, pending);
+  view.counts = { ...view.counts, ...viewCounts(view.rows) };
+  return { pending, view, hasSkuColumn, snapshot: snapshot?.info ?? null, prices: new Map(rows.map((r) => [r.id, r.marketPriceUsd])) };
 }
 function readViewFilter(q: Record<string, string | undefined>): ViewFilter {
   const m = q.mismatch;
-  return { mismatch: m === "any" || m === "cardtrader" || m === "tcgplayer" ? m : null, game: q.game?.trim() ? q.game.trim().slice(0, 60) : null };
+  return { mismatch: m === "cardtrader" || m === "tcgplayer" ? m : "any", game: q.game?.trim() ? q.game.trim().slice(0, 60) : null, showReconciled: q.reconciled === "1" };
 }
 const reconAudit = (c: AppContext, action: ReconAction, recordId: string | null, detail: Record<string, unknown>) => logAction(c.env, c.var.tenant.id, c.var.userId, action, recordId, detail);
 
@@ -790,12 +795,15 @@ app.post("/api/reconcile/tcgplayer/import", async (c) => {
   if (!body.ok) return c.json({ error: body.error }, 400);
   const ids = Array.isArray(body.value.recordIds) ? new Set((body.value.recordIds as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 2000)) : new Set<string>();
   if (!ids.size) return c.json({ error: "Select at least one row." }, 400);
-  const { view, prices } = await reconView(c);
+  const { view, prices, pending } = await reconView(c);
   if (!view.tcgAt) return c.json({ error: "Upload a TCGplayer export first." }, 409);
   const result = tcgplayerAdjustCsv(view.rows.filter((r) => ids.has(r.recordId)), prices);
+  const at = new Date().toISOString();
+  for (const i of result.included) pending[i.recordId] = { at, tcgplayerId: i.tcgplayerId, delta: i.delta };
+  if (result.included.length) await setState(c.env, c.var.tenant.id, TCG_PENDING, pending);
   await reconAudit(c, "tcgplayer_import_csv", null, { included: result.included, skipped: result.skipped.length, snapshotAt: view.tcgAt });
   const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-  return c.json({ csv: result.csv, filename: `tcgplayer-reconcile-${day}.csv`, included: result.included, skipped: result.skipped });
+  return c.json({ csv: result.csv, filename: `tcgplayer-reconcile-${day}.csv`, included: result.included, skipped: result.skipped, pendingAt: at });
 });
 
 // Sets CardTrader to the Airtable quantity for one row. Re-reads both sides first; refuses if either moved.
@@ -820,10 +828,10 @@ app.post("/api/reconcile/cardtrader/set", async (c) => {
     for (const change of plan.changes) { await incrementListing(token, change.listingId, change.delta); done.push(change); }
   } finally {
     await reconAudit(c, "cardtrader_set", recordId, { before: plan.before, target, planned: plan.changes, applied: done });
-    const fresh = await exportListings(token).catch(() => null);
-    if (fresh) await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: fresh } satisfies CtCache);
+    // Patch the cache from the fresh read plus what was applied; CardTrader's export can lag the write.
+    await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: applyCtChanges(listings, done) } satisfies CtCache);
   }
-  return c.json({ ok: true, before: plan.before, target, changes: done });
+  return c.json({ ok: true, before: plan.before, target, ctQty: target, changes: done });
 });
 
 // Sets Airtable Qty for one row, only when Airtable still shows what the admin saw.

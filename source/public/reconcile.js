@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("logout").addEventListener("click", signOut);
   $("login-signout").addEventListener("click", signOut);
   $("filters").addEventListener("submit", (e) => { e.preventDefault(); load(); });
+  $("f-reconciled").addEventListener("change", load);
   $("export").addEventListener("click", () => download(`/api/reconcile/view.csv?${query()}`, "reconcile.csv"));
   $("ct-check").addEventListener("click", checkCardTrader);
   $("tcg-upload").addEventListener("click", uploadTcg);
@@ -35,6 +36,7 @@ async function boot() {
 function query() {
   const p = new URLSearchParams();
   if ($("f-mismatch").value) p.set("mismatch", $("f-mismatch").value);
+  if ($("f-reconciled").checked) p.set("reconciled", "1");
   if ($("f-game").value) p.set("game", $("f-game").value);
   return p.toString();
 }
@@ -54,11 +56,46 @@ async function load() {
   $("ct-cron").textContent = data.cron.mode === "off" ? "The 15-minute stock check is off (RECONCILE_MODE=off); this page's check runs on demand only." : data.cron.at ? `15-minute stock check (${data.cron.mode}): ${et(data.cron.at)} ET, ${data.cron.summary}` : `15-minute stock check (${data.cron.mode}) has not run yet.`;
   $("tcg-at").textContent = data.snapshot ? `export uploaded ${et(data.snapshot.uploadedAt)} ET${data.snapshot.filename ? ` (${data.snapshot.filename})` : ""}: ${data.snapshot.stockedRows} stocked of ${data.snapshot.totalRows} rows.` : "no export uploaded yet.";
   $("sku-col").textContent = data.hasSkuColumn ? "The Waitlist has a TCGplayer SKU column; SKUs there match exactly." : "The Waitlist has no “TCGplayer SKU” column. Matches are fuzzy until you confirm them; to save SKUs to Airtable, add a text column named exactly “TCGplayer SKU” (Hekla never creates Airtable fields).";
-  const c = data.counts;
-  $("counts").textContent = `${c.rows} cards · ${data.ctAt ? `${c.ctMismatch} CardTrader mismatches` : "CardTrader not checked"} · ${data.tcgAt ? `${c.tcgMismatch} TCGplayer mismatches, ${c.suggested} suggested matches to confirm` : "no TCGplayer export"}`;
+  renderCounts();
   render();
   renderUnmatched();
   renderActions();
+}
+
+function renderCounts() {
+  const data = state.data, c = data.counts;
+  $("counts").textContent = `${c.rows} cards, ${c.open} to reconcile · ${data.ctAt ? `${c.ctMismatch} CardTrader mismatches` : "CardTrader not checked"} · ${data.tcgAt ? `${c.tcgMismatch} TCGplayer mismatches${c.pendingUpload ? `, ${c.pendingUpload} pending upload` : ""}, ${c.suggested} suggested matches to confirm` : "no TCGplayer export"}`;
+}
+
+/* ---------- a row leaves the list once reconciled (no reload) ---------- */
+const tcgOpen = (r) => r.tcgMismatch && !r.tcgPending;
+const isReconciled = (r) => !r.ctMismatch && !tcgOpen(r) && r.tcg?.source !== "suggested";
+function visible(r) {
+  if ($("f-reconciled").checked) return true;
+  const kind = $("f-mismatch").value;
+  return kind === "cardtrader" ? r.ctMismatch : kind === "tcgplayer" ? tcgOpen(r) || r.tcg?.source === "suggested" : !isReconciled(r);
+}
+function flags(r) {
+  r.expectedQty = r.status === "Listed" ? Math.max(0, r.airtableQty) : 0;
+  r.ctMismatch = r.ct != null && r.ct.qty !== r.expectedQty;
+  r.tcgMismatch = state.data.tcgAt != null && (r.tcg?.qty ?? 0) !== r.expectedQty;
+  return r;
+}
+/** Applies a successful action to one row, keeps the counts right, and drops the row if it is now reconciled. */
+function updateRow(recordId, change) {
+  const r = state.rows.find((x) => x.recordId === recordId);
+  if (!r) return;
+  const before = { ct: r.ctMismatch, tcg: tcgOpen(r), pending: r.tcgMismatch && !!r.tcgPending, open: !isReconciled(r), suggested: r.tcg?.source === "suggested" };
+  change(r); flags(r);
+  const c = state.data.counts;
+  c.ctMismatch += (r.ctMismatch ? 1 : 0) - (before.ct ? 1 : 0);
+  c.tcgMismatch += (tcgOpen(r) ? 1 : 0) - (before.tcg ? 1 : 0);
+  c.pendingUpload += (r.tcgMismatch && r.tcgPending ? 1 : 0) - (before.pending ? 1 : 0);
+  c.open += (!isReconciled(r) ? 1 : 0) - (before.open ? 1 : 0);
+  c.suggested += (r.tcg?.source === "suggested" ? 1 : 0) - (before.suggested ? 1 : 0);
+  if (!visible(r)) { state.rows = state.rows.filter((x) => x !== r); state.selected.delete(recordId); }
+  renderCounts();
+  render();
 }
 
 function render() {
@@ -72,7 +109,7 @@ function render() {
     cell(tr, r.name, r.recordId); cell(tr, r.game); cell(tr, [r.set, r.number && `#${r.number}`].filter(Boolean).join(" · ")); cell(tr, [r.condition, r.finish].filter(Boolean).join(" · "));
     cell(tr, r.status); cell(tr, r.status === "Listed" ? r.airtableQty : `${r.airtableQty} (expects 0)`);
     const ct = cell(tr, r.ct ? r.ct.qty : state.data.ctAt ? "—" : "", r.ct?.listingIds.join(", ")); if (r.ctMismatch) ct.className = "error";
-    const tcg = cell(tr, r.tcg ? r.tcg.qty : state.data.tcgAt ? "0 (no match)" : "", r.tcg ? `${r.tcg.productName || ""} ${r.tcg.setName || ""} ${r.tcg.condition || ""} ${money(r.tcg.priceCents)}` : ""); if (r.tcgMismatch) tcg.className = "error";
+    const tcg = cell(tr, r.tcg ? `${r.tcg.qty}${r.tcgPending ? ` → ${r.tcg.qty + r.tcgPending.delta} pending upload` : ""}` : state.data.tcgAt ? "0 (no match)" : "", r.tcg ? `${r.tcg.productName || ""} ${r.tcg.setName || ""} ${r.tcg.condition || ""} ${money(r.tcg.priceCents)}` : ""); if (tcgOpen(r)) tcg.className = "error";
     cell(tr, r.tcg ? `${SOURCE[r.tcg.source]}${r.tcg.source === "suggested" ? ` ${Math.round(r.tcg.confidence * 100)}% (${r.tcg.confidence >= 0.9 ? "high" : r.tcg.confidence >= 0.75 ? "medium" : "low"})` : ""} · ${r.tcg.tcgplayerId}` : "");
     const actions = document.createElement("td"); actions.className = "actions"; tr.appendChild(actions);
     if (state.canManage) {
@@ -141,7 +178,7 @@ async function confirmMatch(r, writeSku) {
   const data = await post("/api/reconcile/tcgplayer/confirm", { recordId: r.recordId, tcgplayerId: r.tcg.tcgplayerId, writeSku, confidence: r.tcg.confidence });
   if (!data) return;
   say(data.sku === "written" ? "Match confirmed and SKU saved to Airtable." : data.sku === "no_column" ? "Match saved in Hekla only: the Waitlist has no “TCGplayer SKU” column. Add a text column with that name to save SKUs." : "Match confirmed.");
-  await load();
+  updateRow(r.recordId, (row) => { row.tcg = { ...row.tcg, source: "confirmed", confidence: 1 }; });
 }
 async function manualMatch(t) {
   const recordId = prompt(`Airtable record id (rec…) of the Waitlist row for TCGplayer SKU ${t.tcgplayerId} “${t.productName}”:`);
@@ -156,14 +193,14 @@ async function setCardTrader(r) {
   const zero = r.expectedQty === 0 ? "\n\nAt 0 CardTrader deletes the listing; it would have to be listed again from the Export screen." : "";
   if (!confirm(`Set CardTrader for “${r.name}” from ${r.ct.qty} to ${r.expectedQty} (the Airtable quantity)?${zero}`)) return;
   const data = await post("/api/reconcile/cardtrader/set", { recordId: r.recordId, expectedTarget: r.expectedQty, expectedCurrent: r.ct.qty });
-  if (data) { say(`CardTrader now ${data.target} for “${r.name}” (was ${data.before}).`); await load(); }
+  if (data) { say(`CardTrader now ${data.target} for “${r.name}” (was ${data.before}).`); updateRow(r.recordId, (row) => { row.ct = { ...row.ct, qty: data.ctQty }; }); }
 }
 
 async function setAirtable(r, qty) {
   const sold = qty === 0 ? "\n\nAt 0 the row's Status becomes Sold." : "";
   if (!confirm(`Change Airtable Qty for “${r.name}” from ${r.airtableQty} to ${qty}?${sold}\n\nThis changes the shared inventory number.`)) return;
   const data = await post("/api/reconcile/airtable/set", { recordId: r.recordId, qty, expectedCurrent: r.airtableQty });
-  if (data) { say(`Airtable Qty for “${r.name}” is now ${data.after} (was ${data.before}).`); await load(); }
+  if (data) { say(`Airtable Qty for “${r.name}” is now ${data.after} (was ${data.before}).`); updateRow(r.recordId, (row) => { row.airtableQty = data.after; if (data.after === 0) row.status = "Sold"; }); }
 }
 
 async function buildImport() {
@@ -177,8 +214,8 @@ async function buildImport() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   const why = {}; for (const s of data.skipped) why[s.reason] = (why[s.reason] || 0) + 1;
-  say(`${data.included.length} rows in the import file.${data.skipped.length ? ` Left out: ${Object.entries(why).map(([k, n]) => `${n} ${k}`).join(", ")}.` : ""}`);
-  await load();
+  say(`${data.included.length} rows in the import file, marked pending upload.${data.skipped.length ? ` Left out: ${Object.entries(why).map(([k, n]) => `${n} ${k}`).join(", ")}.` : ""}`);
+  for (const i of data.included) updateRow(i.recordId, (row) => { row.tcgPending = { at: data.pendingAt, delta: i.delta }; });
 }
 
 // Downloads need the bearer token, so fetch the file and hand the browser a blob.

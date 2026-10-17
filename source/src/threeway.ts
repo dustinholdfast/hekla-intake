@@ -21,12 +21,14 @@ export type ViewRow = {
   ct: { qty: number; listingIds: number[] } | null;
   tcg: { qty: number; tcgplayerId: string; source: MatchSource; confidence: number; productName: string | null; setName: string | null; condition: string | null; priceCents: number | null } | null;
   ctMismatch: boolean; tcgMismatch: boolean;
+  /** Set when this row went into a downloaded TCGplayer import that has not shown up in an export yet. */
+  tcgPending: { at: string; delta: number } | null;
 };
 export type View = {
   rows: ViewRow[];
   unmatchedCardTrader: CtListing[];
   unmatchedTcgplayer: TcgRow[];
-  counts: { rows: number; ctMismatch: number; tcgMismatch: number; suggested: number; unmatchedCardTrader: number; unmatchedTcgplayer: number };
+  counts: ReturnType<typeof viewCounts> & { unmatchedCardTrader: number; unmatchedTcgplayer: number };
   ctAt: string | null; tcgAt: string | null;
 };
 
@@ -155,31 +157,65 @@ export function buildView(rows: ReconRow[], listings: CtListing[] | null, tcgRow
     const tcgMismatch = tcgRows != null && (tcg?.qty ?? 0) !== expected;
     // Rows that are not Listed and show nothing anywhere are history, not reconcile work.
     if (r.status !== "Listed" && !(ct?.qty) && !(tcg?.qty) && !m) continue;
-    out.push({ recordId: r.id, name: r.name, game: effectiveGame(r.game) ?? r.game, set: r.setName ?? r.setIdentifier ?? r.setNumber, number: r.collectorNumber, condition: r.condition, finish: r.finish, status: r.status, airtableQty: r.qty, expectedQty: expected, ct, tcg, ctMismatch, tcgMismatch });
+    out.push({ recordId: r.id, name: r.name, game: effectiveGame(r.game) ?? r.game, set: r.setName ?? r.setIdentifier ?? r.setNumber, number: r.collectorNumber, condition: r.condition, finish: r.finish, status: r.status, airtableQty: r.qty, expectedQty: expected, ct, tcg, ctMismatch, tcgMismatch, tcgPending: null });
   }
   const matchedTcg = new Set([...matches.values()].map((m) => m.tcgplayerId));
   const unmatchedCardTrader = (listings ?? []).filter((l) => !usedListings.has(l.id));
   const unmatchedTcgplayer = (tcgRows ?? []).filter((t) => !matchedTcg.has(t.tcgplayerId));
   return {
     rows: out, unmatchedCardTrader, unmatchedTcgplayer, ctAt: at.ct, tcgAt: at.tcg,
-    counts: {
-      rows: out.length, ctMismatch: out.filter((r) => r.ctMismatch).length, tcgMismatch: out.filter((r) => r.tcgMismatch).length,
-      suggested: out.filter((r) => r.tcg?.source === "suggested").length, unmatchedCardTrader: unmatchedCardTrader.length, unmatchedTcgplayer: unmatchedTcgplayer.length,
-    },
+    counts: { ...viewCounts(out), unmatchedCardTrader: unmatchedCardTrader.length, unmatchedTcgplayer: unmatchedTcgplayer.length },
   };
 }
 
-export type ViewFilter = { mismatch: "any" | "cardtrader" | "tcgplayer" | null; game: string | null };
+/* ---------- reconciled rows and pending TCGplayer uploads ---------- */
+
+export type PendingTcg = Record<string, { at: string; tcgplayerId: string; delta: number }>;
+export const PENDING_TTL_MS = 24 * 3600_000;
+
+/**
+ * A row in a downloaded TCGplayer import counts as pending until a newer export is uploaded (that export then
+ * decides) or 24 hours pass. Returns the entries still in force.
+ */
+export function livePending(pending: PendingTcg | null, snapshotAt: string | null, now: number): PendingTcg {
+  const out: PendingTcg = {};
+  const snap = snapshotAt ? Date.parse(snapshotAt) : 0;
+  for (const [id, p] of Object.entries(pending ?? {})) {
+    const at = Date.parse(p.at);
+    if (Number.isFinite(at) && now - at < PENDING_TTL_MS && snap <= at) out[id] = p;
+  }
+  return out;
+}
+export function applyPending(rows: ViewRow[], pending: PendingTcg): void {
+  for (const r of rows) {
+    const p = pending[r.recordId];
+    r.tcgPending = p && r.tcg?.tcgplayerId === p.tcgplayerId ? { at: p.at, delta: p.delta } : null;
+  }
+}
+/** A TCGplayer mismatch that still needs work (not waiting on an uploaded import). */
+export const tcgOpen = (r: ViewRow) => r.tcgMismatch && !r.tcgPending;
+/** Reconciled = nothing left to do: both platforms agree (or an import is pending) and no match waits for confirmation. */
+export const reconciled = (r: ViewRow) => !r.ctMismatch && !tcgOpen(r) && r.tcg?.source !== "suggested";
+export function viewCounts(rows: ViewRow[]) {
+  return {
+    rows: rows.length, ctMismatch: rows.filter((r) => r.ctMismatch).length, tcgMismatch: rows.filter(tcgOpen).length,
+    pendingUpload: rows.filter((r) => r.tcgMismatch && r.tcgPending).length, suggested: rows.filter((r) => r.tcg?.source === "suggested").length,
+    open: rows.filter((r) => !reconciled(r)).length,
+  };
+}
+
+/** `mismatch` picks which open mismatches to list; `showReconciled` adds back everything else (game filter still applies). */
+export type ViewFilter = { mismatch: "any" | "cardtrader" | "tcgplayer"; game: string | null; showReconciled: boolean };
 export function filterView(rows: ViewRow[], f: ViewFilter): ViewRow[] {
   return rows.filter((r) =>
     (!f.game || r.game === f.game) &&
-    (f.mismatch == null || (f.mismatch === "any" ? r.ctMismatch || r.tcgMismatch : f.mismatch === "cardtrader" ? r.ctMismatch : r.tcgMismatch)));
+    (f.showReconciled || (f.mismatch === "any" ? !reconciled(r) : f.mismatch === "cardtrader" ? r.ctMismatch : tcgOpen(r) || r.tcg?.source === "suggested")));
 }
 
-export const VIEW_CSV_HEADER = ["Card", "Game", "Set", "Number", "Condition", "Finish", "Status", "Airtable Qty", "Expected listed", "CardTrader qty", "CardTrader listings", "TCGplayer qty", "TCGplayer SKU", "TCGplayer match", "Match confidence", "CardTrader mismatch", "TCGplayer mismatch", "Waitlist record"];
+export const VIEW_CSV_HEADER = ["Card", "Game", "Set", "Number", "Condition", "Finish", "Status", "Airtable Qty", "Expected listed", "CardTrader qty", "CardTrader listings", "TCGplayer qty", "TCGplayer SKU", "TCGplayer match", "Match confidence", "CardTrader mismatch", "TCGplayer mismatch", "TCGplayer import pending since", "Waitlist record"];
 export function viewCsv(rows: ViewRow[]): string {
   const lines = [csvRow(VIEW_CSV_HEADER)];
-  for (const r of rows) lines.push(csvRow([r.name, r.game, r.set, r.number, r.condition, r.finish, r.status, r.airtableQty, r.expectedQty, r.ct?.qty, r.ct?.listingIds.join(" "), r.tcg?.qty, r.tcg?.tcgplayerId, r.tcg?.source, r.tcg ? r.tcg.confidence : null, r.ctMismatch ? "yes" : "", r.tcgMismatch ? "yes" : "", r.recordId]));
+  for (const r of rows) lines.push(csvRow([r.name, r.game, r.set, r.number, r.condition, r.finish, r.status, r.airtableQty, r.expectedQty, r.ct?.qty, r.ct?.listingIds.join(" "), r.tcg?.qty, r.tcg?.tcgplayerId, r.tcg?.source, r.tcg ? r.tcg.confidence : null, r.ctMismatch ? "yes" : "", r.tcgMismatch ? "yes" : "", r.tcgPending?.at, r.recordId]));
   return lines.join("\r\n") + "\r\n";
 }
 
@@ -232,4 +268,14 @@ export function tcgplayerAdjustCsv(rows: ViewRow[], fallbackPrice: Map<string, n
     lines.push(csvRow([r.tcg.tcgplayerId, "", r.tcg.setName ?? r.set ?? "", r.tcg.productName ?? r.name, "", r.number ?? "", "", r.tcg.condition ?? "", "", "", "", "", r.tcg.qty, delta, price.toFixed(2), ""]));
   }
   return { csv: lines.join("\r\n") + "\r\n", included, skipped };
+}
+
+/**
+ * The cached CardTrader listings after a Set CardTrader action. CardTrader's export can lag a write by a few
+ * seconds, so the cache is patched with what was applied instead of re-exported. A listing at 0 is gone.
+ */
+export function applyCtChanges(listings: CtListing[], changes: { listingId: number; delta: number }[]): CtListing[] {
+  const delta = new Map<number, number>();
+  for (const c of changes) delta.set(c.listingId, (delta.get(c.listingId) ?? 0) + c.delta);
+  return listings.map((l) => (delta.has(l.id) ? { ...l, quantity: l.quantity + delta.get(l.id)! } : l)).filter((l) => l.quantity > 0);
 }
