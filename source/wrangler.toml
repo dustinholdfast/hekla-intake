@@ -18,9 +18,10 @@ binding = "ASSETS"
 run_worker_first = true
 
 [triggers]
-# */10 enrichment (unchanged). */5 sales: CardTrader order poll + Hekla decrements, the reconcile on :00/:15/:30/:45,
-# and the optional TCGplayer email at 9 AM America/New_York. Every sales job is off until its var below is set.
-crons = ["*/10 * * * *", "*/5 * * * *"]
+# One trigger. Every 5 min: sales (CardTrader order poll + Hekla decrements, the reconcile on :00/:15/:30/:45, the
+# optional TCGplayer email at 9 AM America/New_York; each off until its var below is set). Every 10th minute it also
+# runs enrichment. Do not add a separate "*/10": Cloudflare fires only one trigger in a minute where two match.
+crons = ["*/5 * * * *"]
 
 [observability]
 enabled = true

@@ -33,6 +33,14 @@ export function decrementFrom(env: Env): string | null {
   const v = (env.CT_DECREMENT_FROM ?? "").trim();
   return v && !Number.isNaN(Date.parse(v)) ? new Date(v).toISOString() : null;
 }
+// What a cron tick runs. Cloudflare delivers one scheduled event per minute even when two triggers match,
+// so the single "*/5" trigger carries enrichment on every 10th minute (same cadence as the old "*/10").
+// Any other cron string (e.g. an old "*/10" event) runs enrichment only.
+export function cronJobs(cron: string, at: Date): { enrich: boolean; sales: boolean } {
+  if (cron === "*/5 * * * *") return { enrich: at.getUTCMinutes() % 10 === 0, sales: true };
+  return { enrich: true, sales: false };
+}
+
 export const dailyEmailOn = (env: Env) => (env.TCGPLAYER_DAILY_EMAIL ?? "").trim().toLowerCase() === "on";
 
 /* ---------- CardTrader orders ---------- */

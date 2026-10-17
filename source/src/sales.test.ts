@@ -269,3 +269,12 @@ test("CSV cells escape quotes and neutralise formulas", () => {
 test("sales filter accepts only known values", () => {
   assert.deepEqual(readSalesFilter({ platform: "ebay", from: "2026-13-40", to: "2026-10-20", q: "  elsa ", cancelled: "1" }), { platform: null, from: null, to: "2026-10-20", game: null, q: "elsa", includeCancelled: true });
 });
+
+import { cronJobs } from "./sync.ts";
+test("one */5 trigger runs sales every tick and enrichment every 10th minute", () => {
+  const at = (m: number) => new Date(Date.UTC(2026, 9, 17, 15, m));
+  assert.deepEqual(cronJobs("*/5 * * * *", at(30)), { enrich: true, sales: true });
+  assert.deepEqual(cronJobs("*/5 * * * *", at(35)), { enrich: false, sales: true });
+  assert.deepEqual(cronJobs("*/5 * * * *", at(0)), { enrich: true, sales: true });
+  assert.deepEqual(cronJobs("*/10 * * * *", at(40)), { enrich: true, sales: false });
+});

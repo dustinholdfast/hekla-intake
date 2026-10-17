@@ -28,7 +28,7 @@ import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
 import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
 import { getState, listSales } from "./salesdb.ts";
-import { dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
+import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
@@ -729,8 +729,12 @@ function audit(c: AppContext, action: AuditAction, cards: { id: string }[]): voi
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    // "*/5": CardTrader sales, the 15-minute reconcile and the 9 AM ET daily email. Everything else: enrichment.
-    if (event.cron === SALES_CRON) { ctx.waitUntil(salesCron(env, new Date(event.scheduledTime))); return; }
+    // One "*/5" trigger: Cloudflare runs only one trigger per minute when two match, so enrichment rides on
+    // the same trigger every 10th minute instead of having its own "*/10".
+    const at = new Date(event.scheduledTime);
+    const jobs = cronJobs(event.cron, at);
+    if (jobs.sales) ctx.waitUntil(salesCron(env, at));
+    if (!jobs.enrich) return;
     ctx.waitUntil((async () => {
       let tenants: Tenant[];
       try { tenants = await listTenants(env); } catch (e) { console.error("cron tenants failed", e instanceof Error ? e.message : e); return; }
@@ -752,8 +756,6 @@ export default {
     })());
   },
 } satisfies ExportedHandler<Env>;
-
-const SALES_CRON = "*/5 * * * *";
 
 /** True at the daily email's minute: 9:00 AM America/New_York (EDT or EST). */
 export function isDailyEmailSlot(at: Date): boolean {
