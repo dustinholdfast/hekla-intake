@@ -44,7 +44,7 @@ test("setIconSvg fetches only listed icons, with a User-Agent and Accept, and re
   const seen: { url: string; headers: Record<string, string> }[] = [];
   const fetcher = (async (url: string, init?: RequestInit) => {
     seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
-    if (url === "https://api.scryfall.com/sets") return new Response(JSON.stringify({ data: RAW }));
+    if (url === "https://api.scryfall.com/sets") return new Response(JSON.stringify({ data: [...RAW, ...Array.from({ length: 100 }, (_, i) => ({ code: `x${i}`, name: `X ${i}` }))] }));
     if (url.endsWith("/dom.svg")) return new Response('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>');
     if (url.endsWith("/fdn.svg")) return new Response("<html>not an svg</html>");
     return new Response("", { status: 404 });
@@ -105,4 +105,74 @@ test("groupMagicSets without Reality Fracture leaves the order alone", () => {
   const r = groupMagicSets(CT, buildIconIndex(slimSets(GRAW.filter((s) => s.code !== "fra"))));
   assert.equal(r.core, 0); assert.equal(r.end, null);
   assert.deepEqual(r.sets.map((s) => s.code), CT.map((s) => s.code));
+});
+
+/* ---------- PR #8: CardTrader-style codes, resilience ---------- */
+import { fetchScryfallSets, refreshScryfallStore, resetScryfallBackoff, scryfallIndexWithSource, type ScryfallSet } from "./scryfall.ts";
+import { assetVersion, versionedUrl } from "./assets.ts";
+
+test("iconFor handles CardTrader's codes: art/commander prefixes, dashed Secret Lair codes, name before a colon", () => {
+  const idx = buildIconIndex(slimSets([...GRAW, { code: "sld", name: "Secret Lair Drop", set_type: "box", released_at: "2019-12-02", icon_svg_uri: ICON("star") }]));
+  const f = (code: string, name = "") => iconFor({ code, name }, idx);
+  assert.equal(f("afra", "Reality Fracture Art Series"), "fra");
+  assert.equal(f("cfrc", "Reality Fracture Commander Decks"), "frc");
+  assert.equal(f("sld-odd", "Secret Lair x Odd"), "star");
+  assert.equal(f("sld-miku", "SLD Miku"), "star");
+  assert.equal(f("xyz9", "Secret Lair Drop: Something"), "star");
+  assert.equal(f("unk", "Unknown Event"), null);
+});
+
+const SETS_BODY = JSON.stringify({ data: Array.from({ length: 120 }, (_, i) => ({ code: `s${i}`, name: `Set ${i}`, set_type: "expansion", released_at: "2020-01-01", icon_svg_uri: ICON(`s${i}`) })) });
+const memStore = (initial: { sets: ScryfallSet[]; at: number } | null = null) => {
+  let v = initial; let saves = 0;
+  return { store: { load: async () => v, save: async (sets: ScryfallSet[]) => { v = { sets, at: Date.now() }; saves++; } }, saves: () => saves, value: () => v };
+};
+const reply = (status: number, body = "", headers: Record<string, string> = {}) => new Response(body, { status, headers });
+
+test("Scryfall 429: one retry, then a stored copy of any age is used (stale), never a bare list", async () => {
+  resetScryfallBackoff();
+  const old = slimSets(JSON.parse(SETS_BODY).data);
+  const m = memStore({ sets: old, at: Date.now() - 3 * 24 * 3600_000 });
+  let calls = 0;
+  const fetcher = (async () => { calls++; return reply(429, "slow down", { "retry-after": "1" }); }) as typeof fetch;
+  const r = await scryfallIndexWithSource({ fetcher, store: m.store });
+  assert.equal(r.source, "stale"); assert.equal(calls, 2, "one retry");
+  assert.equal(r.index.byCode.size, 120);
+  // Backed off: the next request does not call Scryfall at all.
+  const r2 = await scryfallIndexWithSource({ fetcher, store: m.store });
+  assert.equal(r2.source, "stale"); assert.equal(calls, 2);
+  resetScryfallBackoff();
+});
+
+test("Scryfall: fresh stored copy skips the live fetch; live success is saved; no copy + failure throws", async () => {
+  resetScryfallBackoff();
+  let calls = 0;
+  const ok = (async (url: string, init: RequestInit) => { calls++; assert.match(String((init.headers as Record<string, string>)["user-agent"]), /HeklaIntake/); return reply(200, SETS_BODY); }) as unknown as typeof fetch;
+  const fresh = memStore({ sets: slimSets(JSON.parse(SETS_BODY).data), at: Date.now() - 3600_000 });
+  assert.equal((await scryfallIndexWithSource({ fetcher: ok, store: fresh.store })).source, "stored"); assert.equal(calls, 0);
+  const empty = memStore();
+  assert.equal((await scryfallIndexWithSource({ fetcher: ok, store: empty.store })).source, "live"); assert.equal(empty.saves(), 1);
+  const bad = (async () => reply(403, "no")) as typeof fetch;
+  await assert.rejects(scryfallIndexWithSource({ fetcher: bad, store: memStore().store }), /403/);
+  resetScryfallBackoff();
+});
+
+test("refreshScryfallStore refreshes only a copy older than 24 h; fetchScryfallSets rejects a truncated list", async () => {
+  resetScryfallBackoff();
+  const ok = (async () => reply(200, SETS_BODY)) as typeof fetch;
+  const fresh = memStore({ sets: [], at: Date.now() });
+  assert.equal(await refreshScryfallStore(fresh.store, ok), "fresh");
+  const stale = memStore({ sets: [], at: Date.now() - 25 * 3600_000 });
+  assert.equal(await refreshScryfallStore(stale.store, ok), "refreshed"); assert.equal(stale.value()!.sets.length, 120);
+  await assert.rejects(fetchScryfallSets((async () => reply(200, JSON.stringify({ data: [{ code: "a", name: "A" }] }))) as typeof fetch), /only 1/);
+});
+
+test("asset cache-busting: same-origin script/style URLs get ?v=<version>", () => {
+  assert.equal(assetVersion({ CF_VERSION_METADATA: { id: "1b8e98b9-1fef-4857-a0f8-98d4141cc8fb" } } as unknown as Env), "1b8e98b91fef");
+  assert.equal(assetVersion({} as Env), "dev");
+  assert.equal(versionedUrl("/app.js", "abc"), "/app.js?v=abc");
+  assert.equal(versionedUrl("https://cdn.example/x.js", "abc"), null);
+  assert.equal(versionedUrl("//cdn.example/x.js", "abc"), null);
+  assert.equal(versionedUrl("/x.js?y=1", "abc"), null);
+  assert.equal(versionedUrl(null, "abc"), null);
 });

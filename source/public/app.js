@@ -241,8 +241,11 @@ function selectGame(game, options = {}) {
 
 /* ---------- Set identifier per game (CardTrader's set codes, the same ones enrichment and export use) ----------
  * Shown and saved upper-case ("VEN", "FDN"), as the Waitlist already has them; lookups ignore case. */
-const SET_CACHE_KEY = "hekla-sets-v3"; // v2: Magic sets carry Scryfall symbols
+const SET_CACHE_KEY = "hekla-sets-v4"; // v4: lists carry shape + complete; incomplete lists are never stored
+const SET_SHAPE = 4; // must match SETS_SHAPE in src/index.ts; a cached list of another shape is ignored
 const SET_TTL_MS = 24 * 3600_000;
+const SET_RETRY_MS = 60_000; // an incomplete list (Scryfall unavailable) is fetched again after a minute
+try { ["hekla-sets-v1", "hekla-sets-v2", "hekla-sets-v3"].forEach((k) => localStorage.removeItem(k)); } catch { /* ignore */ }
 const setLists = {}; // game → { sets: [{code, name}], source, hint, at }
 const setLoading = {};
 
@@ -253,17 +256,18 @@ function savedSetIdentifier(saved, game) {
 }
 
 function cachedSets(game) {
-  if (setLists[game] && Date.now() - setLists[game].at < SET_TTL_MS) return setLists[game];
+  const mem = setLists[game];
+  if (mem && Date.now() - mem.at < (mem.complete === false ? SET_RETRY_MS : SET_TTL_MS)) return mem;
   try {
     const all = JSON.parse(localStorage.getItem(SET_CACHE_KEY) || "{}");
     const hit = all[game];
-    if (hit && Array.isArray(hit.sets) && hit.sets.length && Date.now() - hit.at < SET_TTL_MS) return (setLists[game] = hit);
+    if (hit && hit.shape === SET_SHAPE && hit.complete !== false && Array.isArray(hit.sets) && hit.sets.length && Date.now() - hit.at < SET_TTL_MS) return (setLists[game] = hit);
   } catch { /* ignore */ }
   return null;
 }
 function storeSets(game, entry) {
   setLists[game] = entry;
-  if (!entry.sets.length) return; // don't cache "unavailable"; try again next time
+  if (!entry.sets.length || entry.complete === false) return; // don't keep "unavailable" or a bare list; retry soon
   try {
     const all = JSON.parse(localStorage.getItem(SET_CACHE_KEY) || "{}");
     all[game] = entry;
@@ -274,7 +278,7 @@ async function loadSets(game) {
   const hit = cachedSets(game);
   if (hit) return hit;
   setLoading[game] ||= api(`/api/sets?game=${encodeURIComponent(game)}`).then(({ response, data }) => {
-    const entry = response.ok ? { sets: Array.isArray(data.sets) ? data.sets : [], source: data.source, hint: data.hint || "", icons: data.icons || null, at: Date.now() } : { sets: [], source: "none", hint: data.error || "", at: Date.now() };
+    const entry = response.ok ? { sets: Array.isArray(data.sets) ? data.sets : [], source: data.source, hint: data.hint || "", icons: data.icons || null, shape: data.shape, complete: data.shape === SET_SHAPE && data.complete !== false, at: Date.now() } : { sets: [], source: "none", hint: data.error || "", at: Date.now() };
     storeSets(game, entry);
     return entry;
   }).finally(() => { delete setLoading[game]; });
@@ -300,7 +304,7 @@ async function refreshSetOptions(game) {
   const first = core.length ? core[core.length - 1] : entry.sets[0];
   input.placeholder = first ? `e.g. ${first.code.toUpperCase()} (${first.name})` : "Set code";
   const symbols = entry.icons && entry.icons.matched ? `, ${entry.icons.matched} with set symbols` : "";
-  $("set-hint").textContent = entry.sets.length ? `${entry.sets.length} ${game} sets from CardTrader${symbols}` : entry.hint || "";
+  $("set-hint").textContent = entry.sets.length ? `${entry.sets.length} ${game} sets from CardTrader${symbols}${entry.hint ? `. ${entry.hint}` : ""}` : entry.hint || "";
   // A set from another game (or one CardTrader doesn't have) is cleared on the switch.
   if (entry.sets.length && input.value.trim()) {
     const code = resolveSet(input.value, entry.sets);
@@ -420,7 +424,11 @@ function pickSet(code, jump) {
 function wireCombo() {
   const input = $("set-identifier");
   input.addEventListener("input", () => { openCombo(); paintCurrentIcon(); });
-  input.addEventListener("focus", () => { if (combo.sets.length) openCombo(); });
+  input.addEventListener("focus", () => {
+    const entry = setLists[state.game];
+    if (entry && entry.complete === false && Date.now() - entry.at >= SET_RETRY_MS) refreshSetOptions(state.game); // retry a bare list
+    if (combo.sets.length) openCombo();
+  });
   input.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== input) closeCombo(); }, 0));
   input.addEventListener("keydown", (e) => {
     const open = !$("set-listbox").hidden;

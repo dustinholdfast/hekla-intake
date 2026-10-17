@@ -17,6 +17,10 @@ directory = "./public"
 binding = "ASSETS"
 run_worker_first = true
 
+# Exposes the deployed version id; used to cache-bust /app.js etc. (?v=<version>) on every deploy.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 [triggers]
 # One trigger. Every 5 min: sales (CardTrader order poll + Hekla decrements, the reconcile on :00/:15/:30/:45, the
 # optional TCGplayer email at 9 AM America/New_York; each off until its var below is set). Every 10th minute it also
