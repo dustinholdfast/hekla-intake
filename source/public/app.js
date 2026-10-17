@@ -29,6 +29,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("login-signout").addEventListener("click", signOut);
   $("add-form").addEventListener("submit", onAdd);
   $("add-form").addEventListener("change", saveDefaults);
+  $("set-identifier").addEventListener("change", () => {
+    const code = resolveSet($("set-identifier").value, setLists[state.game]?.sets || []);
+    if (code) { $("set-identifier").value = code.toUpperCase(); saveDefaults(); }
+  });
   $("open-bulk").addEventListener("click", () => {
     $("bulk-error").textContent = "";
     updateBulkHelp();
@@ -214,7 +218,9 @@ function selectGame(game, options = {}) {
   if (finishes.includes(preferred)) $("finish").value = preferred;
   else if (finishes.includes("Normal")) $("finish").value = "Normal";
   if ([...$("set").options].some((option) => option.value === saved.setNumber)) $("set").value = saved.setNumber;
-  if (typeof saved.setIdentifier === "string") $("set-identifier").value = saved.setIdentifier;
+  $("set-identifier").value = savedSetIdentifier(saved, state.game);
+  state.setWarned = null;
+  if (!lorcana) refreshSetOptions(state.game);
   if ([...$("condition").options].some((option) => option.value === saved.condition)) $("condition").value = saved.condition;
   const qty = Number(saved.qty);
   $("qty").value = Number.isInteger(qty) && qty >= 1 ? String(qty) : "1";
@@ -229,6 +235,87 @@ function selectGame(game, options = {}) {
     renderQueue();
     refreshAll();
   }
+}
+
+/* ---------- Set identifier per game (CardTrader's set codes, the same ones enrichment and export use) ----------
+ * Shown and saved upper-case ("VEN", "FDN"), as the Waitlist already has them; lookups ignore case. */
+const SET_CACHE_KEY = "hekla-sets-v1";
+const SET_TTL_MS = 24 * 3600_000;
+const setLists = {}; // game → { sets: [{code, name}], source, hint, at }
+const setLoading = {};
+
+/** This game's remembered set identifier. Older saved defaults kept one identifier for every game. */
+function savedSetIdentifier(saved, game) {
+  if (saved.setIdentifierByGame && typeof saved.setIdentifierByGame[game] === "string") return saved.setIdentifierByGame[game];
+  return saved.game === game && typeof saved.setIdentifier === "string" ? saved.setIdentifier : "";
+}
+
+function cachedSets(game) {
+  if (setLists[game] && Date.now() - setLists[game].at < SET_TTL_MS) return setLists[game];
+  try {
+    const all = JSON.parse(localStorage.getItem(SET_CACHE_KEY) || "{}");
+    const hit = all[game];
+    if (hit && Array.isArray(hit.sets) && hit.sets.length && Date.now() - hit.at < SET_TTL_MS) return (setLists[game] = hit);
+  } catch { /* ignore */ }
+  return null;
+}
+function storeSets(game, entry) {
+  setLists[game] = entry;
+  if (!entry.sets.length) return; // don't cache "unavailable"; try again next time
+  try {
+    const all = JSON.parse(localStorage.getItem(SET_CACHE_KEY) || "{}");
+    all[game] = entry;
+    localStorage.setItem(SET_CACHE_KEY, JSON.stringify(all));
+  } catch { /* storage full or blocked; memory cache still works */ }
+}
+async function loadSets(game) {
+  const hit = cachedSets(game);
+  if (hit) return hit;
+  setLoading[game] ||= api(`/api/sets?game=${encodeURIComponent(game)}`).then(({ response, data }) => {
+    const entry = response.ok ? { sets: Array.isArray(data.sets) ? data.sets : [], source: data.source, hint: data.hint || "", at: Date.now() } : { sets: [], source: "none", hint: data.error || "", at: Date.now() };
+    storeSets(game, entry);
+    return entry;
+  }).finally(() => { delete setLoading[game]; });
+  return setLoading[game];
+}
+
+/** "fdn", "FDN", "fdn — Foundations" or the set's exact name → its code; null when it is not in the list. */
+function resolveSet(input, sets) {
+  const raw = (input || "").trim().toLowerCase();
+  if (!raw) return null;
+  const head = raw.split(/\s+[—–-]\s+/)[0].trim();
+  return (sets.find((s) => s.code === head || s.code === raw) || sets.find((s) => s.name.toLowerCase() === raw))?.code || null;
+}
+
+async function refreshSetOptions(game) {
+  const entry = await loadSets(game);
+  if (state.game !== game) return; // the game changed while loading
+  const list = $("set-options");
+  list.replaceChildren(...entry.sets.map((s) => { const o = document.createElement("option"); o.value = s.code.toUpperCase(); o.label = s.name; o.textContent = s.name; return o; }));
+  const input = $("set-identifier");
+  const first = entry.sets[0];
+  input.placeholder = first ? `e.g. ${first.code.toUpperCase()} (${first.name})` : "Set code";
+  $("set-hint").textContent = entry.sets.length ? `${entry.sets.length} ${game} sets from CardTrader` : entry.hint || "";
+  // A set from another game (or one CardTrader doesn't have) is cleared on the switch.
+  if (entry.sets.length && input.value.trim()) {
+    const code = resolveSet(input.value, entry.sets);
+    if (code) input.value = code.toUpperCase();
+    else { input.value = ""; saveDefaults(); }
+  }
+}
+
+/** Null when the set identifier is fine. A code not in the list blocks once; Enter again adds it anyway. */
+function checkSetIdentifier(game) {
+  const input = $("set-identifier");
+  const value = input.value.trim();
+  if (!value) return "Set identifier is required.";
+  const sets = setLists[game]?.sets || [];
+  if (!sets.length) return null; // no list to check against (CardTrader not connected or unavailable)
+  const code = resolveSet(value, sets);
+  if (code) { input.value = code.toUpperCase(); state.setWarned = null; return null; }
+  if (state.setWarned === `${game}|${value.toLowerCase()}`) return null;
+  state.setWarned = `${game}|${value.toLowerCase()}`;
+  return `“${value}” isn't a CardTrader ${game} set code, so Hekla can't price or list it. Pick one from the list, or press Enter again to add it anyway.`;
 }
 
 function cardsForGame(cards, game) {
@@ -275,10 +362,13 @@ function saveDefaults() {
   const previous = defaults();
   const finishByGame = { ...(previous.finishByGame || {}) };
   if (state.game && $("finish").value) finishByGame[state.game] = $("finish").value;
+  const setIdentifierByGame = { ...(previous.setIdentifierByGame || {}) };
+  if (state.game && state.game !== "Lorcana") setIdentifierByGame[state.game] = $("set-identifier").value.trim();
   const payload = {
     game: state.game || "Lorcana",
     setNumber: $("set").value,
     setIdentifier: $("set-identifier").value,
+    setIdentifierByGame,
     finish: $("finish").value,
     condition: $("condition").value,
     qty: Number($("qty").value) || 1,
@@ -318,10 +408,14 @@ async function onAdd(event) {
   saveDefaults();
   $("form-error").textContent = "";
   $("form-flash").textContent = "";
-  if ((state.game || "Lorcana") !== "Lorcana" && !$("set-identifier").value.trim()) {
-    $("form-error").textContent = "Set identifier is required.";
-    $("set-identifier").focus();
-    return;
+  if ((state.game || "Lorcana") !== "Lorcana") {
+    const problem = checkSetIdentifier(state.game);
+    if (problem) {
+      $("form-error").textContent = problem;
+      if (!$("set-identifier").value.trim()) $("set-identifier").focus();
+      return;
+    }
+    saveDefaults();
   }
   const payload = cardPayload({ onDuplicate: "ask" });
   await submitCard(payload);

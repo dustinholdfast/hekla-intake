@@ -27,7 +27,7 @@ import {
   type QueueCard,
 } from "./airtable.ts";
 import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
-import { appInfo, CardTraderError, createProduct, deleteProduct, exportListings, incrementListing, previewExport, setWebhookUrl, type CtListing } from "./cardtrader.ts";
+import { appInfo, CardTraderError, createProduct, deleteProduct, expansionsFor, exportListings, incrementListing, previewExport, setWebhookUrl, type CtListing } from "./cardtrader.ts";
 import { cleanToken, ConnectionError, connectionSecret, connectionSettings, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
 import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
@@ -180,6 +180,22 @@ async function cardTraderToken(c: AppContext): Promise<string> {
   if (!token) throw new ConnectionError("Connect CardTrader in Settings first.", 409);
   return token;
 }
+
+// The sets the intake form offers for a game. Lorcana uses its Set # list; every other game's Set Identifier is
+// CardTrader's expansion code (the same codes blueprint lookup and enrichment use), cached 24 h with the catalogue.
+app.get("/api/sets", async (c) => {
+  const game = canonicalGame(c.req.query("game") ?? "");
+  if (!game) return c.json({ error: "Unknown game." }, 400);
+  if (game === "Lorcana") return c.json({ game, source: "hekla", sets: SETS.map((s) => ({ code: s.id, name: s.name })) });
+  const token = await connectionSecret(c.env, c.var.tenant.id, "cardtrader");
+  if (!token) return c.json({ game, source: "none", sets: [], hint: "Connect CardTrader in Settings to get the set list." });
+  try {
+    return c.json({ game, source: "cardtrader", sets: await expansionsFor(token, game) });
+  } catch (error) {
+    if (error instanceof CardTraderError) return c.json({ game, source: "none", sets: [], hint: "CardTrader's set list is unavailable right now; type the set code." });
+    throw error;
+  }
+});
 
 app.post("/api/export/cardtrader/preview", async (c) => {
   const body = await readJson(c);
