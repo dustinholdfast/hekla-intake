@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildIconIndex, iconFile, iconFor, setIconSvg, slimSets, withIcons } from "./scryfall.ts";
+import { buildIconIndex, coreEnd, groupMagicSets, iconFile, iconFor, setIconSvg, slimSets, withIcons } from "./scryfall.ts";
 
 const RAW = [
   { code: "dom", name: "Dominaria", mtgo_code: "dar", arena_code: "dar", icon_svg_uri: "https://svgs.scryfall.io/sets/dom.svg?1700" },
@@ -55,4 +55,54 @@ test("setIconSvg fetches only listed icons, with a User-Agent and Accept, and re
   assert.equal(await setIconSvg("../etc", fetcher), null);
   assert.ok(!seen.some((s) => s.url.endsWith("/nope.svg")));
   for (const s of seen) { assert.match(s.headers["user-agent"]!, /^HeklaIntake\//); assert.ok(s.headers.accept); }
+});
+
+const ICON = (c: string) => `https://svgs.scryfall.io/sets/${c}.svg?1`;
+const GRAW = [
+  { code: "lea", name: "Limited Edition Alpha", set_type: "core", released_at: "1993-08-05", icon_svg_uri: ICON("lea") },
+  { code: "dom", name: "Dominaria", set_type: "expansion", released_at: "2018-04-27", mtgo_code: "dar", icon_svg_uri: ICON("dom") },
+  { code: "pdom", name: "Dominaria Promos", set_type: "promo", released_at: "2018-04-27", parent_set_code: "dom", icon_svg_uri: ICON("dom") },
+  { code: "fdn", name: "Foundations", set_type: "core", released_at: "2024-11-15", icon_svg_uri: ICON("fdn") },
+  { code: "mh3", name: "Modern Horizons 3", set_type: "masters", released_at: "2024-06-14", icon_svg_uri: ICON("mh3") },
+  { code: "fra", name: "Reality Fracture", set_type: "expansion", released_at: "2026-10-02", icon_svg_uri: ICON("fra") },
+  { code: "pfra", name: "Reality Fracture Promos", set_type: "promo", released_at: "2026-10-02", icon_svg_uri: ICON("fra") },
+  { code: "frc", name: "Reality Fracture Commander", set_type: "commander", released_at: "2026-10-02", icon_svg_uri: ICON("frc") },
+  { code: "yfra", name: "Alchemy: Reality Fracture", set_type: "alchemy", digital: true, released_at: "2026-10-13", icon_svg_uri: ICON("y26") },
+  { code: "trk", name: "Star Trek", set_type: "expansion", released_at: "2026-11-13", icon_svg_uri: ICON("trk") },
+  { code: "kld", name: "Kaladesh Remastered", set_type: "expansion", digital: true, released_at: "2020-11-12", icon_svg_uri: ICON("kld") },
+];
+const gindex = buildIconIndex(slimSets(GRAW));
+// CardTrader order: newest first.
+const CT = [
+  { code: "trk", name: "Star Trek" }, { code: "frc", name: "Reality Fracture Commander" }, { code: "pfra", name: "Reality Fracture Promos" },
+  { code: "fra", name: "Reality Fracture" }, { code: "xfra", name: "Reality Fracture Art Series" }, { code: "fdn", name: "Foundations" },
+  { code: "mh3", name: "Modern Horizons 3" }, { code: "dar", name: "Dominaria (CT)" }, { code: "pdom", name: "Dominaria Promos" },
+  { code: "kld", name: "Kaladesh Remastered" }, { code: "alpha", name: "Limited Edition Alpha" }, { code: "zzz", name: "Mystery Box" },
+];
+
+test("coreEnd finds Reality Fracture as a paper expansion", () => {
+  assert.deepEqual([coreEnd(gindex)?.code, coreEnd(gindex)?.released], ["fra", "2026-10-02"]);
+  assert.equal(coreEnd(buildIconIndex(slimSets(GRAW.filter((s) => s.code !== "fra")))), null);
+});
+
+test("groupMagicSets: core/expansion paper sets oldest first ending with Reality Fracture, then the rest newest first", () => {
+  const r = groupMagicSets(CT, gindex);
+  assert.deepEqual(r.end, { code: "fra", released: "2026-10-02" });
+  assert.equal(r.core, 4);
+  assert.deepEqual(r.sets.filter((s) => s.group === "core").map((s) => s.code), ["alpha", "dar", "fdn", "fra"], "matched by name and by MTGO code; ends with RF");
+  assert.deepEqual(r.sets.filter((s) => s.group === "other").map((s) => s.code),
+    ["trk", "frc", "pfra", "mh3", "kld", "pdom", "xfra", "zzz"],
+    "later premier set (Star Trek) first, then newest first; digital and unknown sets below; no-date last in CardTrader order");
+  assert.equal(r.sets.length, CT.length);
+});
+
+test("groupMagicSets never promotes a promo/token code by stripping its prefix", () => {
+  const r = groupMagicSets([{ code: "pfdn", name: "Foundations Promo Pack" }, { code: "tfra", name: "Reality Fracture Tokens" }], gindex);
+  assert.deepEqual(r.sets.map((s) => s.group), ["other", "other"]);
+});
+
+test("groupMagicSets without Reality Fracture leaves the order alone", () => {
+  const r = groupMagicSets(CT, buildIconIndex(slimSets(GRAW.filter((s) => s.code !== "fra"))));
+  assert.equal(r.core, 0); assert.equal(r.end, null);
+  assert.deepEqual(r.sets.map((s) => s.code), CT.map((s) => s.code));
 });

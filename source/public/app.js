@@ -241,7 +241,7 @@ function selectGame(game, options = {}) {
 
 /* ---------- Set identifier per game (CardTrader's set codes, the same ones enrichment and export use) ----------
  * Shown and saved upper-case ("VEN", "FDN"), as the Waitlist already has them; lookups ignore case. */
-const SET_CACHE_KEY = "hekla-sets-v2"; // v2: Magic sets carry Scryfall symbols
+const SET_CACHE_KEY = "hekla-sets-v3"; // v2: Magic sets carry Scryfall symbols
 const SET_TTL_MS = 24 * 3600_000;
 const setLists = {}; // game → { sets: [{code, name}], source, hint, at }
 const setLoading = {};
@@ -295,7 +295,9 @@ async function refreshSetOptions(game) {
   combo.sets = entry.sets;
   closeCombo();
   const input = $("set-identifier");
-  const first = entry.sets[0];
+  // Magic lists core sets oldest first, so the example is the newest core set (the last one before the divider).
+  const core = entry.sets.filter((s) => s.group === "core");
+  const first = core.length ? core[core.length - 1] : entry.sets[0];
   input.placeholder = first ? `e.g. ${first.code.toUpperCase()} (${first.name})` : "Set code";
   const symbols = entry.icons && entry.icons.matched ? `, ${entry.icons.matched} with set symbols` : "";
   $("set-hint").textContent = entry.sets.length ? `${entry.sets.length} ${game} sets from CardTrader${symbols}` : entry.hint || "";
@@ -306,11 +308,12 @@ async function refreshSetOptions(game) {
     else { input.value = ""; saveDefaults(); }
   }
   paintCurrentIcon();
+  if (document.activeElement === input && entry.sets.length) openCombo(); // focused before the list arrived
 }
 
 /* ---------- set combobox: type to filter, ↑/↓, Enter or Tab picks and jumps to Collector number, Esc closes ---------- */
-const combo = { sets: [], shown: [], active: -1 };
-const COMBO_MAX = 60;
+const combo = { sets: [], shown: [], active: -1, split: -1 };
+const COMBO_MAX = 1500; // enough for every set CardTrader has for a game; the list scrolls
 
 function setIcon(icon) {
   const span = document.createElement("span");
@@ -329,10 +332,17 @@ function paintCurrentIcon() {
   holder.hidden = !icon;
   if (icon) { const url = `url("/set-icons/${icon}.svg")`; holder.style.webkitMaskImage = url; holder.style.maskImage = url; }
 }
-/** Code prefix, then code containing, then a name word starting with, then name containing; newest first in each. */
+/**
+ * Code prefix, then code containing, then a name word starting with, then name containing, each in list order.
+ * Magic's grouping is kept: matching core sets first, then the rest.
+ */
 function filterSets(text, sets) {
   const q = (text || "").trim().toLowerCase();
   if (!q) return sets;
+  const ranked = rankSets(q, sets);
+  return ranked.filter((s) => s.group === "core").concat(ranked.filter((s) => s.group !== "core"));
+}
+function rankSets(q, sets) {
   const head = q.split(/\s+[—–-]\s+/)[0];
   const starts = [], inCode = [], nameStarts = [], inName = [];
   for (const s of sets) {
@@ -351,7 +361,7 @@ function openCombo() {
   const exact = resolveSet(input.value, combo.sets);
   combo.active = combo.shown.length ? Math.max(0, combo.shown.findIndex((s) => s.code === exact)) : -1;
   if (!input.value.trim()) combo.active = -1;
-  list.replaceChildren(...combo.shown.slice(0, COMBO_MAX).map((s, i) => {
+  const items = combo.shown.slice(0, COMBO_MAX).map((s, i) => {
     const li = document.createElement("li");
     li.id = `set-opt-${i}`; li.setAttribute("role", "option"); li.dataset.code = s.code;
     li.setAttribute("aria-selected", i === combo.active ? "true" : "false");
@@ -361,12 +371,26 @@ function openCombo() {
     li.append(code, name);
     li.addEventListener("mousedown", (e) => { e.preventDefault(); pickSet(s.code, true); });
     return li;
-  }));
+  });
+  // Divider between Magic's core sets and the rest, only when both groups have matches. Not an option, so
+  // ↑/↓ (which walk the options) skip it.
+  combo.split = combo.shown.slice(0, COMBO_MAX).findIndex((s) => s.group !== "core");
+  if (combo.split <= 0 || combo.shown[0].group !== "core") combo.split = -1;
+  let divider = null;
+  if (combo.split > 0) {
+    divider = document.createElement("li");
+    divider.className = "divider"; divider.setAttribute("role", "separator"); divider.setAttribute("aria-label", "Other sets");
+    divider.textContent = "Other sets";
+    items.splice(combo.split, 0, divider);
+  }
+  list.replaceChildren(...items);
   if (combo.shown.length > COMBO_MAX) { const more = document.createElement("li"); more.className = "more"; more.textContent = `${combo.shown.length - COMBO_MAX} more, keep typing…`; list.append(more); }
   if (!combo.shown.length) { const none = document.createElement("li"); none.className = "more"; none.textContent = "No matching set"; list.append(none); }
   list.hidden = false;
   input.setAttribute("aria-expanded", "true");
   moveActive(0);
+  // Opened with nothing typed: show the newest core sets (the end of the top group) and the divider.
+  if (combo.active < 0 && divider) list.scrollTop = Math.max(0, divider.offsetTop + divider.offsetHeight * 3 - list.clientHeight);
 }
 function closeCombo() {
   $("set-listbox").hidden = true;
@@ -377,7 +401,9 @@ function closeCombo() {
 function moveActive(step) {
   const max = Math.min(combo.shown.length, COMBO_MAX);
   if (!max) return;
-  if (step) combo.active = combo.active < 0 ? (step > 0 ? 0 : max - 1) : (combo.active + step + max) % max;
+  // With nothing active and the list scrolled to the divider, ↑ starts at the last core set, ↓ just below it.
+  const start = combo.split > 0 && combo.split < max ? (step > 0 ? combo.split : combo.split - 1) : (step > 0 ? 0 : max - 1);
+  if (step) combo.active = combo.active < 0 ? start : (combo.active + step + max) % max;
   document.querySelectorAll("#set-listbox [role=option]").forEach((li, i) => li.setAttribute("aria-selected", i === combo.active ? "true" : "false"));
   const li = combo.active >= 0 ? $(`set-opt-${combo.active}`) : null;
   if (li) { $("set-identifier").setAttribute("aria-activedescendant", li.id); li.scrollIntoView({ block: "nearest" }); }
@@ -395,7 +421,7 @@ function wireCombo() {
   const input = $("set-identifier");
   input.addEventListener("input", () => { openCombo(); paintCurrentIcon(); });
   input.addEventListener("focus", () => { if (combo.sets.length) openCombo(); });
-  input.addEventListener("blur", () => setTimeout(closeCombo, 0));
+  input.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== input) closeCombo(); }, 0));
   input.addEventListener("keydown", (e) => {
     const open = !$("set-listbox").hidden;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (!open) openCombo(); moveActive(e.key === "ArrowDown" ? 1 : -1); return; }

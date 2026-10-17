@@ -36,7 +36,7 @@ import { getState, listSales, setState } from "./salesdb.ts";
 import { confirmedMatches, confirmMatch, latestSnapshot, logAction, recentActions, removeMatch, saveSnapshot, type ReconAction } from "./recondb.ts";
 import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
 import { parseTcgExport } from "./tcgcsv.ts";
-import { scryfallIndex, setIconSvg, withIcons } from "./scryfall.ts";
+import { groupMagicSets, scryfallIndex, setIconSvg, withIcons } from "./scryfall.ts";
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
@@ -197,8 +197,10 @@ app.get("/api/sets", async (c) => {
     const index = await scryfallIndex().catch((error) => { console.log("scryfall sets unavailable", String(error)); return null; });
     if (!index) return c.json({ game, source: "cardtrader", sets, icons: { matched: 0, total: sets.length } });
     const { sets: withSymbols, matched } = withIcons(sets, index);
-    console.log("set symbols", JSON.stringify({ game, matched, total: sets.length }));
-    return c.json({ game, source: "cardtrader", sets: withSymbols, icons: { matched, total: sets.length } });
+    // Core sets first (oldest → Reality Fracture), then a divider, then the rest newest first.
+    const grouped = groupMagicSets(withSymbols, index);
+    console.log("set symbols", JSON.stringify({ game, matched, total: sets.length, core: grouped.core, coreEnd: grouped.end }));
+    return c.json({ game, source: "cardtrader", sets: grouped.sets, icons: { matched, total: sets.length }, core: { count: grouped.core, end: grouped.end } });
   } catch (error) {
     if (error instanceof CardTraderError) return c.json({ game, source: "none", sets: [], hint: "CardTrader's set list is unavailable right now; type the set code." });
     throw error;
