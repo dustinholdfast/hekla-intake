@@ -12,4 +12,6 @@ interface Env {
   DATABASE_URL?: string;
   /** Encrypts each tenant's connection tokens before they are stored in Neon. */
   CONNECTIONS_KEY?: string;
+  /** Deployed version (wrangler.toml [version_metadata]); cache-busts static assets. */
+  CF_VERSION_METADATA?: { id: string; tag?: string; timestamp?: string };
 }

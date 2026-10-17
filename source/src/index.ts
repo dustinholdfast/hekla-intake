@@ -36,7 +36,30 @@ import { getState, listSales, setState } from "./salesdb.ts";
 import { confirmedMatches, confirmMatch, latestSnapshot, logAction, recentActions, removeMatch, saveSnapshot, type ReconAction } from "./recondb.ts";
 import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
 import { parseTcgExport } from "./tcgcsv.ts";
-import { groupMagicSets, scryfallIndex, setIconSvg, withIcons } from "./scryfall.ts";
+import { groupMagicSets, refreshScryfallStore, scryfallIndexWithSource, setIconSvg, withIcons, type ScryfallSet, type ScryfallStore } from "./scryfall.ts";
+
+/** Bump when /api/sets changes shape; the browser drops cached lists of another shape. */
+export const SETS_SHAPE = 4;
+const SCRYFALL_STATE_KEY = "scryfall:sets";
+/** Scryfall's public set list is global; it is kept as one sync_state row (under the oldest tenant). */
+function scryfallStore(env: Env): ScryfallStore | null {
+  if (!env.DATABASE_URL?.trim()) return null;
+  return {
+    async load() {
+      const rows = await db(env).query("select value, updated_at from sync_state where key = $1 order by updated_at desc limit 1", [SCRYFALL_STATE_KEY]);
+      const v = rows[0]?.value as { sets?: ScryfallSet[] } | undefined;
+      return v && Array.isArray(v.sets) ? { sets: v.sets, at: new Date(String(rows[0]!.updated_at)).getTime() } : null;
+    },
+    async save(sets) {
+      await db(env).query(
+        `insert into sync_state (tenant_id, key, value, updated_at)
+         select id, $1, $2::jsonb, now() from tenants order by created_at limit 1
+         on conflict (tenant_id, key) do update set value = excluded.value, updated_at = now()`,
+        [SCRYFALL_STATE_KEY, JSON.stringify({ sets })],
+      );
+    },
+  };
+}
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
@@ -44,7 +67,8 @@ import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
 import { canonicalGame, CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, RARITIES, SETS, type Game } from "./sets.ts";
-import { listTenantPlans, listTenants, recordAudit, setCompPlan, tenantById, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
+import { assetVersion, versionedUrl } from "./assets.ts";
+import { db, listTenantPlans, listTenants, recordAudit, setCompPlan, tenantById, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
 
 type Variables = { tenant: Tenant; tenantEnv: Env; userId: string; orgRole: string | null };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -187,20 +211,31 @@ async function cardTraderToken(c: AppContext): Promise<string> {
 app.get("/api/sets", async (c) => {
   const game = canonicalGame(c.req.query("game") ?? "");
   if (!game) return c.json({ error: "Unknown game." }, 400);
-  if (game === "Lorcana") return c.json({ game, source: "hekla", sets: SETS.map((s) => ({ code: s.id, name: s.name })) });
+  if (game === "Lorcana") return c.json({ game, source: "hekla", shape: SETS_SHAPE, complete: true, sets: SETS.map((s) => ({ code: s.id, name: s.name })) });
   const token = await connectionSecret(c.env, c.var.tenant.id, "cardtrader");
-  if (!token) return c.json({ game, source: "none", sets: [], hint: "Connect CardTrader in Settings to get the set list." });
+  if (!token) return c.json({ game, source: "none", shape: SETS_SHAPE, complete: false, sets: [], hint: "Connect CardTrader in Settings to get the set list." });
   try {
     const sets = await expansionsFor(token, game);
-    if (game !== "Magic: The Gathering") return c.json({ game, source: "cardtrader", sets });
-    // Magic: add Scryfall set symbols. Without Scryfall the list still works, just without symbols.
-    const index = await scryfallIndex().catch((error) => { console.log("scryfall sets unavailable", String(error)); return null; });
-    if (!index) return c.json({ game, source: "cardtrader", sets, icons: { matched: 0, total: sets.length } });
-    const { sets: withSymbols, matched } = withIcons(sets, index);
+    if (game !== "Magic: The Gathering") return c.json({ game, source: "cardtrader", shape: SETS_SHAPE, complete: true, sets });
+    // Magic: Scryfall set symbols and core-first grouping. Scryfall's list comes from the edge cache or the copy
+    // stored in Neon; only when neither exists is the list sent bare, marked incomplete so the browser won't keep it.
+    let found;
+    try { found = await scryfallIndexWithSource({ store: scryfallStore(c.env) }); }
+    catch (error) {
+      console.error("SET SYMBOLS UNAVAILABLE: Magic list sent without symbols or grouping", JSON.stringify({ error: String(error), total: sets.length }));
+      return c.json({ game, source: "cardtrader", shape: SETS_SHAPE, complete: false, sets, icons: { matched: 0, total: sets.length }, hint: "Set symbols are unavailable right now; Hekla will retry shortly." });
+    }
+    const { sets: withSymbols, matched } = withIcons(sets, found.index);
     // Core sets first (oldest → Reality Fracture), then a divider, then the rest newest first.
-    const grouped = groupMagicSets(withSymbols, index);
-    console.log("set symbols", JSON.stringify({ game, matched, total: sets.length, core: grouped.core, coreEnd: grouped.end }));
-    return c.json({ game, source: "cardtrader", sets: grouped.sets, icons: { matched, total: sets.length }, core: { count: grouped.core, end: grouped.end } });
+    const grouped = groupMagicSets(withSymbols, found.index);
+    const coreSets = grouped.sets.slice(0, grouped.core);
+    const fra = withSymbols.filter((s) => /reality fracture/i.test(s.name)).map((s) => `${s.code}=${s.name}`);
+    console.log("set symbols", JSON.stringify({
+      game, matched, total: sets.length, core: grouped.core, coreEnd: grouped.end, scryfall: found.source, scryfallAgeHours: Math.round((Date.now() - found.at) / 3600_000),
+      coreTail: coreSets.slice(-3).map((s) => s.code), ctRealityFracture: fra,
+      unmatchedSample: withSymbols.filter((s) => !s.icon).slice(0, 25).map((s) => `${s.code}=${s.name}`),
+    }));
+    return c.json({ game, source: "cardtrader", shape: SETS_SHAPE, complete: true, sets: grouped.sets, icons: { matched, total: sets.length }, core: { count: grouped.core, end: grouped.end } });
   } catch (error) {
     if (error instanceof CardTraderError) return c.json({ game, source: "none", sets: [], hint: "CardTrader's set list is unavailable right now; type the set code." });
     throw error;
@@ -915,14 +950,21 @@ app.post("/api/reconcile/airtable/set", async (c) => {
 // only files Scryfall lists are fetched, and each is cached for a week.
 app.get("/set-icons/:file", async (c) => {
   const m = /^([a-z0-9]{1,12})\.svg$/.exec(c.req.param("file"));
-  const svg = m ? await setIconSvg(m[1]!).catch(() => null) : null;
-  if (!svg) return c.body(null, 404, { "cache-control": "public, max-age=3600" });
+  const svg = m ? await setIconSvg(m[1]!, fetch, scryfallStore(c.env)).catch((e) => { console.error("set icon failed", m[1], String(e)); return null; }) : null;
+  if (!svg) return c.body(null, 404, { "cache-control": "public, max-age=300" }); // short: a Scryfall hiccup must not stick
   return c.body(svg, 200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "public, max-age=86400, stale-while-revalidate=604800", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
 });
 
 app.get("*", async (c) => {
-  const response = await c.env.ASSETS.fetch(c.req.raw);
+  let response = await c.env.ASSETS.fetch(c.req.raw);
   const headers = new Headers(response.headers);
+  if ((headers.get("content-type") ?? "").includes("text/html") && response.status === 200) {
+    // Cache-bust: every same-origin script and stylesheet gets ?v=<deployed version>, and the HTML itself is never
+    // reused without revalidating, so a deploy shows up on the next page load.
+    response = withAssetVersion(response, assetVersion(c.env));
+    headers.set("cache-control", "no-cache");
+    headers.delete("etag"); headers.delete("content-length");
+  }
   headers.set("content-security-policy", contentSecurityPolicy(c.env, PREVIEW_IMAGE_HOSTS));
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
@@ -955,6 +997,13 @@ function audit(c: AppContext, action: AuditAction, cards: { id: string }[]): voi
   try { c.executionCtx.waitUntil(work); } catch { /* no ctx */ }
 }
 
+function withAssetVersion(response: Response, version: string): Response {
+  return new HTMLRewriter()
+    .on("script[src]", { element(el) { const u = versionedUrl(el.getAttribute("src"), version); if (u) el.setAttribute("src", u); } })
+    .on('link[rel="stylesheet"][href]', { element(el) { const u = versionedUrl(el.getAttribute("href"), version); if (u) el.setAttribute("href", u); } })
+    .transform(response);
+}
+
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
@@ -963,6 +1012,8 @@ export default {
     const at = new Date(event.scheduledTime);
     const jobs = cronJobs(event.cron, at);
     if (jobs.sales) ctx.waitUntil(salesCron(env, at));
+    // Keep the stored Scryfall set list fresh off the request path (no-op while it is under 24 h old).
+    { const store = scryfallStore(env); if (store) ctx.waitUntil(refreshScryfallStore(store).then((r) => { if (r === "refreshed") console.log("scryfall sets refreshed"); }).catch((e) => console.error("SCRYFALL REFRESH FAILED", String(e)))); }
     if (!jobs.enrich) return;
     ctx.waitUntil((async () => {
       let tenants: Tenant[];

@@ -65,15 +65,20 @@ export function buildIconIndex(sets: ScryfallSet[]): IconIndex {
 
 /**
  * The Scryfall icon file for a CardTrader set, or null (the picker then shows no symbol).
- * Order: exact code (also MTGO/Arena codes) → code without a promo/token/foil prefix (p, t, f) →
- * exact set name → name without "Promos"/"Tokens"/… suffixes.
+ * Order: exact code (also MTGO/Arena codes) → code without a promo/token/foil/art/commander prefix
+ * (p, t, f, a, c: CardTrader's "afra", "cfrc") → exact set name → name without "Promos"/"Tokens"/… suffixes →
+ * code before a dash ("sld-odd" → sld) → name before a colon.
  */
 export function iconFor(set: SetOption, index: IconIndex): string | null {
   const code = set.code.trim().toLowerCase();
+  const head = code.split(/[-_ ]/)[0]!; // CardTrader's "sld-odd", "sld-miku" → "sld"
+  const beforeColon = set.name.includes(":") ? set.name.slice(0, set.name.indexOf(":")) : "";
   const hit = index.byCode.get(code)
-    ?? (code.length >= 4 && /^[ptf]/.test(code) ? index.byCode.get(code.slice(1)) : undefined)
+    ?? (code.length >= 4 && /^[ptfac]/.test(code) ? index.byCode.get(code.slice(1)) : undefined)
     ?? index.byName.get(normSetName(set.name))
-    ?? index.byName.get(baseSetName(set.name));
+    ?? index.byName.get(baseSetName(set.name))
+    ?? (head !== code && head.length >= 3 ? index.byCode.get(head) : undefined)
+    ?? (beforeColon ? index.byName.get(normSetName(beforeColon)) : undefined);
   return hit?.icon ?? null;
 }
 
@@ -138,28 +143,91 @@ async function scryfallGate(): Promise<void> {
 
 const cache = () => (globalThis as any).caches?.default as Cache | undefined;
 
-export async function scryfallIndex(fetcher: typeof fetch = fetch): Promise<IconIndex> {
-  const key = new Request("https://hekla-scryfall.cache/sets-v2");
-  const c = cache();
-  let sets: ScryfallSet[] | null = null;
-  if (c) { const hit = await c.match(key); if (hit) sets = await hit.json() as ScryfallSet[]; }
-  if (!sets) {
+/** Durable copy of Scryfall's set list (Neon), so a Scryfall outage or 429 never strips the picker. */
+export type ScryfallStore = {
+  load(): Promise<{ sets: ScryfallSet[]; at: number } | null>;
+  save(sets: ScryfallSet[]): Promise<void>;
+};
+export const SCRYFALL_TTL_MS = 24 * 3600_000;
+const INDEX_CACHE_KEY = "https://hekla-scryfall.cache/sets-v3";
+
+// After a 429/5xx, this isolate leaves Scryfall alone until then (Retry-After, at least a minute).
+let backoffUntil = 0;
+export function resetScryfallBackoff(): void { backoffUntil = 0; lastCall = 0; }
+
+/** Live GET /sets: User-Agent + Accept, one retry after ~1 s on 429/5xx, then backs off. */
+export async function fetchScryfallSets(fetcher: typeof fetch = fetch, sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): Promise<ScryfallSet[]> {
+  if (Date.now() < backoffUntil) throw new Error(`Scryfall backoff for ${Math.ceil((backoffUntil - Date.now()) / 1000)} s`);
+  let status = 0;
+  for (let attempt = 0; attempt < 2; attempt++) {
     await scryfallGate();
     const r = await fetcher("https://api.scryfall.com/sets", { headers: SCRYFALL_HEADERS, signal: AbortSignal.timeout(15000) });
-    if (!r.ok) throw new Error(`Scryfall /sets answered ${r.status}`);
-    sets = slimSets(((await r.json()) as J).data ?? []);
-    if (c) await c.put(key, new Response(JSON.stringify(sets), { headers: { "content-type": "application/json", "cache-control": "public, max-age=86400" } }));
+    if (r.ok) {
+      const sets = slimSets(((await r.json()) as J).data ?? []);
+      if (sets.length < 100) throw new Error(`Scryfall /sets returned only ${sets.length} sets`);
+      return sets;
+    }
+    status = r.status;
+    if (status !== 429 && status < 500) break;
+    const retryAfter = Number(r.headers.get("retry-after")) || 0;
+    if (attempt === 0) { await sleep(Math.min(2000, Math.max(1000, retryAfter * 1000))); continue; }
+    backoffUntil = Date.now() + Math.max(60_000, retryAfter * 1000);
   }
-  return buildIconIndex(sets);
+  throw new Error(`Scryfall /sets answered ${status}`);
+}
+
+export type IndexResult = { index: IconIndex; source: "edge" | "stored" | "live" | "stale"; at: number };
+/**
+ * Scryfall's sets: edge cache (24 h) → stored copy in Neon if under 24 h → live fetch (saved to both) →
+ * a stored copy of any age when Scryfall is failing. Throws only when there is no copy at all.
+ */
+export async function scryfallIndexWithSource(opts: { fetcher?: typeof fetch; store?: ScryfallStore | null; live?: boolean } = {}): Promise<IndexResult> {
+  const { fetcher = fetch, store = null, live = true } = opts;
+  const key = new Request(INDEX_CACHE_KEY);
+  const c = cache();
+  const putEdge = async (sets: ScryfallSet[], at: number) => {
+    if (c) await c.put(key, new Response(JSON.stringify({ sets, at }), { headers: { "content-type": "application/json", "cache-control": "public, max-age=86400" } })).catch(() => {});
+  };
+  if (c) {
+    const hit = await c.match(key);
+    if (hit) { const v = await hit.json() as { sets: ScryfallSet[]; at: number }; if (Array.isArray(v.sets)) return { index: buildIconIndex(v.sets), source: "edge", at: v.at }; }
+  }
+  const stored = store ? await store.load().catch((e) => { console.error("scryfall store read failed", String(e)); return null; }) : null;
+  if (stored && Date.now() - stored.at < SCRYFALL_TTL_MS) { await putEdge(stored.sets, stored.at); return { index: buildIconIndex(stored.sets), source: "stored", at: stored.at }; }
+  if (live) {
+    try {
+      const sets = await fetchScryfallSets(fetcher);
+      const at = Date.now();
+      if (store) await store.save(sets).catch((e) => console.error("scryfall store write failed", String(e)));
+      await putEdge(sets, at);
+      return { index: buildIconIndex(sets), source: "live", at };
+    } catch (error) {
+      if (!stored) throw error;
+      console.error("scryfall live fetch failed; using stored copy", JSON.stringify({ error: String(error), ageHours: Math.round((Date.now() - stored.at) / 3600_000) }));
+    }
+  }
+  if (stored) return { index: buildIconIndex(stored.sets), source: "stale", at: stored.at };
+  throw new Error("No Scryfall set list available");
+}
+export async function scryfallIndex(fetcher: typeof fetch = fetch, store: ScryfallStore | null = null): Promise<IconIndex> {
+  return (await scryfallIndexWithSource({ fetcher, store })).index;
+}
+
+/** Cron: refresh the stored copy when it is older than 24 h (retried every tick while Scryfall refuses). */
+export async function refreshScryfallStore(store: ScryfallStore, fetcher: typeof fetch = fetch): Promise<"fresh" | "refreshed"> {
+  const stored = await store.load();
+  if (stored && Date.now() - stored.at < SCRYFALL_TTL_MS) return "fresh";
+  await store.save(await fetchScryfallSets(fetcher));
+  return "refreshed";
 }
 
 /** The SVG for one icon file, cached a week. Only files Scryfall lists are fetched. */
-export async function setIconSvg(file: string, fetcher: typeof fetch = fetch): Promise<string | null> {
+export async function setIconSvg(file: string, fetcher: typeof fetch = fetch, store: ScryfallStore | null = null): Promise<string | null> {
   if (!/^[a-z0-9]{1,12}$/.test(file)) return null;
   const key = new Request(`https://hekla-scryfall.cache/icon/${file}.svg`);
   const c = cache();
   if (c) { const hit = await c.match(key); if (hit) return await hit.text(); }
-  const index = await scryfallIndex(fetcher);
+  const index = await scryfallIndex(fetcher, store);
   if (!index.icons.has(file)) return null;
   await scryfallGate();
   const r = await fetcher(`https://svgs.scryfall.io/sets/${file}.svg`, { headers: { ...SCRYFALL_HEADERS, accept: "image/svg+xml,*/*;q=0.8" }, signal: AbortSignal.timeout(15000) });
