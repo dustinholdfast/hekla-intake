@@ -510,3 +510,25 @@ a.ghost { display: inline-flex; align-items: center; text-decoration: none; }
 .connection .hint { margin: 0; }
 .connection-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .connection-row input { flex: 1 1 260px; }
+
+/* Set identifier combobox (Quick add). Symbols are masks filled with currentColor, so they follow the theme. */
+.combo { position: relative; display: block; }
+.combo input { width: 100%; }
+.combo .combo-current ~ input { padding-left: 1.9rem; }
+.combo-current { position: absolute; left: 0.5rem; top: 50%; transform: translateY(-50%); color: var(--text); pointer-events: none; }
+.combo-list {
+  position: absolute; z-index: 30; left: 0; top: calc(100% + 4px); min-width: 100%; width: max-content; max-width: min(26rem, 90vw);
+  max-height: 18rem; overflow-y: auto; margin: 0; padding: 0.25rem; list-style: none;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+.combo-list li { display: flex; align-items: center; gap: 0.55rem; padding: 0.4rem 0.5rem; border-radius: 7px; cursor: pointer; color: var(--text); font-size: 0.85rem; }
+.combo-list li[aria-selected="true"] { background: var(--panel-2); outline: 1px solid var(--ice); }
+.combo-list li .code { font-weight: 600; min-width: 3.2rem; letter-spacing: 0.02em; }
+.combo-list li .name { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.combo-list li.more { color: var(--muted); cursor: default; font-size: 0.75rem; }
+.set-icon {
+  display: inline-block; flex: none; width: 1.15rem; height: 1.15rem; background-color: currentColor;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain;
+}
+.set-icon.none { background: none; }

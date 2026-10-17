@@ -79,8 +79,12 @@
                 <select id="set" name="setNumber"></select>
               </label>
               <label id="set-identifier-field" class="field" for="set-identifier" hidden>Set identifier
-                <input id="set-identifier" name="setIdentifier" autocomplete="off" list="set-options" spellcheck="false" autocapitalize="off" placeholder="Set code" />
-                <datalist id="set-options"></datalist>
+                <span class="combo">
+                  <span id="set-current-icon" class="set-icon combo-current" aria-hidden="true" hidden></span>
+                  <input id="set-identifier" name="setIdentifier" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Set code"
+                    role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="set-listbox" />
+                  <ul id="set-listbox" class="combo-list" role="listbox" aria-label="Sets" hidden></ul>
+                </span>
                 <small id="set-hint" class="hint"></small>
               </label>
               <label>Finish

@@ -36,6 +36,7 @@ import { getState, listSales, setState } from "./salesdb.ts";
 import { confirmedMatches, confirmMatch, latestSnapshot, logAction, recentActions, removeMatch, saveSnapshot, type ReconAction } from "./recondb.ts";
 import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
 import { parseTcgExport } from "./tcgcsv.ts";
+import { scryfallIndex, setIconSvg, withIcons } from "./scryfall.ts";
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
@@ -190,7 +191,14 @@ app.get("/api/sets", async (c) => {
   const token = await connectionSecret(c.env, c.var.tenant.id, "cardtrader");
   if (!token) return c.json({ game, source: "none", sets: [], hint: "Connect CardTrader in Settings to get the set list." });
   try {
-    return c.json({ game, source: "cardtrader", sets: await expansionsFor(token, game) });
+    const sets = await expansionsFor(token, game);
+    if (game !== "Magic: The Gathering") return c.json({ game, source: "cardtrader", sets });
+    // Magic: add Scryfall set symbols. Without Scryfall the list still works, just without symbols.
+    const index = await scryfallIndex().catch((error) => { console.log("scryfall sets unavailable", String(error)); return null; });
+    if (!index) return c.json({ game, source: "cardtrader", sets, icons: { matched: 0, total: sets.length } });
+    const { sets: withSymbols, matched } = withIcons(sets, index);
+    console.log("set symbols", JSON.stringify({ game, matched, total: sets.length }));
+    return c.json({ game, source: "cardtrader", sets: withSymbols, icons: { matched, total: sets.length } });
   } catch (error) {
     if (error instanceof CardTraderError) return c.json({ game, source: "none", sets: [], hint: "CardTrader's set list is unavailable right now; type the set code." });
     throw error;
@@ -899,6 +907,15 @@ app.post("/api/reconcile/airtable/set", async (c) => {
   await writeStock(c.var.tenantEnv, recordId, qty);
   await reconAudit(c, "airtable_set", recordId, { before: current, after: qty, soldStatus: qty === 0 });
   return c.json({ ok: true, before: current, after: qty });
+});
+
+// Magic set symbols, same-origin so the CSP needs no new image host. Public (they are Scryfall's public icons);
+// only files Scryfall lists are fetched, and each is cached for a week.
+app.get("/set-icons/:file", async (c) => {
+  const m = /^([a-z0-9]{1,12})\.svg$/.exec(c.req.param("file"));
+  const svg = m ? await setIconSvg(m[1]!).catch(() => null) : null;
+  if (!svg) return c.body(null, 404, { "cache-control": "public, max-age=3600" });
+  return c.body(svg, 200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "public, max-age=86400, stale-while-revalidate=604800", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
 });
 
 app.get("*", async (c) => {
