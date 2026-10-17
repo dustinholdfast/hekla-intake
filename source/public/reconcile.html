@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1628" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Hekla · Reconcile</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <p id="boot" class="boot">Opening reconcile…</p>
+
+  <section id="login-view" class="login" hidden>
+    <div class="login-card">
+      <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
+      <h1>Reconcile</h1>
+      <div id="clerk-mount"></div>
+      <p id="login-error" class="error" role="alert"></p>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Back to intake</a>
+        <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="recon-view" class="admin" hidden>
+    <header class="admin-top">
+      <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+      <div>
+        <h1>Reconcile</h1>
+        <p class="lede"><span id="tenant-name"></span> · Airtable Qty vs CardTrader vs TCGplayer</p>
+      </div>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Back to intake</a>
+        <a class="ghost tiny" href="/sales">Sales</a>
+        <a class="ghost tiny" href="/settings">Settings</a>
+        <button id="logout" class="ghost tiny" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <p id="error" class="error" role="alert"></p>
+    <p id="flash" class="flash" role="status"></p>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Sources</h2></div>
+      <p class="hint"><b>Airtable</b> is read live every time this page loads. A Listed row should show its Qty on each platform; any other status should show 0. Nothing here changes Airtable unless you press <b>Set Airtable to …</b> and confirm.</p>
+      <p><b>CardTrader:</b> <span id="ct-at" class="hint"></span> <button id="ct-check" class="ghost tiny" type="button" hidden>Run check now</button></p>
+      <p id="ct-cron" class="hint"></p>
+      <p><b>TCGplayer:</b> <span id="tcg-at" class="hint"></span></p>
+      <div id="tcg-upload-box" class="queue-tools" hidden>
+        <label class="hint">Seller Portal → Pricing → Export From Live (or Export My Inventory) CSV <input id="tcg-file" type="file" accept=".csv,text/csv" /></label>
+        <button id="tcg-upload" class="primary" type="button">Upload export</button>
+      </div>
+      <p id="sku-col" class="hint"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Cards</h2><span id="counts" class="hint"></span></div>
+      <form id="filters" class="queue-tools" autocomplete="off">
+        <select id="f-mismatch" aria-label="Show"><option value="">All cards</option><option value="any" selected>Mismatches only</option><option value="cardtrader">CardTrader mismatches</option><option value="tcgplayer">TCGplayer mismatches</option></select>
+        <select id="f-game" aria-label="Game"><option value="">All games</option></select>
+        <button class="primary" type="submit">Apply</button>
+        <button id="export" class="ghost tiny" type="button">Download CSV</button>
+        <button id="tcg-import" class="ghost tiny" type="button" hidden>TCGplayer import CSV for selected</button>
+      </form>
+      <p class="hint">The TCGplayer import uses Add to Quantity = Airtable − TCGplayer and keeps your current TCGplayer price (TCGplayer requires a price column). Only SKU or confirmed matches go in it. Upload it at Seller Portal → Pricing → Import, then review in Staged.</p>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all" hidden /></th><th>Card</th><th>Game</th><th>Set · #</th><th>Cond · Finish</th><th>Status</th><th>Airtable Qty</th><th>CardTrader</th><th>TCGplayer</th><th>Match</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>On CardTrader, not tied to a Waitlist row</h2></div>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>Listing</th><th>Blueprint</th><th>Qty</th><th>Price</th><th>Points at row</th></tr></thead><tbody id="ct-unmatched"></tbody></table></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>On TCGplayer, not matched to a Waitlist row</h2><span id="tcg-unmatched-meta" class="hint"></span></div>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>SKU</th><th>Product</th><th>Line</th><th>Set · #</th><th>Condition</th><th>Qty</th><th>Price</th><th></th></tr></thead><tbody id="tcg-unmatched"></tbody></table></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Reconcile log</h2></div>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>When (ET)</th><th>Action</th><th>Row</th><th>Detail</th></tr></thead><tbody id="actions"></tbody></table></div>
+    </section>
+  </div>
+
+  <script src="/session.js"></script>
+  <script src="/reconcile.js"></script>
+</body>
+</html>
