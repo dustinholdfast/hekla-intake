@@ -729,8 +729,8 @@ function audit(c: AppContext, action: AuditAction, cards: { id: string }[]): voi
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    // One "*/5" trigger: Cloudflare runs only one trigger per minute when two match, so enrichment rides on
-    // the same trigger every 10th minute instead of having its own "*/10".
+    // One "*/5" trigger keeps a single schedule: enrichment rides on it every 10th minute instead of
+    // having its own "*/10".
     const at = new Date(event.scheduledTime);
     const jobs = cronJobs(event.cron, at);
     if (jobs.sales) ctx.waitUntil(salesCron(env, at));

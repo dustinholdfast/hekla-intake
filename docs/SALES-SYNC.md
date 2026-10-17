@@ -52,7 +52,7 @@ Known limit: Airtable has no compare-and-set. During the hand-over both systems 
 | `RECONCILE_MODE` | `off` / `report` / `push` | `push` only ever *lowers* a CardTrader listing, and only when the same excess shows on two runs in a row. It never raises anything. |
 | `TCGPLAYER_DAILY_EMAIL` | `off` / `on` | 9 AM America/New_York email of the pull list (needs alert email on Settings). |
 
-Cron: a single `*/5` trigger. Each tick runs the CardTrader poll and decrements, the reconcile on :00/:15/:30/:45 and the daily email (each no-op while its flag is off), and every 10th minute it also runs enrichment (same cadence as the old `*/10`). There is deliberately no separate `*/10`: Cloudflare fires only one trigger in a minute where two match, which silently skipped enrichment when both were configured.
+Cron: a single `*/5` trigger. Each tick runs the CardTrader poll and decrements, the reconcile on :00/:15/:30/:45 and the daily email (each no-op while its flag is off), and every 10th minute it also runs enrichment (same cadence as the old `*/10`). There is no separate `*/10`, simply to keep one schedule. (While both were configured on deploy day, two `*/10` ticks were missed; that was most likely because each deploy landed a minute or two before the tick, not a Cloudflare limit: starfoil-lgs runs `*/3` and `*/15` in the same minute without trouble.)
 
 CardTrader rate limit: 200 requests / 10 s per account. Hekla's client keeps itself under 150 / 10 s per isolate. The poll is 1 request every 5 min and the reconcile is 1 export request, which leaves plenty of room for starfoil-lgs.
 
