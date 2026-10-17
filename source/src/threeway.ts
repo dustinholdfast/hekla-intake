@@ -18,7 +18,7 @@ export type TcgMatch = { tcgplayerId: string; source: MatchSource; confidence: n
 export type ViewRow = {
   recordId: string; name: string; game: string | null; set: string | null; number: string | null; condition: string | null; finish: string | null;
   status: string | null; airtableQty: number; expectedQty: number;
-  ct: { qty: number; listingIds: number[] } | null;
+  ct: { qty: number; listingIds: number[]; storedListingId: number | null } | null;
   tcg: { qty: number; tcgplayerId: string; source: MatchSource; confidence: number; productName: string | null; setName: string | null; condition: string | null; priceCents: number | null } | null;
   ctMismatch: boolean; tcgMismatch: boolean;
   /** Set when this row went into a downloaded TCGplayer import that has not shown up in an export yet. */
@@ -149,7 +149,7 @@ export function buildView(rows: ReconRow[], listings: CtListing[] | null, tcgRow
       if (Number.isInteger(stored) && byListing.has(stored)) mine.set(stored, byListing.get(stored)!);
       for (const l of byRecord.get(r.id) ?? []) mine.set(l.id, l);
       for (const id of mine.keys()) usedListings.add(id);
-      ct = { qty: [...mine.values()].reduce((n, l) => n + l.quantity, 0), listingIds: [...mine.keys()] };
+      ct = { qty: [...mine.values()].reduce((n, l) => n + l.quantity, 0), listingIds: [...mine.keys()], storedListingId: Number.isInteger(stored) ? stored : null };
     }
     const m = matches.get(r.id);
     const tcg: ViewRow["tcg"] = m ? { qty: m.row?.totalQty ?? 0, tcgplayerId: m.tcgplayerId, source: m.source, confidence: m.confidence, productName: m.row?.productName ?? null, setName: m.row?.setName ?? null, condition: m.row?.condition ?? null, priceCents: m.row?.priceCents ?? null } : null;
@@ -278,4 +278,101 @@ export function applyCtChanges(listings: CtListing[], changes: { listingId: numb
   const delta = new Map<number, number>();
   for (const c of changes) delta.set(c.listingId, (delta.get(c.listingId) ?? 0) + c.delta);
   return listings.map((l) => (delta.has(l.id) ? { ...l, quantity: l.quantity + delta.get(l.id)! } : l)).filter((l) => l.quantity > 0);
+}
+
+/* ---------- Reconcile All (Airtable is the source of truth; never changes Airtable) ---------- */
+
+export const RECONCILE_BATCH = 25;
+export function chunk<T>(items: T[], size = RECONCILE_BATCH): T[][] {
+  if (!(size >= 1)) throw new Error("chunk size must be at least 1");
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+export type CtItem = { recordId: string; name: string; before: number; target: number; changes: { listingId: number; delta: number }[]; deletes: number[] };
+export type AllPlan = {
+  cardtrader: CtItem[];
+  cardtraderBlocked: { recordId: string; name: string; reason: string }[];
+  tcgplayer: { recordIds: string[]; suggested: number; skipped: { recordId: string; reason: string }[] };
+  summary: { ctRows: number; ctUp: number; ctDown: number; ctListingsChanged: number; ctDeletes: number; ctToZeroRows: number; tcgRows: number; tcgSuggested: number; tcgSkipped: number };
+};
+
+/**
+ * What Reconcile All would do with these (visible) rows: CardTrader to the Airtable quantity for every CardTrader
+ * mismatch, and a TCGplayer import for every open TCGplayer mismatch with a SKU or confirmed match. Unconfirmed
+ * suggestions are counted, never included. `deletes` are listings that reach 0 (CardTrader deletes them).
+ */
+export function planReconcileAll(rows: ViewRow[], listings: CtListing[], prices: Map<string, number | null>, platforms: { cardtrader: boolean; tcgplayer: boolean }): AllPlan {
+  const byId = new Map(listings.map((l) => [l.id, l]));
+  const cardtrader: CtItem[] = []; const cardtraderBlocked: AllPlan["cardtraderBlocked"] = [];
+  if (platforms.cardtrader) {
+    for (const r of rows) {
+      if (!r.ctMismatch || !r.ct) continue;
+      const mine = r.ct.listingIds.map((id) => byId.get(id)).filter((l): l is CtListing => !!l);
+      const plan = planCardTraderSet(mine, r.ct.storedListingId, r.expectedQty);
+      if (!plan.ok) { cardtraderBlocked.push({ recordId: r.recordId, name: r.name, reason: plan.error }); continue; }
+      if (!plan.changes.length) continue;
+      const deletes = plan.changes.filter((c) => (byId.get(c.listingId)?.quantity ?? 0) + c.delta <= 0).map((c) => c.listingId);
+      cardtrader.push({ recordId: r.recordId, name: r.name, before: plan.before, target: r.expectedQty, changes: plan.changes, deletes });
+    }
+  }
+  let tcgRecordIds: string[] = []; let suggested = 0; let skipped: { recordId: string; reason: string }[] = [];
+  if (platforms.tcgplayer) {
+    const open = rows.filter(tcgOpen);
+    suggested = open.filter((r) => r.tcg?.source === "suggested").length;
+    const built = tcgplayerAdjustCsv(open.filter((r) => r.tcg?.source !== "suggested"), prices);
+    tcgRecordIds = built.included.map((i) => i.recordId);
+    skipped = built.skipped;
+  }
+  return {
+    cardtrader, cardtraderBlocked, tcgplayer: { recordIds: tcgRecordIds, suggested, skipped },
+    summary: {
+      ctRows: cardtrader.length, ctUp: cardtrader.filter((i) => i.target > i.before).length, ctDown: cardtrader.filter((i) => i.target < i.before).length,
+      ctListingsChanged: cardtrader.reduce((n, i) => n + i.changes.length, 0), ctDeletes: cardtrader.reduce((n, i) => n + i.deletes.length, 0),
+      ctToZeroRows: cardtrader.filter((i) => i.target === 0).length, tcgRows: tcgRecordIds.length, tcgSuggested: suggested, tcgSkipped: skipped.length,
+    },
+  };
+}
+
+export type BatchItem = { recordId: string; expectedTarget: number; expectedCurrent: number };
+export type BatchResult = { recordId: string; status: "succeeded" | "skipped" | "failed"; reason?: string; before?: number; target?: number; applied: { listingId: number; delta: number }[] };
+type BatchCard = { id: string; qty: number; status: string | null; cardTraderListingId: string | null };
+
+/**
+ * One Reconcile All batch, sequential. Each row is re-checked against a fresh Airtable read and a fresh CardTrader
+ * export; a row whose numbers moved since the plan is skipped, not changed. A failure stops that row only.
+ */
+export async function runCtBatch(items: BatchItem[], cards: Map<string, BatchCard>, startListings: CtListing[],
+  apply: (listingId: number, delta: number) => Promise<void>, log: (item: BatchItem, result: BatchResult) => Promise<void>): Promise<BatchResult[]> {
+  const results: BatchResult[] = [];
+  let listings = startListings;
+  for (const item of items) {
+    let result: BatchResult;
+    const card = cards.get(item.recordId);
+    if (!card) result = { recordId: item.recordId, status: "skipped", reason: "Waitlist row not found", applied: [] };
+    else {
+      const stored = Number(card.cardTraderListingId);
+      const mine = listings.filter((l) => l.recordId === card.id || l.id === stored);
+      const target = expectedQty(card);
+      const plan = planCardTraderSet(mine, Number.isInteger(stored) ? stored : null, target);
+      if (target !== item.expectedTarget) result = { recordId: item.recordId, status: "skipped", reason: `Airtable changed (now expects ${target})`, target, applied: [] };
+      else if (!plan.ok) result = { recordId: item.recordId, status: "skipped", reason: plan.error, target, applied: [] };
+      else if (plan.before !== item.expectedCurrent) result = { recordId: item.recordId, status: "skipped", reason: `CardTrader changed (now ${plan.before})`, before: plan.before, target, applied: [] };
+      else if (!plan.changes.length) result = { recordId: item.recordId, status: "skipped", reason: "already matches", before: plan.before, target, applied: [] };
+      else {
+        const applied: { listingId: number; delta: number }[] = [];
+        try {
+          for (const ch of plan.changes) { await apply(ch.listingId, ch.delta); applied.push(ch); }
+          result = { recordId: item.recordId, status: "succeeded", before: plan.before, target, applied };
+        } catch (error) {
+          result = { recordId: item.recordId, status: "failed", reason: error instanceof Error ? error.message : String(error), before: plan.before, target, applied };
+        }
+      }
+    }
+    if (result.applied.length) listings = applyCtChanges(listings, result.applied);
+    await log(item, result);
+    results.push(result);
+  }
+  return results;
 }

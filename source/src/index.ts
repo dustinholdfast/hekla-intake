@@ -36,7 +36,7 @@ import { getState, listSales, setState } from "./salesdb.ts";
 import { confirmedMatches, confirmMatch, latestSnapshot, logAction, recentActions, removeMatch, saveSnapshot, type ReconAction } from "./recondb.ts";
 import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
 import { parseTcgExport } from "./tcgcsv.ts";
-import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, tcgplayerAdjustCsv, viewCounts, viewCsv, type PendingTcg, type ViewFilter } from "./threeway.ts";
+import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
@@ -716,7 +716,7 @@ async function reconView(c: AppContext) {
   const pending = livePending(await getState<PendingTcg>(c.env, id, TCG_PENDING), snapshot?.info.uploadedAt ?? null, Date.now());
   applyPending(view.rows, pending);
   view.counts = { ...view.counts, ...viewCounts(view.rows) };
-  return { pending, view, hasSkuColumn, snapshot: snapshot?.info ?? null, prices: new Map(rows.map((r) => [r.id, r.marketPriceUsd])) };
+  return { pending, listings: cache?.listings ?? [], view, hasSkuColumn, snapshot: snapshot?.info ?? null, prices: new Map(rows.map((r) => [r.id, r.marketPriceUsd])) };
 }
 function readViewFilter(q: Record<string, string | undefined>): ViewFilter {
   const m = q.mismatch;
@@ -801,7 +801,7 @@ app.post("/api/reconcile/tcgplayer/import", async (c) => {
   const at = new Date().toISOString();
   for (const i of result.included) pending[i.recordId] = { at, tcgplayerId: i.tcgplayerId, delta: i.delta };
   if (result.included.length) await setState(c.env, c.var.tenant.id, TCG_PENDING, pending);
-  await reconAudit(c, "tcgplayer_import_csv", null, { included: result.included, skipped: result.skipped.length, snapshotAt: view.tcgAt });
+  await reconAudit(c, "tcgplayer_import_csv", null, { included: result.included, skipped: result.skipped.length, snapshotAt: view.tcgAt, batchId: typeof body.value.batchId === "string" ? body.value.batchId.slice(0, 64) : null });
   const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   return c.json({ csv: result.csv, filename: `tcgplayer-reconcile-${day}.csv`, included: result.included, skipped: result.skipped, pendingAt: at });
 });
@@ -832,6 +832,42 @@ app.post("/api/reconcile/cardtrader/set", async (c) => {
     await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: applyCtChanges(listings, done) } satisfies CtCache);
   }
   return c.json({ ok: true, before: plan.before, target, ctQty: target, changes: done });
+});
+
+// Reconcile All, step 1: what would change for these rows (from the last check; nothing is changed).
+app.post("/api/reconcile/all/plan", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can reconcile." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const ids = new Set(Array.isArray(body.value.recordIds) ? (body.value.recordIds as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 5000) : []);
+  const { view, prices, listings } = await reconView(c);
+  const plan = planReconcileAll(view.rows.filter((r) => ids.has(r.recordId)), listings, prices, { cardtrader: body.value.cardtrader === true && !!view.ctAt, tcgplayer: body.value.tcgplayer === true && !!view.tcgAt });
+  return c.json({ ...plan, ctAt: view.ctAt, tcgAt: view.tcgAt, batchSize: RECONCILE_BATCH });
+});
+
+// Reconcile All, step 2 (repeated by the page, at most RECONCILE_BATCH rows per request so no request runs long):
+// CardTrader to the Airtable quantity, sequentially, each row re-checked first and logged with the batch id.
+app.post("/api/reconcile/all/cardtrader", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can change CardTrader." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const batchId = String(body.value.batchId ?? "");
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(batchId)) return c.json({ error: "Missing batch id." }, 400);
+  const raw = Array.isArray(body.value.items) ? (body.value.items as Record<string, unknown>[]) : [];
+  if (!raw.length || raw.length > RECONCILE_BATCH) return c.json({ error: `Send 1 to ${RECONCILE_BATCH} rows per request.` }, 400);
+  const items: BatchItem[] = [];
+  for (const i of raw) {
+    if (!i || typeof i.recordId !== "string" || !/^rec[A-Za-z0-9]{14}$/.test(i.recordId) || !Number.isInteger(i.expectedTarget) || !Number.isInteger(i.expectedCurrent)) return c.json({ error: "Each row needs recordId, expectedTarget and expectedCurrent." }, 400);
+    items.push({ recordId: i.recordId, expectedTarget: i.expectedTarget as number, expectedCurrent: i.expectedCurrent as number });
+  }
+  const token = await cardTraderToken(c);
+  const [cards, listings] = await Promise.all([stockCardsByIds(c.var.tenantEnv, items.map((i) => i.recordId)), exportListings(token)]);
+  const results = await runCtBatch(items, new Map(cards.map((k) => [k.id, k])), listings,
+    (listingId, delta) => incrementListing(token, listingId, delta).then(() => undefined),
+    (_item, r) => reconAudit(c, "cardtrader_set", r.recordId, { batchId, status: r.status, reason: r.reason ?? null, before: r.before ?? null, target: r.target ?? null, applied: r.applied }));
+  const applied = results.flatMap((r) => r.applied);
+  await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: applyCtChanges(listings, applied) } satisfies CtCache);
+  return c.json({ batchId, results });
 });
 
 // Sets Airtable Qty for one row, only when Airtable still shows what the admin saw.

@@ -67,9 +67,12 @@
         <button class="primary" type="submit">Apply</button>
         <button id="export" class="ghost tiny" type="button">Download CSV</button>
         <button id="tcg-import" class="ghost tiny" type="button" hidden>TCGplayer import CSV for selected</button>
+        <button id="reconcile-all" class="primary" type="button" hidden>Reconcile All</button>
       </form>
       <p class="hint">The TCGplayer import uses Add to Quantity = Airtable − TCGplayer and keeps your current TCGplayer price (TCGplayer requires a price column). Only SKU or confirmed matches go in it. Upload it at Seller Portal → Pricing → Import, then review in Staged.</p>
       <p class="hint">A row leaves this list as soon as it is reconciled. Rows in a downloaded TCGplayer import are marked <b>pending upload</b> and hidden until a newer TCGplayer export is uploaded (which then shows whether they match) or 24 hours pass. Tick <b>Show reconciled</b> to see them all.</p>
+      <p class="hint"><b>Reconcile All</b> treats Airtable as the truth for every mismatch in this view (game and platform filters apply): it sets CardTrader to the Airtable quantity and builds one TCGplayer import CSV. It never changes Airtable. You see exactly what will happen before anything changes.</p>
+      <div id="all-box" hidden><p id="all-progress" class="flash" role="status"></p><div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Platform</th><th>Result</th><th>Detail</th></tr></thead><tbody id="all-results"></tbody></table></div></div>
       <div class="table-wrap"><table class="admin-table"><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all" hidden /></th><th>Card</th><th>Game</th><th>Set · #</th><th>Cond · Finish</th><th>Status</th><th>Airtable Qty</th><th>CardTrader</th><th>TCGplayer</th><th>Match</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
     </section>
 
