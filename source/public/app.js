@@ -29,9 +29,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("login-signout").addEventListener("click", signOut);
   $("add-form").addEventListener("submit", onAdd);
   $("add-form").addEventListener("change", saveDefaults);
+  wireCombo();
   $("set-identifier").addEventListener("change", () => {
     const code = resolveSet($("set-identifier").value, setLists[state.game]?.sets || []);
     if (code) { $("set-identifier").value = code.toUpperCase(); saveDefaults(); }
+    paintCurrentIcon();
   });
   $("open-bulk").addEventListener("click", () => {
     $("bulk-error").textContent = "";
@@ -239,7 +241,7 @@ function selectGame(game, options = {}) {
 
 /* ---------- Set identifier per game (CardTrader's set codes, the same ones enrichment and export use) ----------
  * Shown and saved upper-case ("VEN", "FDN"), as the Waitlist already has them; lookups ignore case. */
-const SET_CACHE_KEY = "hekla-sets-v1";
+const SET_CACHE_KEY = "hekla-sets-v2"; // v2: Magic sets carry Scryfall symbols
 const SET_TTL_MS = 24 * 3600_000;
 const setLists = {}; // game → { sets: [{code, name}], source, hint, at }
 const setLoading = {};
@@ -272,7 +274,7 @@ async function loadSets(game) {
   const hit = cachedSets(game);
   if (hit) return hit;
   setLoading[game] ||= api(`/api/sets?game=${encodeURIComponent(game)}`).then(({ response, data }) => {
-    const entry = response.ok ? { sets: Array.isArray(data.sets) ? data.sets : [], source: data.source, hint: data.hint || "", at: Date.now() } : { sets: [], source: "none", hint: data.error || "", at: Date.now() };
+    const entry = response.ok ? { sets: Array.isArray(data.sets) ? data.sets : [], source: data.source, hint: data.hint || "", icons: data.icons || null, at: Date.now() } : { sets: [], source: "none", hint: data.error || "", at: Date.now() };
     storeSets(game, entry);
     return entry;
   }).finally(() => { delete setLoading[game]; });
@@ -290,18 +292,119 @@ function resolveSet(input, sets) {
 async function refreshSetOptions(game) {
   const entry = await loadSets(game);
   if (state.game !== game) return; // the game changed while loading
-  const list = $("set-options");
-  list.replaceChildren(...entry.sets.map((s) => { const o = document.createElement("option"); o.value = s.code.toUpperCase(); o.label = s.name; o.textContent = s.name; return o; }));
+  combo.sets = entry.sets;
+  closeCombo();
   const input = $("set-identifier");
   const first = entry.sets[0];
   input.placeholder = first ? `e.g. ${first.code.toUpperCase()} (${first.name})` : "Set code";
-  $("set-hint").textContent = entry.sets.length ? `${entry.sets.length} ${game} sets from CardTrader` : entry.hint || "";
+  const symbols = entry.icons && entry.icons.matched ? `, ${entry.icons.matched} with set symbols` : "";
+  $("set-hint").textContent = entry.sets.length ? `${entry.sets.length} ${game} sets from CardTrader${symbols}` : entry.hint || "";
   // A set from another game (or one CardTrader doesn't have) is cleared on the switch.
   if (entry.sets.length && input.value.trim()) {
     const code = resolveSet(input.value, entry.sets);
     if (code) input.value = code.toUpperCase();
     else { input.value = ""; saveDefaults(); }
   }
+  paintCurrentIcon();
+}
+
+/* ---------- set combobox: type to filter, ↑/↓, Enter or Tab picks and jumps to Collector number, Esc closes ---------- */
+const combo = { sets: [], shown: [], active: -1 };
+const COMBO_MAX = 60;
+
+function setIcon(icon) {
+  const span = document.createElement("span");
+  span.className = "set-icon";
+  span.setAttribute("aria-hidden", "true");
+  if (icon && /^[a-z0-9]{1,12}$/.test(icon)) {
+    const url = `url("/set-icons/${icon}.svg")`;
+    span.style.webkitMaskImage = url; span.style.maskImage = url; // CSSOM, allowed by the CSP
+  } else span.classList.add("none");
+  return span;
+}
+function paintCurrentIcon() {
+  const holder = $("set-current-icon");
+  const code = resolveSet($("set-identifier").value, combo.sets);
+  const icon = code && combo.sets.find((s) => s.code === code)?.icon;
+  holder.hidden = !icon;
+  if (icon) { const url = `url("/set-icons/${icon}.svg")`; holder.style.webkitMaskImage = url; holder.style.maskImage = url; }
+}
+/** Code prefix, then code containing, then a name word starting with, then name containing; newest first in each. */
+function filterSets(text, sets) {
+  const q = (text || "").trim().toLowerCase();
+  if (!q) return sets;
+  const head = q.split(/\s+[—–-]\s+/)[0];
+  const starts = [], inCode = [], nameStarts = [], inName = [];
+  for (const s of sets) {
+    const name = s.name.toLowerCase();
+    if (s.code.startsWith(head)) starts.push(s);
+    else if (s.code.includes(head)) inCode.push(s);
+    else if (name.startsWith(q) || name.includes(` ${q}`)) nameStarts.push(s);
+    else if (name.includes(q)) inName.push(s);
+  }
+  return starts.concat(inCode, nameStarts, inName);
+}
+function openCombo() {
+  if (!combo.sets.length) return closeCombo();
+  const input = $("set-identifier"), list = $("set-listbox");
+  combo.shown = filterSets(input.value, combo.sets);
+  const exact = resolveSet(input.value, combo.sets);
+  combo.active = combo.shown.length ? Math.max(0, combo.shown.findIndex((s) => s.code === exact)) : -1;
+  if (!input.value.trim()) combo.active = -1;
+  list.replaceChildren(...combo.shown.slice(0, COMBO_MAX).map((s, i) => {
+    const li = document.createElement("li");
+    li.id = `set-opt-${i}`; li.setAttribute("role", "option"); li.dataset.code = s.code;
+    li.setAttribute("aria-selected", i === combo.active ? "true" : "false");
+    const code = document.createElement("span"); code.className = "code"; code.textContent = s.code.toUpperCase();
+    const name = document.createElement("span"); name.className = "name"; name.textContent = s.name;
+    if (combo.sets.some((x) => x.icon !== undefined)) li.append(setIcon(s.icon));
+    li.append(code, name);
+    li.addEventListener("mousedown", (e) => { e.preventDefault(); pickSet(s.code, true); });
+    return li;
+  }));
+  if (combo.shown.length > COMBO_MAX) { const more = document.createElement("li"); more.className = "more"; more.textContent = `${combo.shown.length - COMBO_MAX} more, keep typing…`; list.append(more); }
+  if (!combo.shown.length) { const none = document.createElement("li"); none.className = "more"; none.textContent = "No matching set"; list.append(none); }
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+  moveActive(0);
+}
+function closeCombo() {
+  $("set-listbox").hidden = true;
+  $("set-identifier").setAttribute("aria-expanded", "false");
+  $("set-identifier").removeAttribute("aria-activedescendant");
+  combo.active = -1;
+}
+function moveActive(step) {
+  const max = Math.min(combo.shown.length, COMBO_MAX);
+  if (!max) return;
+  if (step) combo.active = combo.active < 0 ? (step > 0 ? 0 : max - 1) : (combo.active + step + max) % max;
+  document.querySelectorAll("#set-listbox [role=option]").forEach((li, i) => li.setAttribute("aria-selected", i === combo.active ? "true" : "false"));
+  const li = combo.active >= 0 ? $(`set-opt-${combo.active}`) : null;
+  if (li) { $("set-identifier").setAttribute("aria-activedescendant", li.id); li.scrollIntoView({ block: "nearest" }); }
+  else $("set-identifier").removeAttribute("aria-activedescendant");
+}
+function pickSet(code, jump) {
+  $("set-identifier").value = code.toUpperCase();
+  state.setWarned = null;
+  closeCombo();
+  paintCurrentIcon();
+  saveDefaults();
+  if (jump) $("collector").focus();
+}
+function wireCombo() {
+  const input = $("set-identifier");
+  input.addEventListener("input", () => { openCombo(); paintCurrentIcon(); });
+  input.addEventListener("focus", () => { if (combo.sets.length) openCombo(); });
+  input.addEventListener("blur", () => setTimeout(closeCombo, 0));
+  input.addEventListener("keydown", (e) => {
+    const open = !$("set-listbox").hidden;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (!open) openCombo(); moveActive(e.key === "ArrowDown" ? 1 : -1); return; }
+    if (e.key === "Escape" && open) { e.preventDefault(); closeCombo(); return; }
+    if ((e.key === "Enter" || e.key === "Tab") && open && combo.active >= 0 && combo.shown[combo.active]) {
+      e.preventDefault();
+      pickSet(combo.shown[combo.active].code, true);
+    }
+  });
 }
 
 /** Null when the set identifier is fine. A code not in the list blocks once; Enter again adds it anyway. */
