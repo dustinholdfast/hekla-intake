@@ -317,3 +317,28 @@ export async function rowsWithListings(env: Env): Promise<StockCard[]> {
   const { records } = await listWithOptional(env, `{${CARDTRADER_FIELD}}!=''`);
   return records.map(toStockCard);
 }
+
+/* ---------- three-way reconcile ---------- */
+
+/** Listed rows, Sold rows and anything with a CardTrader listing id, with the optional TCGplayer SKU. */
+export async function reconcileRows(env: Env): Promise<{ rows: StockCard[]; hasSkuColumn: boolean }> {
+  const { records, hasSku } = await listWithOptional(env, `OR({Status}='Listed',{Status}='Sold',{${CARDTRADER_FIELD}}!='')`);
+  return { rows: records.map(toStockCard), hasSkuColumn: hasSku };
+}
+
+/**
+ * Writes a TCGplayer SKU onto a Waitlist row. Hekla never creates Airtable fields: without a "TCGplayer SKU"
+ * column this returns "no_column" and changes nothing. Tries text first, then number (either column type works).
+ */
+export async function writeTcgplayerSku(env: Env, recordId: string, sku: string): Promise<"written" | "no_column"> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
+  if (!/^\d{1,12}$/.test(sku)) throw new AirtableError("A TCGplayer SKU is digits only.", 400);
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
+  const patch = (value: string | number) => airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields: { [TCGPLAYER_SKU_FIELD]: value }, typecast: false }) });
+  try { await patch(sku); return "written"; } catch (error) {
+    if (!(error instanceof AirtableError) || error.status !== 400) throw error;
+    if (/unknown field/i.test(error.message)) return "no_column";
+    if (/invalid|cannot accept/i.test(error.message)) { await patch(Number(sku)); return "written"; }
+    throw error;
+  }
+}

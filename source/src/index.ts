@@ -2,6 +2,11 @@ import { clerkMiddleware, getAuth } from "@clerk/hono";
 import { Hono, type Context } from "hono";
 import {
   AirtableError,
+  readStock,
+  reconcileRows,
+  stockCardsByIds,
+  writeStock,
+  writeTcgplayerSku,
   cardsForExport,
   createCards,
   deleteCard,
@@ -22,12 +27,16 @@ import {
   type QueueCard,
 } from "./airtable.ts";
 import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
-import { appInfo, CardTraderError, createProduct, deleteProduct, previewExport, setWebhookUrl } from "./cardtrader.ts";
+import { appInfo, CardTraderError, createProduct, deleteProduct, exportListings, incrementListing, previewExport, setWebhookUrl, type CtListing } from "./cardtrader.ts";
 import { cleanToken, ConnectionError, connectionSecret, connectionSettings, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
 import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
 import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
-import { getState, listSales } from "./salesdb.ts";
+import { getState, listSales, setState } from "./salesdb.ts";
+import { confirmedMatches, confirmMatch, latestSnapshot, logAction, recentActions, removeMatch, saveSnapshot, type ReconAction } from "./recondb.ts";
+import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
+import { parseTcgExport } from "./tcgcsv.ts";
+import { buildView, expectedQty, filterView, planCardTraderSet, tcgplayerAdjustCsv, viewCsv, type ViewFilter } from "./threeway.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
@@ -689,6 +698,147 @@ app.get("/api/reconcile", async (c) => {
 app.post("/api/reconcile", async (c) => {
   if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can run a check." }, 403);
   return c.json({ report: await runReconcile(c.env, c.var.tenant, "report") });
+});
+
+/* ---------- three-way reconcile: Airtable vs CardTrader vs TCGplayer (docs/RECONCILE.md) ---------- */
+
+type CtCache = { at: string; listings: CtListing[] };
+const CT_CACHE = "reconcile:ct_listings";
+
+async function reconView(c: AppContext) {
+  const id = c.var.tenant.id;
+  const [{ rows, hasSkuColumn }, cache, snapshot, confirmed] = await Promise.all([
+    reconcileRows(c.var.tenantEnv), getState<CtCache>(c.env, id, CT_CACHE), latestSnapshot(c.env, id), confirmedMatches(c.env, id),
+  ]);
+  const view = buildView(rows, cache?.listings ?? null, snapshot?.rows ?? null, confirmed, { ct: cache?.at ?? null, tcg: snapshot?.info.uploadedAt ?? null });
+  return { view, hasSkuColumn, snapshot: snapshot?.info ?? null, prices: new Map(rows.map((r) => [r.id, r.marketPriceUsd])) };
+}
+function readViewFilter(q: Record<string, string | undefined>): ViewFilter {
+  const m = q.mismatch;
+  return { mismatch: m === "any" || m === "cardtrader" || m === "tcgplayer" ? m : null, game: q.game?.trim() ? q.game.trim().slice(0, 60) : null };
+}
+const reconAudit = (c: AppContext, action: ReconAction, recordId: string | null, detail: Record<string, unknown>) => logAction(c.env, c.var.tenant.id, c.var.userId, action, recordId, detail);
+
+app.get("/api/reconcile/view", async (c) => {
+  const { view, hasSkuColumn, snapshot } = await reconView(c);
+  const filter = readViewFilter(c.req.query());
+  const mode = reconcileMode(c.env);
+  const cron = mode === "off" ? null : await getState<ReconcileReport>(c.env, c.var.tenant.id, "reconcile:last");
+  return c.json({
+    rows: filterView(view.rows, filter), counts: view.counts, filter, ctAt: view.ctAt, tcgAt: view.tcgAt, snapshot, hasSkuColumn,
+    unmatchedCardTrader: view.unmatchedCardTrader, unmatchedTcgplayer: view.unmatchedTcgplayer.slice(0, 500), unmatchedTcgplayerTotal: view.unmatchedTcgplayer.length,
+    cron: cron ? { mode, at: cron.at, summary: reconcileSummary(cron), errors: cron.errors } : { mode, at: null, summary: null, errors: [] },
+    canManage: canManageConnections(c), actions: await recentActions(c.env, c.var.tenant.id, 25),
+  });
+});
+
+app.get("/api/reconcile/view.csv", async (c) => {
+  const { view } = await reconView(c);
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  return new Response(viewCsv(filterView(view.rows, readViewFilter(c.req.query()))), { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="reconcile-${day}.csv"`, "cache-control": "no-store" } });
+});
+
+// Read-only: one CardTrader products export, cached for the page. Works whatever RECONCILE_MODE says.
+app.post("/api/reconcile/check", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can run a check." }, 403);
+  const listings = await exportListings(await cardTraderToken(c));
+  const at = new Date().toISOString();
+  await setState(c.env, c.var.tenant.id, CT_CACHE, { at, listings } satisfies CtCache);
+  await reconAudit(c, "check_cardtrader", null, { listings: listings.length });
+  return c.json({ at, listings: listings.length });
+});
+
+app.post("/api/reconcile/tcgplayer/upload", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can upload a TCGplayer export." }, 403);
+  let body: string;
+  try { body = await c.req.text(); } catch { return c.json({ error: "Could not read the file." }, 400); }
+  const parsed = parseTcgExport(body);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const filename = (c.req.header("x-filename") ?? "").replace(/[^\w .()-]/g, "").slice(0, 120) || null;
+  const info = await saveSnapshot(c.env, c.var.tenant.id, c.var.userId, filename, parsed.totalRows, parsed.columns, parsed.rows);
+  await reconAudit(c, "tcgplayer_upload", null, { filename, totalRows: parsed.totalRows, stockedRows: parsed.rows.length, skippedBad: parsed.skippedBad, duplicateIds: parsed.duplicateIds, columns: parsed.columns });
+  return c.json({ snapshot: info, skippedBad: parsed.skippedBad, duplicateIds: parsed.duplicateIds });
+});
+
+app.post("/api/reconcile/tcgplayer/confirm", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can confirm a match." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const recordId = String(body.value.recordId ?? ""); const tcgplayerId = String(body.value.tcgplayerId ?? "");
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId) || !/^\d{1,12}$/.test(tcgplayerId)) return c.json({ error: "Pick a Waitlist row and a TCGplayer SKU." }, 400);
+  await confirmMatch(c.env, c.var.tenant.id, recordId, tcgplayerId, c.var.userId);
+  await reconAudit(c, "tcgplayer_confirm", recordId, { tcgplayerId, confidence: body.value.confidence ?? null });
+  let sku: "written" | "no_column" | "not_requested" = "not_requested";
+  if (body.value.writeSku === true) {
+    sku = await writeTcgplayerSku(c.var.tenantEnv, recordId, tcgplayerId);
+    await reconAudit(c, "tcgplayer_sku_write", recordId, { tcgplayerId, result: sku });
+  }
+  return c.json({ ok: true, sku });
+});
+
+app.delete("/api/reconcile/tcgplayer/confirm/:recordId", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can remove a match." }, 403);
+  const recordId = c.req.param("recordId");
+  if (await removeMatch(c.env, c.var.tenant.id, recordId)) await reconAudit(c, "tcgplayer_unconfirm", recordId, {});
+  return c.json({ ok: true });
+});
+
+// Builds (does not send) a Seller Portal import that brings the selected rows to their Airtable quantity.
+app.post("/api/reconcile/tcgplayer/import", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can build a TCGplayer import." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const ids = Array.isArray(body.value.recordIds) ? new Set((body.value.recordIds as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 2000)) : new Set<string>();
+  if (!ids.size) return c.json({ error: "Select at least one row." }, 400);
+  const { view, prices } = await reconView(c);
+  if (!view.tcgAt) return c.json({ error: "Upload a TCGplayer export first." }, 409);
+  const result = tcgplayerAdjustCsv(view.rows.filter((r) => ids.has(r.recordId)), prices);
+  await reconAudit(c, "tcgplayer_import_csv", null, { included: result.included, skipped: result.skipped.length, snapshotAt: view.tcgAt });
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  return c.json({ csv: result.csv, filename: `tcgplayer-reconcile-${day}.csv`, included: result.included, skipped: result.skipped });
+});
+
+// Sets CardTrader to the Airtable quantity for one row. Re-reads both sides first; refuses if either moved.
+app.post("/api/reconcile/cardtrader/set", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can change CardTrader." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const recordId = String(body.value.recordId ?? "");
+  const [card] = await stockCardsByIds(c.var.tenantEnv, [recordId]);
+  if (!card) return c.json({ error: "That Waitlist row was not found." }, 404);
+  const token = await cardTraderToken(c);
+  const listings = await exportListings(token);
+  const stored = Number(card.cardTraderListingId);
+  const mine = listings.filter((l) => l.recordId === recordId || l.id === stored);
+  const target = expectedQty(card);
+  if (body.value.expectedTarget !== target) return c.json({ error: `Airtable now says ${target} for this card. Reload and check again.`, code: "changed" }, 409);
+  const plan = planCardTraderSet(mine, Number.isInteger(stored) ? stored : null, target);
+  if (!plan.ok) return c.json({ error: plan.error }, 400);
+  if (body.value.expectedCurrent !== plan.before) return c.json({ error: `CardTrader now shows ${plan.before}. Reload and check again.`, code: "changed" }, 409);
+  const done: { listingId: number; delta: number }[] = [];
+  try {
+    for (const change of plan.changes) { await incrementListing(token, change.listingId, change.delta); done.push(change); }
+  } finally {
+    await reconAudit(c, "cardtrader_set", recordId, { before: plan.before, target, planned: plan.changes, applied: done });
+    const fresh = await exportListings(token).catch(() => null);
+    if (fresh) await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: fresh } satisfies CtCache);
+  }
+  return c.json({ ok: true, before: plan.before, target, changes: done });
+});
+
+// Sets Airtable Qty for one row, only when Airtable still shows what the admin saw.
+app.post("/api/reconcile/airtable/set", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can change Airtable." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const recordId = String(body.value.recordId ?? ""); const qty = body.value.qty; const expectedCurrent = body.value.expectedCurrent;
+  if (typeof qty !== "number" || !Number.isInteger(qty) || qty < 0 || qty > 9999) return c.json({ error: "Qty must be a whole number from 0 to 9999." }, 400);
+  const current = await readStock(c.var.tenantEnv, recordId);
+  if (current == null) return c.json({ error: "That Waitlist row was not found." }, 404);
+  if (current !== expectedCurrent) return c.json({ error: `Airtable now shows ${current}. Reload and check again.`, code: "changed" }, 409);
+  await writeStock(c.var.tenantEnv, recordId, qty);
+  await reconAudit(c, "airtable_set", recordId, { before: current, after: qty, soldStatus: qty === 0 });
+  return c.json({ ok: true, before: current, after: qty });
 });
 
 app.get("*", async (c) => {
