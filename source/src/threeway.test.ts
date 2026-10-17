@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { CtListing } from "./cardtrader.ts";
 import { diffStock } from "./reconcile.ts";
 import { parseCsv, parseTcgCondition, parseTcgExport, type TcgRow } from "./tcgcsv.ts";
-import { buildView, filterView, matchScore, matchTcgplayer, normNumber, planCardTraderSet, tcgplayerAdjustCsv, viewCsv, type ReconRow } from "./threeway.ts";
+import { applyCtChanges, applyPending, buildView, filterView, livePending, matchScore, matchTcgplayer, normNumber, planCardTraderSet, reconciled, tcgplayerAdjustCsv, viewCounts, viewCsv, type ReconRow } from "./threeway.ts";
 import { TCGPLAYER_HEADER } from "./tcgplayer.ts";
 
 const HEADER = "TCGplayer Id,Product Line,Set Name,Product Name,Title,Number,Rarity,Condition,TCG Market Price,TCG Direct Low,TCG Low Price With Shipping,TCG Low Price,Total Quantity,Add to Quantity,TCG Marketplace Price,Photo URL";
@@ -119,8 +119,8 @@ test("buildView: quantities, mismatches and unmatched lists on each side", () =>
   assert.deepEqual(v.unmatchedTcgplayer.map((t) => t.tcgplayerId), ["2"]);
   assert.equal(v.counts.ctMismatch, 1);
   assert.equal(v.counts.tcgMismatch, 1);
-  assert.deepEqual(filterView(v.rows, { mismatch: "cardtrader", game: null }).map((r) => r.recordId), [B]);
-  assert.deepEqual(filterView(v.rows, { mismatch: null, game: "Pokémon" }), []);
+  assert.deepEqual(filterView(v.rows, { mismatch: "cardtrader", game: null, showReconciled: false }).map((r) => r.recordId), [B]);
+  assert.deepEqual(filterView(v.rows, { mismatch: "any", game: "Pokémon", showReconciled: true }), []);
 });
 
 test("a Sold row still listed on CardTrader shows as a mismatch (expected 0)", () => {
@@ -172,4 +172,47 @@ test("viewCsv has one line per row plus the header", () => {
   const cells = parseCsv(viewCsv(v.rows));
   assert.equal(cells.length, 2);
   assert.equal(cells[1]![9], "2");
+});
+
+/* ---------- reconciled rows leave the list ---------- */
+
+test("filterView hides reconciled rows unless showReconciled; game still applies", () => {
+  const rows = [R({ id: A, qty: 1, tcgplayerSku: "1" }), R({ id: B, qty: 2, tcgplayerSku: "2" }), R({ id: C, qty: 1, game: "Riftbound" })];
+  const v = buildView(rows, [L(10, A, 1), L(20, B, 1), L(30, C, 1)], [T({ tcgplayerId: "1", totalQty: 1 }), T({ tcgplayerId: "2", totalQty: 2, number: "7" })], new Map(), { ct: "a", tcg: "b" });
+  const ids = (f: Parameters<typeof filterView>[1]) => filterView(v.rows, f).map((r) => r.recordId);
+  assert.deepEqual(ids({ mismatch: "any", game: null, showReconciled: false }), [B, C]);
+  assert.deepEqual(ids({ mismatch: "tcgplayer", game: null, showReconciled: false }), [C]);
+  assert.deepEqual(ids({ mismatch: "any", game: null, showReconciled: true }), [A, B, C]);
+  assert.deepEqual(ids({ mismatch: "any", game: "Lorcana", showReconciled: true }), [A, B]);
+});
+
+test("an unconfirmed suggestion is not reconciled even when the numbers agree", () => {
+  const v = buildView([R({ id: A, qty: 2 })], null, [T({ tcgplayerId: "1", totalQty: 2 })], new Map(), { ct: null, tcg: "b" });
+  assert.equal(v.rows[0]!.tcg!.source, "suggested");
+  assert.equal(reconciled(v.rows[0]!), false);
+  const confirmed = buildView([R({ id: A, qty: 2 })], null, [T({ tcgplayerId: "1", totalQty: 2 })], new Map([[A, "1"]]), { ct: null, tcg: "b" });
+  assert.equal(reconciled(confirmed.rows[0]!), true);
+});
+
+test("pending TCGplayer import: in force until a newer export or 24 hours", () => {
+  const at = "2026-10-17T18:00:00.000Z", t = Date.parse(at);
+  const p = { [A]: { at, tcgplayerId: "1", delta: 2 } };
+  assert.deepEqual(Object.keys(livePending(p, "2026-10-17T12:00:00.000Z", t + 3600_000)), [A]);
+  assert.deepEqual(Object.keys(livePending(p, null, t + 23 * 3600_000)), [A]);
+  assert.deepEqual(Object.keys(livePending(p, null, t + 24 * 3600_000)), [], "expired");
+  assert.deepEqual(Object.keys(livePending(p, "2026-10-17T18:30:00.000Z", t + 3600_000)), [], "a newer export decides");
+});
+
+test("a pending row is hidden and counted as pending; a SKU change drops the pending mark", () => {
+  const v = buildView([R({ id: A, qty: 3, tcgplayerSku: "1" }), R({ id: B, qty: 3, tcgplayerSku: "9" })], null, [T({ tcgplayerId: "1", totalQty: 1 }), T({ tcgplayerId: "9", totalQty: 1, number: "8" })], new Map(), { ct: null, tcg: "b" });
+  applyPending(v.rows, { [A]: { at: "x", tcgplayerId: "1", delta: 2 }, [B]: { at: "x", tcgplayerId: "5", delta: 2 } });
+  assert.deepEqual(v.rows.map((r) => !!r.tcgPending), [true, false]);
+  assert.deepEqual(filterView(v.rows, { mismatch: "any", game: null, showReconciled: false }).map((r) => r.recordId), [B]);
+  const c = viewCounts(v.rows);
+  assert.deepEqual([c.tcgMismatch, c.pendingUpload, c.open], [1, 1, 1]);
+});
+
+test("applyCtChanges patches the cached listings and drops listings at 0", () => {
+  const out = applyCtChanges([L(10, A, 1), L(11, A, 3), L(20, B, 1)], [{ listingId: 11, delta: -3 }, { listingId: 10, delta: 1 }]);
+  assert.deepEqual(out.map((l) => [l.id, l.quantity]), [[10, 2], [20, 1]]);
 });

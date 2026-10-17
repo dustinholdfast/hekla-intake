@@ -61,13 +61,15 @@
     <section class="panel">
       <div class="panel-head"><h2>Cards</h2><span id="counts" class="hint"></span></div>
       <form id="filters" class="queue-tools" autocomplete="off">
-        <select id="f-mismatch" aria-label="Show"><option value="">All cards</option><option value="any" selected>Mismatches only</option><option value="cardtrader">CardTrader mismatches</option><option value="tcgplayer">TCGplayer mismatches</option></select>
+        <select id="f-mismatch" aria-label="Show"><option value="any" selected>All mismatches</option><option value="cardtrader">CardTrader mismatches</option><option value="tcgplayer">TCGplayer mismatches</option></select>
         <select id="f-game" aria-label="Game"><option value="">All games</option></select>
+        <label class="hint"><input id="f-reconciled" type="checkbox" /> Show reconciled</label>
         <button class="primary" type="submit">Apply</button>
         <button id="export" class="ghost tiny" type="button">Download CSV</button>
         <button id="tcg-import" class="ghost tiny" type="button" hidden>TCGplayer import CSV for selected</button>
       </form>
       <p class="hint">The TCGplayer import uses Add to Quantity = Airtable − TCGplayer and keeps your current TCGplayer price (TCGplayer requires a price column). Only SKU or confirmed matches go in it. Upload it at Seller Portal → Pricing → Import, then review in Staged.</p>
+      <p class="hint">A row leaves this list as soon as it is reconciled. Rows in a downloaded TCGplayer import are marked <b>pending upload</b> and hidden until a newer TCGplayer export is uploaded (which then shows whether they match) or 24 hours pass. Tick <b>Show reconciled</b> to see them all.</p>
       <div class="table-wrap"><table class="admin-table"><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all" hidden /></th><th>Card</th><th>Game</th><th>Set · #</th><th>Cond · Finish</th><th>Status</th><th>Airtable Qty</th><th>CardTrader</th><th>TCGplayer</th><th>Match</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
     </section>
 

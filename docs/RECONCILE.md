@@ -21,6 +21,19 @@ which push mode uses for its two-checks-in-a-row rule). When `RECONCILE_MODE` is
 **CardTrader matching** follows the cron's `diffStock` rule: a listing belongs to a row if its id is the row's `CardTrader
 Listing ID` or its `tag` is the row's record id. A test keeps the two in agreement. Listings that belong to no row are listed separately.
 
+## Reconciled rows leave the list
+
+The list opens on **All mismatches** (or just CardTrader or TCGplayer). A row is *reconciled* when CardTrader and TCGplayer both
+match the expected quantity and no suggested TCGplayer match is waiting for confirmation. After a successful
+**Set CardTrader**, **Set Airtable** or **Confirm match** that reconciles a row, the row is removed at once, without reloading the page, and the counts update.
+
+Rows put into a downloaded **TCGplayer import CSV** are marked *pending upload* (`sync_state` `reconcile:tcg_pending`) and hidden.
+They stay pending until a TCGplayer export uploaded *after* the CSV shows whether they now match, or until 24 hours pass. After that, a row that
+still differs comes back. **Show reconciled** lists every row, with pending rows shown as `1 → 3 pending upload`.
+
+After **Set CardTrader**, the cached listings are patched with the change instead of being re-exported, because CardTrader's export can
+lag a write by a few seconds. Without the patch, the row would look unchanged and a second click would be refused as stale.
+
 ## TCGplayer export (column assumptions)
 
 Export from Seller Portal → Pricing → **Export From Live** (or Export My Inventory). Hekla expects TCGplayer's pricing CSV:
@@ -73,7 +86,7 @@ Unmatched TCGplayer rows can be tied to a row by record id (**Match to a row...*
 
 ## Routes
 
-`GET /api/reconcile/view` (?mismatch=any|cardtrader|tcgplayer&game=...), `GET /api/reconcile/view.csv`, and admin-only
+`GET /api/reconcile/view` (?mismatch=any|cardtrader|tcgplayer&game=...&reconciled=1), `GET /api/reconcile/view.csv`, and admin-only
 `POST /api/reconcile/check`, `POST /api/reconcile/tcgplayer/upload` (raw CSV body), `POST|DELETE /api/reconcile/tcgplayer/confirm`,
 `POST /api/reconcile/tcgplayer/import`, `POST /api/reconcile/cardtrader/set`, `POST /api/reconcile/airtable/set`.
 
