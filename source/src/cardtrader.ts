@@ -118,7 +118,25 @@ export function buildRow(card: ExportCard, blueprint: Blueprint): ExportRow {
 }
 
 /* ---------- CardTrader API ---------- */
+/**
+ * CardTrader allows 200 requests per 10 seconds across all endpoints. This keeps one isolate under 150, which
+ * leaves room for starfoil-lgs, which uses the same account. A 429 is surfaced to the caller (status 429).
+ */
+const CT_WINDOW_MS = 10_000;
+export const CT_WINDOW_MAX = 150;
+const recentCalls: number[] = [];
+export async function ctRateGate(now: () => number = Date.now, wait: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): Promise<void> {
+  for (;;) {
+    const t = now();
+    while (recentCalls.length && t - recentCalls[0]! >= CT_WINDOW_MS) recentCalls.shift();
+    if (recentCalls.length < CT_WINDOW_MAX) { recentCalls.push(t); return; }
+    await wait(CT_WINDOW_MS - (t - recentCalls[0]!) + 5);
+  }
+}
+export function resetCtRateGate(): void { recentCalls.length = 0; }
+
 async function call(token: string, path: string, init: RequestInit = {}, fetcher: typeof fetch = fetch): Promise<J> {
+  await ctRateGate();
   let response: Response;
   try {
     response = await fetcher(`${API}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}) }, signal: AbortSignal.timeout(20000) });
@@ -268,4 +286,45 @@ export async function createProduct(token: string, product: Product, fetcher?: t
 
 export async function deleteProduct(token: string, productId: number, fetcher?: typeof fetch): Promise<void> {
   await call(token, `/products/${productId}`, { method: "DELETE" }, fetcher);
+}
+
+/* ---------- sales sync (orders, stock, webhook) ---------- */
+
+/** The newest seller orders, newest first. One request. */
+export async function sellerOrders(token: string, limit = 50, fetcher?: typeof fetch): Promise<J[]> {
+  const body = await call(token, `/orders?order_as=seller&limit=${Math.min(100, Math.max(1, limit))}&sort=date.desc`, {}, fetcher) as unknown;
+  const list = Array.isArray(body) ? body : Array.isArray((body as J)?.array) ? (body as J).array : [];
+  return (list as J[]).filter((o) => o?.order_as === "seller");
+}
+
+export type CtListing = { id: number; blueprintId: number; quantity: number; recordId: string | null; priceCents: number | null };
+/** Every listing on the account, in one request (the same export starfoil-lgs reads). */
+export async function exportListings(token: string, fetcher?: typeof fetch): Promise<CtListing[]> {
+  const body = await call(token, "/products/export", {}, fetcher) as unknown;
+  if (!Array.isArray(body)) throw new CardTraderError("CardTrader returned an unexpected products export.", 502);
+  return (body as J[]).map((l) => ({
+    id: Number(l.id), blueprintId: Number(l.blueprint_id), quantity: Number(l.quantity) || 0,
+    recordId: typeof l.user_data_field === "string" && /^rec[A-Za-z0-9]{14}$/.test(l.user_data_field) ? l.user_data_field : null,
+    priceCents: typeof l.price_cents === "number" ? l.price_cents : null,
+  }));
+}
+
+/** Changes a listing's quantity by delta. At 0 or below CardTrader deletes the listing. */
+export async function incrementListing(token: string, productId: number, delta: number, fetcher?: typeof fetch): Promise<void> {
+  if (!Number.isInteger(delta) || delta === 0) return;
+  await call(token, `/products/${productId}/increment`, { method: "POST", body: JSON.stringify({ delta_quantity: delta }) }, fetcher);
+}
+
+export type AppInfo = { id: number | null; name: string | null; userId: string | null; sharedSecret: string | null; webhookUrl: string | null };
+export async function appInfo(token: string, fetcher?: typeof fetch): Promise<AppInfo> {
+  const b = await call(token, "/info", {}, fetcher);
+  return {
+    id: typeof b.id === "number" ? b.id : null, name: typeof b.name === "string" ? b.name : null, userId: b.user_id == null ? null : String(b.user_id),
+    sharedSecret: typeof b.shared_secret === "string" && b.shared_secret ? b.shared_secret : null, webhookUrl: typeof b.webhook_url === "string" && b.webhook_url ? b.webhook_url : null,
+  };
+}
+/** Sets the account's one webhook URL. An empty string turns CardTrader webhooks off. */
+export async function setWebhookUrl(token: string, url: string, fetcher?: typeof fetch): Promise<string | null> {
+  const b = await call(token, "/app", { method: "PATCH", body: JSON.stringify({ webhook_url: url }) }, fetcher);
+  return typeof b.webhook_url === "string" && b.webhook_url ? b.webhook_url : null;
 }

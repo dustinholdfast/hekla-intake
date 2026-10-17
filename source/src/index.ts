@@ -22,13 +22,19 @@ import {
   type QueueCard,
 } from "./airtable.ts";
 import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
-import { CardTraderError, createProduct, deleteProduct, previewExport } from "./cardtrader.ts";
-import { cleanToken, ConnectionError, connectionSecret, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
+import { appInfo, CardTraderError, createProduct, deleteProduct, previewExport, setWebhookUrl } from "./cardtrader.ts";
+import { cleanToken, ConnectionError, connectionSecret, connectionSettings, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
+import { sendEmail, validFrom, validTo } from "./alerts.ts";
+import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
+import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
+import { getState, listSales } from "./salesdb.ts";
+import { dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
+import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
 import { canonicalGame, CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, RARITIES, SETS, type Game } from "./sets.ts";
-import { listTenantPlans, listTenants, recordAudit, setCompPlan, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
+import { listTenantPlans, listTenants, recordAudit, setCompPlan, tenantById, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
 
 type Variables = { tenant: Tenant; tenantEnv: Env; userId: string; orgRole: string | null };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -497,6 +503,194 @@ app.post("/api/hekla", async (c) => {
   return c.json({ delivered: true, copyText: payload.message, payload });
 });
 
+/* ---------- sales log, cross-delist and TCGplayer pull (see docs/SALES-SYNC.md) ---------- */
+
+const MAX_HOOK_BODY = 1_000_000;
+async function rawBody(c: { req: { text: () => Promise<string> } }): Promise<string | null> {
+  try { const t = await c.req.text(); return t.length > MAX_HOOK_BODY ? null : t; } catch { return null; }
+}
+const hookUrl = (c: AppContext, kind: "cardtrader" | "starfoil") => `${new URL(c.req.url).origin}/hooks/${kind}/${c.var.tenant.id}`;
+
+// CardTrader calls this for order.create / order.update / order.destroy. Signed with the app's shared_secret.
+app.post("/hooks/cardtrader/:tenantId", async (c) => {
+  const tenant = await tenantById(c.env, c.req.param("tenantId")).catch(() => null);
+  if (!tenant) return c.json({ error: "Unknown tenant." }, 404);
+  const body = await rawBody(c);
+  if (body == null) return c.json({ error: "Too large." }, 413);
+  const secret = await connectionSecret(c.env, tenant.id, "cardtrader_webhook").catch(() => null);
+  if (!secret) return c.json({ error: "Webhooks are not enabled for this account." }, 404);
+  if (!(await verifyCardTraderSignature(secret, body, c.req.header("signature")))) return c.json({ error: "Bad signature." }, 401);
+  let event: Record<string, unknown>;
+  try { event = JSON.parse(body) as Record<string, unknown>; } catch { return c.json({ error: "Not JSON." }, 400); }
+  // Answer at once; the order is logged in the background. The 5-minute poll catches anything missed.
+  const work = handleCardTraderEvent(c.env, tenant, event).catch((e) => console.error("cardtrader webhook failed", tenant.id, e instanceof Error ? e.message : e));
+  try { c.executionCtx.waitUntil(work); } catch { await work; }
+  return c.json({ ok: true });
+});
+
+// starfoil-lgs posts each paid starfoil.store order here after it has lowered CardTrader and Airtable.
+app.post("/hooks/starfoil/:tenantId", async (c) => {
+  const tenant = await tenantById(c.env, c.req.param("tenantId")).catch(() => null);
+  if (!tenant) return c.json({ error: "Unknown tenant." }, 404);
+  const body = await rawBody(c);
+  if (body == null) return c.json({ error: "Too large." }, 413);
+  const secret = await connectionSecret(c.env, tenant.id, "starfoil").catch(() => null);
+  if (!secret) return c.json({ error: "starfoil.store sales are not enabled for this account." }, 404);
+  if (!(await verifyStarfoil(secret, body, c.req.header("x-hekla-timestamp"), c.req.header("x-hekla-signature")))) return c.json({ error: "Bad signature." }, 401);
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return c.json({ error: "Not JSON." }, 400); }
+  const result = await ingestStarfoil(c.env, tenant.id, parsed);
+  return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
+});
+
+function syncModes(env: Env) {
+  return { salesMode: salesMode(env), decrementFrom: decrementFrom(env), reconcileMode: reconcileMode(env), dailyEmail: dailyEmailOn(env) };
+}
+
+app.get("/api/connections/sales", async (c) => {
+  const id = c.var.tenant.id;
+  const [cardtraderWebhook, starfoil, resend, resendSettings] = await Promise.all([
+    connectionStatus(c.env, id, "cardtrader_webhook"), connectionStatus(c.env, id, "starfoil"), connectionStatus(c.env, id, "resend"),
+    connectionSettings(c.env, id, "resend").catch(() => null),
+  ]);
+  return c.json({
+    canManage: canManageConnections(c), modes: syncModes(c.env), cardtraderWebhook, starfoil,
+    starfoilUrl: hookUrl(c, "starfoil"), cardtraderWebhookUrl: hookUrl(c, "cardtrader"),
+    resend: resend.connected ? { ...resend, to: resendSettings?.to ?? null, from: resendSettings?.from ?? null } : resend,
+  });
+});
+
+// Shows what CardTrader currently has as the account's webhook URL. Read-only.
+app.get("/api/connections/cardtrader-webhook", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can see this." }, 403);
+  const info = await appInfo(await cardTraderToken(c));
+  const target = hookUrl(c, "cardtrader");
+  return c.json({ currentUrl: info.webhookUrl, heklaUrl: target, pointsAtHekla: info.webhookUrl === target });
+});
+
+// Points the CardTrader account's one webhook at Hekla. Refuses to replace a different URL unless confirmed.
+app.post("/api/connections/cardtrader-webhook", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can turn on CardTrader webhooks." }, 403);
+  if (!connectionsReady(c.env)) return c.json({ error: "Connections are not set up on this server yet (CONNECTIONS_KEY is missing)." }, 503);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const token = await cardTraderToken(c);
+  const info = await appInfo(token);
+  const target = hookUrl(c, "cardtrader");
+  if (info.webhookUrl && info.webhookUrl !== target && body.value.replace !== info.webhookUrl) {
+    return c.json({ error: "CardTrader already sends webhooks somewhere else. Replacing it stops them going there.", code: "webhook_in_use", currentUrl: info.webhookUrl }, 409);
+  }
+  if (!info.sharedSecret) return c.json({ error: "CardTrader did not return the app's shared secret." }, 502);
+  await saveConnection(c.env, c.var.tenant.id, "cardtrader_webhook", info.sharedSecret, { accountLabel: target, accountId: info.id == null ? null : String(info.id) }, c.var.userId, { previousUrl: info.webhookUrl });
+  if (info.webhookUrl !== target) await setWebhookUrl(token, target);
+  audit(c, "connect", [{ id: "cardtrader_webhook" }]);
+  return c.json({ cardtraderWebhook: await connectionStatus(c.env, c.var.tenant.id, "cardtrader_webhook"), previousUrl: info.webhookUrl });
+});
+
+app.delete("/api/connections/cardtrader-webhook", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can turn off CardTrader webhooks." }, 403);
+  const token = await connectionSecret(c.env, c.var.tenant.id, "cardtrader");
+  let cleared = false;
+  if (token) {
+    const info = await appInfo(token);
+    // Only clear the URL if it is still Hekla's; never touch someone else's.
+    if (info.webhookUrl === hookUrl(c, "cardtrader")) { await setWebhookUrl(token, ""); cleared = true; }
+  }
+  if (await deleteConnection(c.env, c.var.tenant.id, "cardtrader_webhook")) audit(c, "disconnect", [{ id: "cardtrader_webhook" }]);
+  return c.json({ cardtraderWebhook: { connected: false }, cleared });
+});
+
+// Creates the secret starfoil-lgs signs sale events with. Shown once; Hekla keeps only the sealed copy.
+app.post("/api/connections/starfoil", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can connect starfoil.store." }, 403);
+  if (!connectionsReady(c.env)) return c.json({ error: "Connections are not set up on this server yet (CONNECTIONS_KEY is missing)." }, 503);
+  const secret = newSecret();
+  await saveConnection(c.env, c.var.tenant.id, "starfoil", secret, { accountLabel: "starfoil.store (starfoil-lgs)", accountId: null }, c.var.userId, {});
+  audit(c, "connect", [{ id: "starfoil" }]);
+  return c.json({ starfoil: await connectionStatus(c.env, c.var.tenant.id, "starfoil"), secret, url: hookUrl(c, "starfoil") });
+});
+
+app.delete("/api/connections/starfoil", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can disconnect starfoil.store." }, 403);
+  if (await deleteConnection(c.env, c.var.tenant.id, "starfoil")) audit(c, "disconnect", [{ id: "starfoil" }]);
+  return c.json({ starfoil: { connected: false } });
+});
+
+app.put("/api/connections/resend", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can set up alert email." }, 403);
+  if (!connectionsReady(c.env)) return c.json({ error: "Connections are not set up on this server yet (CONNECTIONS_KEY is missing)." }, 503);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const token = cleanToken(body.value.token);
+  if (!token || !token.startsWith("re_")) return c.json({ error: "Paste a Resend API key (it starts with re_)." }, 400);
+  const to = validTo(body.value.to); const from = validFrom(body.value.from);
+  if (!to) return c.json({ error: "Alert email: one to five addresses, separated by commas." }, 400);
+  if (!from) return c.json({ error: "From: an address on a domain verified in Resend, e.g. Hekla <alerts@starfoil.store>." }, 400);
+  await saveConnection(c.env, c.var.tenant.id, "resend", token, { accountLabel: `Resend → ${to}`, accountId: null }, c.var.userId, { to, from });
+  audit(c, "connect", [{ id: "resend" }]);
+  return c.json({ resend: { ...(await connectionStatus(c.env, c.var.tenant.id, "resend")), to, from } });
+});
+
+app.post("/api/connections/resend/test", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can send a test." }, 403);
+  const result = await sendEmail(c.env, c.var.tenant.id, "[Hekla] Test alert", "This is a test of Hekla's sales alerts. Oversells and stock problems will arrive like this.");
+  return result === "sent" ? c.json({ ok: true }) : c.json({ error: result === "not_configured" ? "Set up alert email first." : "Resend did not accept the email. Check the key and the from address." }, 400);
+});
+
+app.delete("/api/connections/resend", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can remove alert email." }, 403);
+  if (await deleteConnection(c.env, c.var.tenant.id, "resend")) audit(c, "disconnect", [{ id: "resend" }]);
+  return c.json({ resend: { connected: false } });
+});
+
+app.get("/api/sales", async (c) => {
+  const filter = readSalesFilter(c.req.query());
+  const { rows, truncated } = await listSales(c.env, c.var.tenant.id, filter, 1000);
+  const lastPoll = await getState(c.env, c.var.tenant.id, "cardtrader:last_poll").catch(() => null);
+  return c.json({ rows, truncated, totals: totalsByPlatform(rows), filter, modes: syncModes(c.env), lastPoll });
+});
+
+app.get("/api/sales/export", async (c) => {
+  const filter = readSalesFilter(c.req.query());
+  const { rows, truncated } = await listSales(c.env, c.var.tenant.id, filter, 50_000);
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  return new Response(salesCsv(rows), { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="sales-${day}.csv"`, "cache-control": "no-store", "x-truncated": truncated ? "1" : "0" } });
+});
+
+app.post("/api/sales/poll", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can poll CardTrader." }, 403);
+  if (salesMode(c.env) === "off") return c.json({ error: "CardTrader sales are off (CT_SALES_MODE)." }, 409);
+  const result = await pollCardTrader(c.env, c.var.tenant);
+  const decrements = await runDecrements(c.env, c.var.tenant);
+  return c.json({ result, decrements: decrements && { applied: decrements.applied, oversold: decrements.oversold, skipped: decrements.skipped, flagged: decrements.flagged } });
+});
+
+const pullHours = (v: string | undefined) => { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= 168 ? n : 24; };
+
+app.get("/api/tcgplayer/pull", async (c) => {
+  const { since, items } = await tcgplayerPull(c.env, c.var.tenant, pullHours(c.req.query("hours")));
+  const { included, skipped } = tcgplayerCsv(items);
+  return c.json({ since, items, importable: included, notImportable: skipped.map((i) => ({ recordId: i.recordId, name: i.name, reason: !i.tcgplayerSku ? "no TCGplayer SKU" : i.priceUsd == null ? "no market price" : "duplicate SKU" })) });
+});
+
+app.get("/api/tcgplayer/pull.csv", async (c) => {
+  const { items } = await tcgplayerPull(c.env, c.var.tenant, pullHours(c.req.query("hours")));
+  const checklist = c.req.query("format") === "checklist";
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const csv = checklist ? checklistCsv(items) : tcgplayerCsv(items).csv;
+  return new Response(csv, { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="tcgplayer-${checklist ? "pull-list" : "import"}-${day}.csv"`, "cache-control": "no-store" } });
+});
+
+app.get("/api/reconcile", async (c) => {
+  return c.json({ report: await getState(c.env, c.var.tenant.id, "reconcile:last").catch(() => null), mode: reconcileMode(c.env) });
+});
+
+// A report-only check on demand. It never changes CardTrader, whatever RECONCILE_MODE says.
+app.post("/api/reconcile", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can run a check." }, 403);
+  return c.json({ report: await runReconcile(c.env, c.var.tenant, "report") });
+});
+
 app.get("*", async (c) => {
   const response = await c.env.ASSETS.fetch(c.req.raw);
   const headers = new Headers(response.headers);
@@ -534,7 +728,9 @@ function audit(c: AppContext, action: AuditAction, cards: { id: string }[]): voi
 
 export default {
   fetch: app.fetch,
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    // "*/5": CardTrader sales, the 15-minute reconcile and the 9 AM ET daily email. Everything else: enrichment.
+    if (event.cron === SALES_CRON) { ctx.waitUntil(salesCron(env, new Date(event.scheduledTime))); return; }
     ctx.waitUntil((async () => {
       let tenants: Tenant[];
       try { tenants = await listTenants(env); } catch (e) { console.error("cron tenants failed", e instanceof Error ? e.message : e); return; }
@@ -556,6 +752,32 @@ export default {
     })());
   },
 } satisfies ExportedHandler<Env>;
+
+const SALES_CRON = "*/5 * * * *";
+
+/** True at the daily email's minute: 9:00 AM America/New_York (EDT or EST). */
+export function isDailyEmailSlot(at: Date): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hourCycle: "h23" }).formatToParts(at);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value); const minute = Number(parts.find((p) => p.type === "minute")?.value);
+  return hour === 9 && minute < 5;
+}
+
+async function salesCron(env: Env, at: Date): Promise<void> {
+  const reconcileDue = at.getUTCMinutes() % 15 === 0;
+  const dailyDue = isDailyEmailSlot(at);
+  if (salesMode(env) === "off" && (!reconcileDue || reconcileMode(env) === "off") && (!dailyDue || !dailyEmailOn(env))) return;
+  let tenants: Tenant[];
+  try { tenants = await listTenants(env); } catch (e) { console.error("sales cron tenants failed", e instanceof Error ? e.message : e); return; }
+  for (const tenant of tenants) {
+    try {
+      const polled = await pollCardTrader(env, tenant);
+      const dec = await runDecrements(env, tenant);
+      if (polled || dec) console.log("cron sales", JSON.stringify({ tenant: tenant.id, polled, applied: dec?.applied, oversold: dec?.oversold, flagged: dec?.flagged, skipped: dec?.skipped }));
+    } catch (e) { console.error("cron sales failed", tenant.id, e instanceof Error ? e.message : e); }
+    if (reconcileDue) { try { await runReconcile(env, tenant); } catch (e) { console.error("cron reconcile failed", tenant.id, e instanceof Error ? e.message : e); } }
+    if (dailyDue) { try { await sendDailyPull(env, tenant); } catch (e) { console.error("cron tcgplayer email failed", tenant.id, e instanceof Error ? e.message : e); } }
+  }
+}
 
 function mailtoLink(message: string): string {
   return `mailto:?subject=${encodeURIComponent("Hekla intake")}&body=${encodeURIComponent(message)}`;

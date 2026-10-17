@@ -4,7 +4,13 @@
  */
 import { db } from "./tenants.ts";
 
-export type Provider = "cardtrader";
+/**
+ * cardtrader: the seller's API token. cardtrader_webhook: CardTrader's per-app shared_secret, used to check the
+ * Signature header on webhooks. starfoil: the secret starfoil-lgs signs sale events with. resend: an API key for
+ * alert and daily emails (to/from addresses live in the non-secret settings column).
+ */
+export type Provider = "cardtrader" | "cardtrader_webhook" | "starfoil" | "resend";
+export const PROVIDERS: readonly Provider[] = ["cardtrader", "cardtrader_webhook", "starfoil", "resend"];
 export type Sealed = { ciphertext: string; iv: string };
 export type ConnectionStatus = { connected: false } | { connected: true; accountLabel: string; accountId: string | null; connectedBy: string; connectedAt: string };
 
@@ -73,16 +79,35 @@ export async function connectionStatus(env: Env, tenantId: string, provider: Pro
   return { connected: true, accountLabel: String(row.account_label), accountId: row.account_id == null ? null : String(row.account_id), connectedBy: String(row.connected_by), connectedAt: new Date(row.connected_at as string).toISOString() };
 }
 
-export async function saveConnection(env: Env, tenantId: string, provider: Provider, secret: string, account: { accountLabel: string; accountId: string | null }, userId: string): Promise<void> {
+export async function saveConnection(env: Env, tenantId: string, provider: Provider, secret: string, account: { accountLabel: string; accountId: string | null }, userId: string, settings?: Record<string, unknown>): Promise<void> {
   const sealed = await sealSecret(env, tenantId, provider, secret);
+  if (settings === undefined) {
+    await db(env).query(
+      `insert into tenant_connections (tenant_id, provider, secret_ciphertext, secret_iv, account_label, account_id, connected_by)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (tenant_id, provider) do update
+         set secret_ciphertext = excluded.secret_ciphertext, secret_iv = excluded.secret_iv, account_label = excluded.account_label,
+             account_id = excluded.account_id, connected_by = excluded.connected_by, connected_at = now()`,
+      [tenantId, provider, sealed.ciphertext, sealed.iv, account.accountLabel, account.accountId, userId],
+    );
+    return;
+  }
+  // Only reached for the newer providers, which need migration 0005 (the settings column).
   await db(env).query(
-    `insert into tenant_connections (tenant_id, provider, secret_ciphertext, secret_iv, account_label, account_id, connected_by)
-     values ($1, $2, $3, $4, $5, $6, $7)
+    `insert into tenant_connections (tenant_id, provider, secret_ciphertext, secret_iv, account_label, account_id, connected_by, settings)
+     values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
      on conflict (tenant_id, provider) do update
        set secret_ciphertext = excluded.secret_ciphertext, secret_iv = excluded.secret_iv, account_label = excluded.account_label,
-           account_id = excluded.account_id, connected_by = excluded.connected_by, connected_at = now()`,
-    [tenantId, provider, sealed.ciphertext, sealed.iv, account.accountLabel, account.accountId, userId],
+           account_id = excluded.account_id, connected_by = excluded.connected_by, connected_at = now(), settings = excluded.settings`,
+    [tenantId, provider, sealed.ciphertext, sealed.iv, account.accountLabel, account.accountId, userId, JSON.stringify(settings)],
   );
+}
+
+/** Non-secret settings saved with a connection (needs migration 0005). */
+export async function connectionSettings(env: Env, tenantId: string, provider: Provider): Promise<Record<string, unknown> | null> {
+  const rows = await db(env).query("select settings from tenant_connections where tenant_id = $1 and provider = $2", [tenantId, provider]);
+  const value = rows[0]?.settings;
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
 }
 
 export async function deleteConnection(env: Env, tenantId: string, provider: Provider): Promise<boolean> {

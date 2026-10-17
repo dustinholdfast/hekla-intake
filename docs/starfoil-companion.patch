@@ -1,0 +1,230 @@
+diff --git a/src/checkout.ts b/src/checkout.ts
+index f50a57c..1a94398 100644
+--- a/src/checkout.ts
++++ b/src/checkout.ts
+@@ -6,6 +6,7 @@ import type { Env } from './db'
+ import { releaseHolds, reserve } from './holds'
+ import { packageCents } from './shipping'
+ import { getRates } from './usps'
++import { postSaleToHekla, stripeFeeCents, type HeklaSaleItem } from './hekla'
+ import type { ShipOption } from './shipping'
+ 
+ const STRIPE = 'https://api.stripe.com/v1'
+@@ -127,7 +128,7 @@ export async function verifyStripeSignature(body: string, header: string | undef
+   return diff === 0
+ }
+ 
+-interface ItemRow { product_id: string; condition: string; finish: string; language: string; qty: number; name: string }
++interface ItemRow { product_id: string; condition: string; finish: string; language: string; qty: number; name: string; unit_cents: number }
+ 
+ // Real stock is only ever changed for real payments: a test-mode Stripe key keeps
+ // write-back off even if the switch in wrangler.toml says "on".
+@@ -135,7 +136,8 @@ const writeback = (env: Env, flag: 'CARDTRADER_WRITEBACK' | 'AIRTABLE_WRITEBACK'
+   env[flag] === 'on' && Boolean(env.STRIPE_SECRET_KEY?.startsWith('sk_live_'))
+ 
+ // Takes sold stock off the place it is managed, so it stops being for sale there too.
+-async function takeFromSource(env: Env, item: ItemRow, ctListings: string | null): Promise<string> {
++// `takes` receives how many copies came from each Waitlist record, for the Hekla sales log.
++async function takeFromSource(env: Env, item: ItemRow, ctListings: string | null, takes: { recordId: string; qty: number }[] = []): Promise<string> {
+   if (item.product_id.startsWith('at:')) {
+     if (!writeback(env, 'AIRTABLE_WRITEBACK')) return 'airtable: write-back off'
+     await decrementSealed(env, item.product_id.slice(3), item.qty)
+@@ -159,6 +161,7 @@ async function takeFromSource(env: Env, item: ItemRow, ctListings: string | null
+     }
+     // Keep the Airtable master in step, or the listing would be recreated from stale stock.
+     if (airtable && recordId?.startsWith('rec')) await decrementWaitlist(env, recordId, take)
++    if (recordId?.startsWith('rec') && take > 0) takes.push({ recordId, qty: take })
+     left -= take
+   }
+   if (left > 0) throw new Error(`listings: ${left} short`)
+@@ -183,8 +186,9 @@ async function completeOrder(env: Env, session: StripeSession) {
+   ).run()
+   if (!claimed.meta.changes) return
+ 
+-  const { results: items } = await db.prepare('SELECT product_id, condition, finish, language, qty, name FROM order_items WHERE order_id = ?').bind(id).all<ItemRow>()
++  const { results: items } = await db.prepare('SELECT product_id, condition, finish, language, qty, name, unit_cents FROM order_items WHERE order_id = ?').bind(id).all<ItemRow>()
+   const problems: string[] = []
++  const heklaItems: HeklaSaleItem[] = []
+ 
+   // The shipping price was quoted for the ZIP entered on the cart page; the buyer
+   // can still give Stripe an address in a dearer zone.
+@@ -205,15 +209,23 @@ async function completeOrder(env: Env, session: StripeSession) {
+     const row = await db.prepare(`SELECT ct_listings FROM inventory WHERE ${where}`).bind(...keys).first<{ ct_listings: string | null }>()
+     const taken = held || (await db.prepare(`UPDATE inventory SET qty = qty - ? WHERE ${where} AND qty >= ?`).bind(item.qty, ...keys, item.qty).run()).meta.changes > 0
+     let result: string
++    const takes: { recordId: string; qty: number }[] = []
+     if (!taken) {
+       result = 'OVERSOLD: not enough stock left when payment arrived'
+     } else {
+       try {
+-        result = await takeFromSource(env, item, row?.ct_listings ?? null)
++        result = await takeFromSource(env, item, row?.ct_listings ?? null, takes)
+       } catch (err) {
+         result = `FAILED to update source: ${err instanceof Error ? err.message : err}`
+       }
+     }
++    // One Hekla line per Waitlist record the copies came from; sealed and unmatched lines have no record.
++    let rest = item.qty
++    for (const t of takes) {
++      heklaItems.push({ lineKey: `${lineKey(item)}|${t.recordId}`, recordId: t.recordId, game: null, name: item.name, qty: t.qty, unitCents: item.unit_cents, stockResult: result })
++      rest -= t.qty
++    }
++    if (rest > 0) heklaItems.push({ lineKey: lineKey(item), recordId: null, game: null, name: item.name, qty: rest, unitCents: item.unit_cents, stockResult: result })
+     if (/^(OVERSOLD|FAILED)/.test(result)) problems.push(`${item.name} (${lineKey(item)}): ${result}`)
+     await db.prepare(`UPDATE order_items SET stock_result = ? WHERE order_id = ? AND ${where}`).bind(result, id, ...keys).run()
+   }
+@@ -223,6 +235,19 @@ async function completeOrder(env: Env, session: StripeSession) {
+   }
+   console.log(`Order ${id} paid: ${items.length} line(s), ${session.amount_total} cents`)
+ 
++  // Log the sale in Hekla Intake. Never blocks or fails the order.
++  try {
++    const fee = await stripeFeeCents(env, session.payment_intent)
++    const subtotal = items.reduce((n, i) => n + i.unit_cents * i.qty, 0)
++    console.log(await postSaleToHekla(env, {
++      orderId: id, paidAt: new Date().toISOString(), currency: 'USD', subtotalCents: subtotal,
++      shippingCents: session.total_details?.amount_shipping ?? null, taxCents: session.total_details?.amount_tax ?? null,
++      totalCents: session.amount_total ?? null, feeCents: fee, items: heklaItems,
++    }))
++  } catch (err) {
++    console.error(`Order ${id}: Hekla sales log failed: ${err instanceof Error ? err.message : err}`)
++  }
++
+   const lines = items.map((i) => `  ${i.qty} × ${i.name} (${variantLabel(i)})`).join('\n')
+   const how = order?.ship_method ? `Ship (${order.ship_method === 'letter' ? 'letter mail' : 'tracked package'})` : 'In-store pickup'
+   await alertOwner(env,
+diff --git a/src/db.ts b/src/db.ts
+index f0420c8..1a54170 100644
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -14,6 +14,12 @@ export type Env = {
+   STRIPE_AUTOMATIC_TAX?: string
+   CARDTRADER_WRITEBACK?: string
+   AIRTABLE_WRITEBACK?: string
++  // Hekla Intake hand-over (see Hekla docs/SALES-SYNC.md). CardTrader orders paid at or after this
++  // ISO instant have their Waitlist Qty lowered by Hekla, not here. Empty: starfoil keeps doing it.
++  CT_DECREMENT_UNTIL?: string
++  // Where paid store orders are logged in Hekla, and the secret from Hekla Settings (wrangler secret put).
++  HEKLA_SALES_URL?: string
++  HEKLA_SALES_SECRET?: string
+ }
+ 
+ export const CONDITIONS = ['NM', 'LP', 'MP', 'HP', 'DMG'] as const
+diff --git a/src/hekla.ts b/src/hekla.ts
+new file mode 100644
+index 0000000..f887b25
+--- /dev/null
++++ b/src/hekla.ts
+@@ -0,0 +1,50 @@
++import type { Env } from './db'
++
++// Sends each paid starfoil.store order to Hekla Intake's sales log. starfoil-lgs has
++// already lowered CardTrader and the Airtable Waitlist; Hekla only records the sale.
++// Hekla ignores a repeat of the same order and line, so a retry is harmless.
++
++export interface HeklaSaleItem { lineKey: string; recordId: string | null; game: string | null; name: string; qty: number; unitCents: number; stockResult: string | null }
++export interface HeklaSale {
++  orderId: string; paidAt: string; currency: string
++  subtotalCents: number | null; shippingCents: number | null; taxCents: number | null; totalCents: number | null
++  feeCents: number | null; items: HeklaSaleItem[]
++}
++
++const hex = (buf: ArrayBuffer) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')
++
++export async function postSaleToHekla(env: Env, sale: HeklaSale): Promise<string> {
++  if (!env.HEKLA_SALES_URL || !env.HEKLA_SALES_SECRET) return 'hekla: not configured'
++  // Same rule as stock write-back: test-mode payments are never reported as sales.
++  if (!env.STRIPE_SECRET_KEY?.startsWith('sk_live_')) return 'hekla: test mode, not sent'
++  const body = JSON.stringify(sale)
++  const timestamp = String(Math.floor(Date.now() / 1000))
++  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.HEKLA_SALES_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
++  const signature = hex(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${timestamp}.${body}`)))
++  const res = await fetch(env.HEKLA_SALES_URL, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json', 'x-hekla-timestamp': timestamp, 'x-hekla-signature': signature },
++    body,
++    signal: AbortSignal.timeout(8000),
++  })
++  await res.body?.cancel()
++  if (!res.ok) throw new Error(`hekla ${res.status}`)
++  return 'hekla: logged'
++}
++
++// The Stripe processing fee for a payment, when Stripe has settled it. Best effort.
++export async function stripeFeeCents(env: Env, paymentIntent: string | null | undefined): Promise<number | null> {
++  if (!paymentIntent || !env.STRIPE_SECRET_KEY) return null
++  try {
++    const res = await fetch(`https://api.stripe.com/v1/payment_intents/${encodeURIComponent(paymentIntent)}?expand[]=latest_charge.balance_transaction`, {
++      headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` }, signal: AbortSignal.timeout(5000),
++    })
++    if (!res.ok) { await res.body?.cancel(); return null }
++    const pi = await res.json<{ latest_charge?: { balance_transaction?: { fee?: number } | string | null } | string | null }>()
++    const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
++    const bt = charge && typeof charge.balance_transaction === 'object' ? charge.balance_transaction : null
++    return typeof bt?.fee === 'number' ? bt.fee : null
++  } catch {
++    return null
++  }
++}
+diff --git a/src/marketplace.ts b/src/marketplace.ts
+index 795f686..5564042 100644
+--- a/src/marketplace.ts
++++ b/src/marketplace.ts
+@@ -13,12 +13,23 @@ const API = 'https://api.cardtrader.com/api/v2'
+ const SOLD = new Set(['paid', 'sent', 'arrived', 'done', 'hub_pending', 'closed', 'lost'])
+ 
+ interface OrderItem { product_id: number; name: string; quantity: number; user_data_field?: string | null }
+-interface Order { id: number; code: string; state: string; order_as: string; order_items?: OrderItem[] }
++interface Order { id: number; code: string; state: string; order_as: string; paid_at?: string | null; created_at?: string | null; order_items?: OrderItem[] }
+ 
+-export interface MarketplaceSummary { checked: number; processed: number; cancelled: number }
++// True when Hekla Intake owns this order's Waitlist decrement. Hekla uses the same instant (its
++// CT_DECREMENT_FROM) and the same rule (paid_at, else created_at), so every order has exactly one owner.
++export function heklaOwns(env: Env, order: Order): boolean {
++  const until = Date.parse(env.CT_DECREMENT_UNTIL ?? '')
++  if (Number.isNaN(until)) return false
++  const soldAt = Date.parse(order.paid_at ?? order.created_at ?? '')
++  return !Number.isNaN(soldAt) && soldAt >= until
++}
++
++export interface MarketplaceSummary { checked: number; processed: number; cancelled: number; handedOver: number }
++
++const HEKLA_RESULT = 'Hekla Intake lowers the Waitlist for this order (CT_DECREMENT_UNTIL)'
+ 
+ export async function syncMarketplaceSales(env: Env): Promise<MarketplaceSummary> {
+-  const summary: MarketplaceSummary = { checked: 0, processed: 0, cancelled: 0 }
++  const summary: MarketplaceSummary = { checked: 0, processed: 0, cancelled: 0, handedOver: 0 }
+   if (env.AIRTABLE_WRITEBACK !== 'on' || !env.CARDTRADER_TOKEN || !env.AIRTABLE_TOKEN) return summary
+ 
+   const res = await fetch(`${env.CARDTRADER_API ?? API}/orders?order_as=seller&limit=50&sort=date.desc`, { headers: { Authorization: `Bearer ${env.CARDTRADER_TOKEN}` } })
+@@ -29,13 +40,28 @@ export async function syncMarketplaceSales(env: Env): Promise<MarketplaceSummary
+   if (!orders.length) return summary
+ 
+   const db = env.DB
+-  const { results: known } = await db.prepare(`SELECT order_id, state, processed_at, cancel_alerted FROM ct_orders WHERE order_id IN (SELECT value FROM json_each(?))`)
+-    .bind(JSON.stringify(orders.map((o) => o.id))).all<{ order_id: number; state: string; processed_at: string | null; cancel_alerted: number }>()
++  const { results: known } = await db.prepare(`SELECT order_id, state, processed_at, cancel_alerted, result FROM ct_orders WHERE order_id IN (SELECT value FROM json_each(?))`)
++    .bind(JSON.stringify(orders.map((o) => o.id))).all<{ order_id: number; state: string; processed_at: string | null; cancel_alerted: number; result: string | null }>()
+   const seen = new Map(known.map((k) => [k.order_id, k]))
+ 
+   for (const order of orders) {
+     const prior = seen.get(order.id)
+ 
++    // Handed over: Hekla Intake lowers the Waitlist for this order and alerts on its cancellation.
++    // It is still marked processed here, so clearing CT_DECREMENT_UNTIL later never lowers it a second time.
++    if (prior?.result === HEKLA_RESULT) {
++      if (prior.state !== order.state) await db.prepare('UPDATE ct_orders SET state = ? WHERE order_id = ?').bind(order.state, order.id).run()
++      continue
++    }
++    if (!prior?.processed_at && SOLD.has(order.state) && heklaOwns(env, order)) {
++      await db.prepare(
++        `INSERT INTO ct_orders (order_id, code, state, processed_at, result) VALUES (?, ?, ?, ?, ?)
++         ON CONFLICT (order_id) DO UPDATE SET state = excluded.state, processed_at = excluded.processed_at, result = excluded.result`
++      ).bind(order.id, order.code, order.state, new Date().toISOString(), HEKLA_RESULT).run()
++      summary.handedOver++
++      continue
++    }
++
+     // A sale we already counted was later cancelled: CardTrader may or may not relist the
+     // cards, so flag it for the owner rather than guessing at quantities.
+     if (prior?.processed_at && order.state === 'canceled' && !prior.cancel_alerted) {
