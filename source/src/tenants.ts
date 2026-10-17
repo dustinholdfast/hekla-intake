@@ -129,3 +129,15 @@ export async function recordAudit(env: Env, entries: AuditEntry[]): Promise<void
     [JSON.stringify(rows)],
   );
 }
+
+/** One tenant by id (webhooks name the tenant in their URL). Cached like tenantForOrg. */
+const byIdCache = new Map<string, { tenant: Tenant | null; at: number }>();
+export async function tenantById(env: Env, tenantId: string): Promise<Tenant | null> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId)) return null;
+  const hit = byIdCache.get(tenantId);
+  if (hit && Date.now() - hit.at < CACHE_MS) return hit.tenant;
+  const rows = await db(env).query(`select ${TENANT_COLUMNS} from tenants where id = $1`, [tenantId]);
+  const tenant = rows[0] ? toTenant(rows[0]) : null;
+  byIdCache.set(tenantId, { tenant, at: Date.now() });
+  return tenant;
+}

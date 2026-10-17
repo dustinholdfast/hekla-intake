@@ -59,9 +59,58 @@
         </div>
       </div>
     </section>
+
+    <section class="panel">
+      <h2>Sales sync</h2>
+      <p class="hint">How sales reach the <a class="text-link" href="/sales">Sales</a> page, and where alerts go. <span id="sync-modes"></span></p>
+      <p id="sync-error" class="error" role="alert"></p>
+      <p id="sync-flash" class="flash" role="status"></p>
+
+      <div class="connection">
+        <h3>CardTrader webhook</h3>
+        <p id="wh-status" class="hint">Checking…</p>
+        <p class="hint">CardTrader allows one webhook address per account. Hekla also checks orders every 5 minutes, so the webhook only makes sales show up sooner.</p>
+        <div class="connection-row" id="wh-actions" hidden>
+          <button id="wh-check" class="ghost tiny" type="button">See current address</button>
+          <button id="wh-enable" class="primary" type="button">Send CardTrader webhooks to Hekla</button>
+          <button id="wh-disable" class="ghost tiny" type="button" hidden>Turn off</button>
+        </div>
+      </div>
+
+      <div class="connection">
+        <h3>starfoil.store sales</h3>
+        <p id="sf-status" class="hint">Checking…</p>
+        <p class="hint">starfoil-lgs signs each paid order with this secret and sends it to Hekla, so store sales are logged too. Put the address and secret in starfoil-lgs as HEKLA_SALES_URL and HEKLA_SALES_SECRET (wrangler secret put).</p>
+        <div class="connection-row" id="sf-actions" hidden>
+          <button id="sf-create" class="primary" type="button">Create secret</button>
+          <button id="sf-delete" class="ghost tiny" type="button" hidden>Remove</button>
+        </div>
+        <div id="sf-once" hidden>
+          <p class="hint">Copy these now. The secret is not shown again.</p>
+          <div class="connection-row"><input id="sf-url" readonly aria-label="Address" /><input id="sf-secret" readonly aria-label="Secret" /></div>
+        </div>
+      </div>
+
+      <div class="connection">
+        <h3>Alert email</h3>
+        <p id="rs-status" class="hint">Checking…</p>
+        <p class="hint">Oversells, stock mismatches and the optional daily TCGplayer list are emailed through Resend. starfoil-lgs already uses Resend, so a key for the same verified domain works.</p>
+        <form id="rs-form" class="connection-row" hidden autocomplete="off">
+          <input id="rs-token" type="password" autocomplete="off" spellcheck="false" placeholder="Resend API key (re_…)" aria-label="Resend API key" required />
+          <input id="rs-to" type="text" placeholder="Send alerts to" aria-label="Send alerts to" required />
+          <input id="rs-from" type="text" placeholder="From, e.g. Hekla &lt;alerts@starfoil.store&gt;" aria-label="From address" required />
+          <button class="primary" type="submit">Save</button>
+        </form>
+        <div class="connection-row" id="rs-connected" hidden>
+          <button id="rs-test" class="ghost tiny" type="button">Send a test</button>
+          <button id="rs-delete" class="ghost tiny" type="button">Remove</button>
+        </div>
+      </div>
+    </section>
   </div>
 
   <script src="/session.js"></script>
   <script src="/settings.js"></script>
+  <script src="/settings-sales.js"></script>
 </body>
 </html>

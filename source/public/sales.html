@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1628" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Hekla · Sales</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <p id="boot" class="boot">Opening sales…</p>
+
+  <section id="login-view" class="login" hidden>
+    <div class="login-card">
+      <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
+      <h1>Sales</h1>
+      <div id="clerk-mount"></div>
+      <p id="login-error" class="error" role="alert"></p>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Back to intake</a>
+        <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="sales-view" class="admin" hidden>
+    <header class="admin-top">
+      <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+      <div>
+        <h1>Sales</h1>
+        <p class="lede"><span id="tenant-name"></span> · <span id="modes"></span></p>
+      </div>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Back to intake</a>
+        <a class="ghost tiny" href="/settings">Settings</a>
+        <button id="logout" class="ghost tiny" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <p id="sales-error" class="error" role="alert"></p>
+    <p id="sales-flash" class="flash" role="status"></p>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Sales log</h2><span id="last-poll" class="hint"></span></div>
+      <form id="filters" class="queue-tools" autocomplete="off">
+        <select id="f-platform" aria-label="Platform"><option value="">All platforms</option><option value="cardtrader">CardTrader</option><option value="starfoil">starfoil.store</option></select>
+        <label class="hint">From <input id="f-from" type="date" /></label>
+        <label class="hint">To <input id="f-to" type="date" /></label>
+        <select id="f-game" aria-label="Game"><option value="">All games</option></select>
+        <input id="f-q" type="search" placeholder="Card name" aria-label="Card name" />
+        <label class="hint"><input id="f-cancelled" type="checkbox" /> Show cancelled</label>
+        <button class="primary" type="submit">Apply</button>
+        <button id="export" class="ghost tiny" type="button">Download CSV</button>
+        <button id="poll" class="ghost tiny" type="button" hidden>Check CardTrader now</button>
+      </form>
+      <p class="hint">Dates are whole days in Eastern time. Net payout is after platform fees; a line without a known fee counts its gross as net.</p>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>Platform</th><th>Orders</th><th>Cards</th><th>Gross</th><th>Fees</th><th>Net payout</th></tr></thead><tbody id="totals"></tbody></table></div>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>Sold (ET)</th><th>Platform</th><th>Order</th><th>Card</th><th>Game</th><th>Qty</th><th>Gross</th><th>Fees</th><th>Net</th><th>State</th><th>Flags</th></tr></thead><tbody id="rows"></tbody></table></div>
+      <p id="rows-meta" class="hint"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Pull from TCGplayer</h2>
+        <div class="actions">
+          <select id="pull-hours" aria-label="Window"><option value="24">Last 24 hours</option><option value="48">Last 48 hours</option><option value="168">Last 7 days</option></select>
+          <button id="pull-csv" class="primary" type="button">Download TCGplayer import CSV</button>
+          <button id="pull-list" class="ghost tiny" type="button">Download checklist</button>
+        </div>
+      </div>
+      <p class="hint">Cards that sold on CardTrader or starfoil.store, to take down on TCGplayer by hand. The import CSV uses TCGplayer's pricing-export format (Seller Portal → Pricing → Import, then review in Staged). It subtracts the sold copies with Add to Quantity, and it also sets each card's price to Hekla's market price, because TCGplayer requires a price column. Only cards with a <b>TCGplayer SKU</b> in Airtable can go in the file; the rest are in the checklist.</p>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Set</th><th>Condition</th><th>Sold</th><th>On</th><th>Shared Qty now</th><th>TCGplayer SKU</th></tr></thead><tbody id="pull"></tbody></table></div>
+      <p id="pull-meta" class="hint"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Stock check</h2><button id="reconcile" class="ghost tiny" type="button" hidden>Check now</button></div>
+      <p class="hint">Every 15 minutes Hekla compares the shared Qty in Airtable with what CardTrader lists (starfoil.store copies CardTrader). <span id="reconcile-mode"></span></p>
+      <p id="reconcile-meta" class="hint"></p>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>Problem</th><th>Card</th><th>Airtable Qty</th><th>CardTrader</th><th>Row</th></tr></thead><tbody id="drift"></tbody></table></div>
+    </section>
+  </div>
+
+  <script src="/session.js"></script>
+  <script src="/sales.js"></script>
+</body>
+</html>

@@ -18,7 +18,9 @@ binding = "ASSETS"
 run_worker_first = true
 
 [triggers]
-crons = ["*/10 * * * *"]
+# */10 enrichment (unchanged). */5 sales: CardTrader order poll + Hekla decrements, the reconcile on :00/:15/:30/:45,
+# and the optional TCGplayer email at 9 AM America/New_York. Every sales job is off until its var below is set.
+crons = ["*/10 * * * *", "*/5 * * * *"]
 
 [observability]
 enabled = true
@@ -30,3 +32,13 @@ head_sampling_rate = 1
 CLERK_PUBLISHABLE_KEY = "pk_test_Y3V0ZS1nYXItNzgwMi5jbGVyay5hY2NvdW50cy5kZXYk"
 # Clerk user IDs (comma-separated) allowed into /admin, where plans are granted. Not an organization role.
 PLATFORM_ADMIN_USER_IDS = "user_3KYHxnl1WPPJkOIR8PQhr8gzOxD"
+
+# Sales log and cross-delist (docs/SALES-SYNC.md). All off by default.
+# CT_SALES_MODE: off | log (record CardTrader sales only) | decrement (also lower the shared Airtable Qty for
+#   CardTrader sales paid at or after CT_DECREMENT_FROM; starfoil-lgs needs CT_DECREMENT_UNTIL = the same instant).
+CT_SALES_MODE = "off"
+CT_DECREMENT_FROM = ""
+# RECONCILE_MODE: off | report | push (push only ever lowers a CardTrader listing that shows more than the shared Qty).
+RECONCILE_MODE = "off"
+# TCGPLAYER_DAILY_EMAIL: off | on (needs alert email set up on Settings).
+TCGPLAYER_DAILY_EMAIL = "off"

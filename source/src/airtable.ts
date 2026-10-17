@@ -256,3 +256,64 @@ export async function deleteCard(env: Env, recordId: string): Promise<{ id: stri
   if (!body.deleted) throw new AirtableError("Airtable did not confirm the delete.", 502);
   return { id: recordId, deleted: true };
 }
+
+/* ---------- shared inventory record (sales sync) ---------- */
+
+/**
+ * The Waitlist row is the one shared inventory record for CardTrader and starfoil.store. These helpers read
+ * and set its Qty; they are the only place Hekla lowers a Qty, and only for a sale it owns (see sales.ts).
+ */
+export function stockFields(qty: number): Record<string, string | number> {
+  if (!Number.isInteger(qty) || qty < 0) throw new AirtableError("Qty must be a whole number of 0 or more.", 400);
+  // Same rule starfoil-lgs uses: the last copy gone means Sold, so the card is not listed again.
+  return qty === 0 ? { Qty: 0, Status: "Sold" } : { Qty: qty };
+}
+export async function readStock(env: Env, recordId: string): Promise<number | null> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) return null;
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`; url.searchParams.append("fields[]", "Qty");
+  try {
+    const record = await airtable(env, url.toString()) as AirtableRecord;
+    return numberField(record.fields?.Qty) ?? 0;
+  } catch (error) {
+    if (error instanceof AirtableError && error.status === 400 && /not.?found/i.test(error.message)) return null; // a 404 surfaces as 400 here
+    throw error;
+  }
+}
+export async function writeStock(env: Env, recordId: string, qty: number): Promise<void> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
+  await airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields: stockFields(qty), typecast: false }) });
+}
+
+/** Optional Waitlist field holding the TCGplayer SKU (the "TCGplayer Id" in its CSV). Read only if the base has it. */
+export const TCGPLAYER_SKU_FIELD = "TCGplayer SKU";
+export type StockCard = QueueCard & { cardTraderListingId: string | null; tcgplayerSku: string | null };
+
+async function listWithOptional(env: Env, formula: string): Promise<{ records: AirtableRecord[]; hasSku: boolean }> {
+  try {
+    const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD, TCGPLAYER_SKU_FIELD]);
+    return { records, hasSku: true };
+  } catch (error) {
+    // Airtable refuses an unknown field name; a base without the SKU column still works.
+    if (error instanceof AirtableError && error.status === 400 && /unknown field/i.test(error.message)) {
+      const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD]);
+      return { records, hasSku: false };
+    }
+    throw error;
+  }
+}
+const toStockCard = (r: AirtableRecord): StockCard => ({ ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]), tcgplayerSku: textField(r.fields[TCGPLAYER_SKU_FIELD]) ?? (typeof r.fields[TCGPLAYER_SKU_FIELD] === "number" ? String(r.fields[TCGPLAYER_SKU_FIELD]) : null) });
+
+/** Rows by id, with listing id and TCGplayer SKU. At most 100 ids per call. */
+export async function stockCardsByIds(env: Env, recordIds: string[]): Promise<StockCard[]> {
+  const ids = [...new Set(recordIds.filter((id) => /^rec[A-Za-z0-9]{14}$/.test(id)))].slice(0, 100);
+  if (ids.length === 0) return [];
+  const { records } = await listWithOptional(env, `OR(${ids.map((id) => `RECORD_ID()='${id}'`).join(",")})`);
+  return records.map(toStockCard);
+}
+
+/** Every row that has a CardTrader listing id (any status), for the reconcile. */
+export async function rowsWithListings(env: Env): Promise<StockCard[]> {
+  const { records } = await listWithOptional(env, `{${CARDTRADER_FIELD}}!=''`);
+  return records.map(toStockCard);
+}
