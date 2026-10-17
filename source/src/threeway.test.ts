@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { CtListing } from "./cardtrader.ts";
 import { diffStock } from "./reconcile.ts";
 import { parseCsv, parseTcgCondition, parseTcgExport, type TcgRow } from "./tcgcsv.ts";
-import { applyCtChanges, applyPending, buildView, filterView, livePending, matchScore, matchTcgplayer, normNumber, planCardTraderSet, reconciled, tcgplayerAdjustCsv, viewCounts, viewCsv, type ReconRow } from "./threeway.ts";
+import { applyCtChanges, applyPending, buildView, chunk, planReconcileAll, runCtBatch, filterView, livePending, matchScore, matchTcgplayer, normNumber, planCardTraderSet, reconciled, tcgplayerAdjustCsv, viewCounts, viewCsv, type ReconRow } from "./threeway.ts";
 import { TCGPLAYER_HEADER } from "./tcgplayer.ts";
 
 const HEADER = "TCGplayer Id,Product Line,Set Name,Product Name,Title,Number,Rarity,Condition,TCG Market Price,TCG Direct Low,TCG Low Price With Shipping,TCG Low Price,Total Quantity,Add to Quantity,TCG Marketplace Price,Photo URL";
@@ -215,4 +215,70 @@ test("a pending row is hidden and counted as pending; a SKU change drops the pen
 test("applyCtChanges patches the cached listings and drops listings at 0", () => {
   const out = applyCtChanges([L(10, A, 1), L(11, A, 3), L(20, B, 1)], [{ listingId: 11, delta: -3 }, { listingId: 10, delta: 1 }]);
   assert.deepEqual(out.map((l) => [l.id, l.quantity]), [[10, 2], [20, 1]]);
+});
+
+/* ---------- Reconcile All ---------- */
+
+test("chunk splits into batches of 25 by default, keeping order", () => {
+  const xs = Array.from({ length: 61 }, (_, i) => i);
+  assert.deepEqual(chunk(xs).map((b) => b.length), [25, 25, 11]);
+  assert.deepEqual(chunk(xs).flat(), xs);
+  assert.deepEqual(chunk([]), []);
+  assert.throws(() => chunk(xs, 0));
+});
+
+test("planReconcileAll: summary math for up, down, deletes, blocked and TCGplayer exclusions", () => {
+  const D = "recDDDDDDDDDDDDDD", E = "recEEEEEEEEEEEEEE";
+  const rows = [
+    R({ id: A, qty: 3, cardTraderListingId: "10", tcgplayerSku: "1" }),               // CT 1 → 3 (up); TCG 1 → import +2
+    R({ id: B, qty: 1, cardTraderListingId: "20" }),                // CT 2+1 → 1 (down, one listing deleted)
+    R({ id: C, qty: 0, status: "Sold", cardTraderListingId: "30" }),                    // Airtable 0: CT 2 → 0, listing deleted
+    R({ id: D, qty: 2, name: "Nobody - On CT", collectorNumber: "99" }),                // no listing: blocked
+    R({ id: E, qty: 2, name: "Suggested Only", collectorNumber: "77" }),                // TCG suggestion: excluded, counted
+  ];
+  const listings = [L(10, A, 1), L(20, B, 2), L(21, B, 1), L(30, C, 2)];
+  const tcg = [T({ tcgplayerId: "1", totalQty: 1 }), T({ tcgplayerId: "7", productName: "Suggested Only", number: "77", totalQty: 1 })];
+  const v = buildView(rows, listings, tcg, new Map(), { ct: "a", tcg: "b" });
+  v.rows.find((r) => r.recordId === D)!.ct = { qty: 0, listingIds: [], storedListingId: null };
+  const plan = planReconcileAll(v.rows, listings, new Map(), { cardtrader: true, tcgplayer: true });
+  assert.deepEqual(plan.cardtrader.map((i) => [i.recordId, i.before, i.target, i.deletes]), [[A, 1, 3, []], [B, 3, 1, [20]], [C, 2, 0, [30]]]);
+  assert.deepEqual(plan.cardtraderBlocked.map((b) => b.recordId), [D, E], "no listing to raise");
+  assert.deepEqual(plan.tcgplayer.recordIds, [A]);
+  assert.deepEqual(plan.summary, { ctRows: 3, ctUp: 1, ctDown: 2, ctListingsChanged: 3, ctDeletes: 2, ctToZeroRows: 1, tcgRows: 1, tcgSuggested: 1, tcgSkipped: plan.tcgplayer.skipped.length });
+  // Platform filter: CardTrader only / TCGplayer only.
+  assert.equal(planReconcileAll(v.rows, listings, new Map(), { cardtrader: true, tcgplayer: false }).summary.tcgRows, 0);
+  assert.equal(planReconcileAll(v.rows, listings, new Map(), { cardtrader: false, tcgplayer: true }).summary.ctRows, 0);
+});
+
+const card = (id: string, qty: number, listingId: string | null, status = "Listed") => ({ id, qty, status, cardTraderListingId: listingId });
+
+test("runCtBatch applies sequentially, skips stale rows, and keeps going after a failure", async () => {
+  const D = "recDDDDDDDDDDDDDD";
+  const cards = new Map([[A, card(A, 3, "10")], [B, card(B, 5, "20")], [C, card(C, 1, "30")], [D, card(D, 2, "40")]]);
+  const listings = [L(10, A, 1), L(20, B, 2), L(30, C, 2), L(40, D, 1)];
+  const calls: string[] = []; const logged: string[] = [];
+  const results = await runCtBatch(
+    [
+      { recordId: A, expectedTarget: 3, expectedCurrent: 1 },  // ok: +2
+      { recordId: B, expectedTarget: 4, expectedCurrent: 2 },  // Airtable moved to 5: skip
+      { recordId: C, expectedTarget: 1, expectedCurrent: 3 },  // CardTrader moved to 2: skip
+      { recordId: D, expectedTarget: 2, expectedCurrent: 1 },  // CardTrader errors: failed
+      { recordId: "recZZZZZZZZZZZZZZ", expectedTarget: 1, expectedCurrent: 0 },
+    ],
+    cards, listings,
+    async (id, delta) => { calls.push(`${id}:${delta}`); if (id === 40) throw new Error("CardTrader 500"); },
+    async (_i, r) => { logged.push(`${r.recordId}:${r.status}`); },
+  );
+  assert.deepEqual(results.map((r) => r.status), ["succeeded", "skipped", "skipped", "failed", "skipped"]);
+  assert.match(results[1]!.reason!, /Airtable changed/);
+  assert.match(results[2]!.reason!, /CardTrader changed \(now 2\)/);
+  assert.equal(results[3]!.reason, "CardTrader 500");
+  assert.deepEqual(calls, ["10:2", "40:1"], "stale rows are never touched");
+  assert.equal(logged.length, 5, "every row is logged");
+});
+
+test("runCtBatch sees its own earlier changes when two rows share a listing", async () => {
+  const cards = new Map([[A, card(A, 1, "10")], [B, card(B, 1, "10")]]);
+  const results = await runCtBatch([{ recordId: A, expectedTarget: 1, expectedCurrent: 3 }, { recordId: B, expectedTarget: 1, expectedCurrent: 3 }], cards, [L(10, null, 3)], async () => {}, async () => {});
+  assert.deepEqual(results.map((r) => r.status), ["succeeded", "skipped"]);
 });

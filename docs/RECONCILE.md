@@ -34,6 +34,26 @@ still differs comes back. **Show reconciled** lists every row, with pending rows
 After **Set CardTrader**, the cached listings are patched with the change instead of being re-exported, because CardTrader's export can
 lag a write by a few seconds. Without the patch, the row would look unchanged and a second click would be refused as stale.
 
+## Reconcile All
+
+This is an admin-only button. Airtable is the source of truth, and **Airtable Qty is never changed**. It acts on the open mismatches in the current view, so the game filter applies.
+The platform filter applies too: "CardTrader mismatches" means CardTrader only, "TCGplayer mismatches" means TCGplayer only, and "All" means both.
+
+1. **Check.** If the last CardTrader check is older than 2 minutes, the page first runs a fresh read-only check.
+2. **Plan.** `POST /api/reconcile/all/plan` reports what would happen and changes nothing. The confirm dialog shows:
+   - How many CardTrader cards would change, split into up and down.
+   - Listings that would be **DELETED**. These are listings that reach 0, usually because Airtable is 0, and they are called out separately.
+   - Cards that can't be raised because they have no listing.
+   - TCGplayer rows that would go in the import CSV. Only SKU or confirmed matches are included; unconfirmed suggestions are counted and left out.
+3. **CardTrader changes.** The page sends `POST /api/reconcile/all/cardtrader` repeatedly, `RECONCILE_BATCH` = 25 rows per request, so no single request runs long.
+   - Each request makes a fresh Airtable read and a fresh CardTrader export.
+   - Rows are processed one at a time through the rate-limited client.
+   - A row whose Airtable or CardTrader number moved since the plan is **skipped**, not changed.
+   - A failure affects only that row; the rest of the batch continues.
+   - Every row's result (succeeded, skipped or failed, with what was applied) is logged as `cardtrader_set` with the `batchId`.
+   - Progress and per-row results show on the page. Succeeded rows leave the list.
+4. **TCGplayer.** The page downloads one import CSV for all included rows and marks them pending upload. The `tcgplayer_import_csv` log entry carries the `batchId`.
+
 ## TCGplayer export (column assumptions)
 
 Export from Seller Portal → Pricing → **Export From Live** (or Export My Inventory). Hekla expects TCGplayer's pricing CSV:

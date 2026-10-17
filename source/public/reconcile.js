@@ -12,6 +12,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("ct-check").addEventListener("click", checkCardTrader);
   $("tcg-upload").addEventListener("click", uploadTcg);
   $("tcg-import").addEventListener("click", buildImport);
+  $("reconcile-all").addEventListener("click", reconcileAll);
   $("select-all").addEventListener("change", (e) => { for (const r of state.rows) e.target.checked ? state.selected.add(r.recordId) : state.selected.delete(r.recordId); render(); });
   boot();
 });
@@ -28,7 +29,7 @@ async function boot() {
   $("tenant-name").textContent = session.data.tenant || "";
   state.canManage = session.data.role === "org:admin";
   for (const game of session.data.games || []) { const o = document.createElement("option"); o.value = game; o.textContent = game; $("f-game").appendChild(o); }
-  for (const id of ["ct-check", "tcg-upload-box", "tcg-import", "select-all"]) $(id).hidden = !state.canManage;
+  for (const id of ["ct-check", "tcg-upload-box", "tcg-import", "select-all", "reconcile-all"]) $(id).hidden = !state.canManage;
   show("recon");
   await load();
 }
@@ -206,8 +207,13 @@ async function setAirtable(r, qty) {
 async function buildImport() {
   const recordIds = state.rows.filter((r) => state.selected.has(r.recordId)).map((r) => r.recordId);
   if (!recordIds.length) { say("Select rows first (the boxes on the left).", true); return; }
-  const data = await post("/api/reconcile/tcgplayer/import", { recordIds });
-  if (!data) return;
+  await downloadImport(recordIds, null);
+}
+
+/** Builds the TCGplayer import for these rows, downloads it, and marks the included rows pending upload. */
+async function downloadImport(recordIds, batchId) {
+  const data = await post("/api/reconcile/tcgplayer/import", { recordIds, batchId });
+  if (!data) return null;
   if (data.included.length) {
     const url = URL.createObjectURL(new Blob([data.csv], { type: "text/csv" }));
     const a = document.createElement("a"); a.href = url; a.download = data.filename; document.body.appendChild(a); a.click(); a.remove();
@@ -216,6 +222,90 @@ async function buildImport() {
   const why = {}; for (const s of data.skipped) why[s.reason] = (why[s.reason] || 0) + 1;
   say(`${data.included.length} rows in the import file, marked pending upload.${data.skipped.length ? ` Left out: ${Object.entries(why).map(([k, n]) => `${n} ${k}`).join(", ")}.` : ""}`);
   for (const i of data.included) updateRow(i.recordId, (row) => { row.tcgPending = { at: data.pendingAt, delta: i.delta }; });
+  return data;
+}
+
+/* ---------- Reconcile All: Airtable is the truth; never changes Airtable ---------- */
+const FRESH_MS = 2 * 60_000;
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function describePlan(plan, kind) {
+  const s = plan.summary;
+  const lines = ["Airtable is the source of truth. Airtable Qty is NOT changed.", ""];
+  if (kind !== "tcgplayer") {
+    lines.push(`CardTrader: ${plural(s.ctRows, "card")} changed (${s.ctUp} up, ${s.ctDown} down), ${plural(s.ctListingsChanged, "listing")} touched.`);
+    if (s.ctDeletes) lines.push(`  ⚠ ${plural(s.ctDeletes, "CardTrader listing")} will be DELETED${s.ctToZeroRows ? ` (${plural(s.ctToZeroRows, "card")} where Airtable is 0)` : ""}. They would have to be listed again from the Export screen.`);
+    if (plan.cardtraderBlocked.length) lines.push(`  ${plural(plan.cardtraderBlocked.length, "card")} can't be changed here (no CardTrader listing to raise), skipped.`);
+    if (!plan.ctAt) lines.push("  CardTrader has not been checked, nothing will change there.");
+  }
+  if (kind !== "cardtrader") {
+    lines.push(`TCGplayer: ${plural(s.tcgRows, "row")} in one import CSV (SKU or confirmed matches), marked pending upload.`);
+    if (s.tcgSuggested) lines.push(`  ${plural(s.tcgSuggested, "unconfirmed suggested match", "unconfirmed suggested matches")} left out. Confirm them first.`);
+    if (s.tcgSkipped) lines.push(`  ${plural(s.tcgSkipped, "other row")} left out (no price or already matching).`);
+    if (!plan.tcgAt) lines.push("  No TCGplayer export uploaded, nothing for TCGplayer.");
+  }
+  lines.push("", "Continue?");
+  return lines.join("\n");
+}
+
+function resultRow(name, platform, status, detail) {
+  const tr = document.createElement("tr");
+  cell(tr, name); cell(tr, platform); const st = cell(tr, status); if (status === "failed") st.className = "error"; cell(tr, detail);
+  $("all-results").appendChild(tr);
+}
+
+async function reconcileAll() {
+  const kind = $("f-mismatch").value;
+  const wantCt = kind !== "tcgplayer", wantTcg = kind !== "cardtrader";
+  const button = $("reconcile-all"); button.disabled = true;
+  try {
+    say("");
+    // 1. A fresh read-only CardTrader check when the last one is older than 2 minutes.
+    if (wantCt && (!state.data.ctAt || Date.now() - Date.parse(state.data.ctAt) > FRESH_MS)) {
+      $("all-progress").textContent = "Checking CardTrader first (read-only)…"; $("all-box").hidden = false;
+      if (!(await post("/api/reconcile/check"))) return;
+      await load();
+    }
+    const visibleRows = state.rows.filter((r) => !isReconciled(r));
+    if (!visibleRows.length) { say("Nothing to reconcile in this view."); return; }
+    const names = new Map(visibleRows.map((r) => [r.recordId, r.name]));
+    // 2. Plan and confirm.
+    const plan = await post("/api/reconcile/all/plan", { recordIds: visibleRows.map((r) => r.recordId), cardtrader: wantCt, tcgplayer: wantTcg });
+    if (!plan) return;
+    if (!plan.cardtrader.length && !plan.tcgplayer.recordIds.length) { say(`Nothing Reconcile All can do here.${plan.summary.tcgSuggested ? ` ${plural(plan.summary.tcgSuggested, "suggested match", "suggested matches")} need confirming first.` : ""}`); return; }
+    if (!confirm(describePlan(plan, kind))) return;
+    const batchId = crypto.randomUUID();
+    $("all-box").hidden = false; $("all-results").replaceChildren();
+    for (const b of plan.cardtraderBlocked) resultRow(b.name, "CardTrader", "skipped", b.reason);
+    // 3. CardTrader, in batches the page drives (no single request runs long).
+    const tally = { succeeded: 0, skipped: plan.cardtraderBlocked.length, failed: 0 };
+    const items = plan.cardtrader.map((i) => ({ recordId: i.recordId, expectedTarget: i.target, expectedCurrent: i.before }));
+    for (let at = 0; at < items.length; at += plan.batchSize) {
+      const batch = items.slice(at, at + plan.batchSize);
+      $("all-progress").textContent = `CardTrader: ${at} of ${items.length} done…`;
+      const { response, data } = await api("/api/reconcile/all/cardtrader", { method: "POST", body: JSON.stringify({ batchId, items: batch }) });
+      if (!response.ok) {
+        for (const i of batch) { tally.failed++; resultRow(names.get(i.recordId) || i.recordId, "CardTrader", "failed", data.error || `HTTP ${response.status}`); }
+        continue;
+      }
+      for (const r of data.results) {
+        tally[r.status]++;
+        resultRow(names.get(r.recordId) || r.recordId, "CardTrader", r.status, r.status === "succeeded" ? `${r.before} → ${r.target}` : r.reason || "");
+        if (r.status === "succeeded") updateRow(r.recordId, (row) => { row.ct = { ...row.ct, qty: r.target }; });
+      }
+    }
+    // 4. TCGplayer: one import CSV for every included row.
+    let tcgLine = "";
+    if (plan.tcgplayer.recordIds.length) {
+      $("all-progress").textContent = "Building the TCGplayer import CSV…";
+      const csv = await downloadImport(plan.tcgplayer.recordIds, batchId);
+      if (csv) { for (const i of csv.included) resultRow(names.get(i.recordId) || i.recordId, "TCGplayer", "in import CSV", `Add to Quantity ${i.delta > 0 ? "+" : ""}${i.delta}`); tcgLine = ` TCGplayer: ${plural(csv.included.length, "row")} in the downloaded import, pending upload.`; }
+      else tcgLine = " TCGplayer: the import CSV could not be built.";
+    }
+    const ctLine = items.length || plan.cardtraderBlocked.length ? `CardTrader: ${tally.succeeded} succeeded, ${tally.skipped} skipped, ${tally.failed} failed.` : "";
+    $("all-progress").textContent = `Done. ${ctLine}${tcgLine}`;
+    say(`Reconcile All finished. ${ctLine}${tcgLine}`, tally.failed > 0);
+  } finally { button.disabled = false; }
 }
 
 // Downloads need the bearer token, so fetch the file and hand the browser a blob.
