@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const state = { canManage: false, rows: [], selected: new Set() };
-const ACTION = { check_cardtrader: "Checked CardTrader", tcgplayer_upload: "Uploaded TCGplayer export", tcgplayer_confirm: "Confirmed TCGplayer match", tcgplayer_unconfirm: "Removed TCGplayer match", tcgplayer_sku_write: "Wrote SKU to Airtable", tcgplayer_import_csv: "Built TCGplayer import", cardtrader_set: "Set CardTrader qty", airtable_set: "Set Airtable Qty" };
+const ACTION = { check_cardtrader: "Checked CardTrader", tcgplayer_upload: "Uploaded TCGplayer export", tcgplayer_confirm: "Confirmed TCGplayer match", tcgplayer_unconfirm: "Removed TCGplayer match", tcgplayer_sku_write: "Wrote SKU to Airtable", tcgplayer_import_csv: "Built TCGplayer import", cardtrader_set: "Set CardTrader qty", airtable_set: "Set Airtable Qty", cleanup_update: "Cleanup: updated survivor", cleanup_delete: "Cleanup: deleted row", cleanup_archive: "Cleanup: archived row", cleanup_restore: "Cleanup: restored row", cleanup_skip: "Cleanup: group skipped/failed" };
 const SOURCE = { sku: "Airtable SKU", confirmed: "confirmed", suggested: "suggested" };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -13,6 +13,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("tcg-upload").addEventListener("click", uploadTcg);
   $("tcg-import").addEventListener("click", buildImport);
   $("reconcile-all").addEventListener("click", reconcileAll);
+  $("cleanup-preview").addEventListener("click", previewCleanup);
+  $("cleanup-apply").addEventListener("click", applyCleanup);
+  $("cl-snap-box").addEventListener("toggle", (e) => { if (e.target.open) loadSnapshots(); });
   $("select-all").addEventListener("change", (e) => { for (const r of state.rows) e.target.checked ? state.selected.add(r.recordId) : state.selected.delete(r.recordId); render(); });
   boot();
 });
@@ -29,7 +32,7 @@ async function boot() {
   $("tenant-name").textContent = session.data.tenant || "";
   state.canManage = session.data.role === "org:admin";
   for (const game of session.data.games || []) { const o = document.createElement("option"); o.value = game; o.textContent = game; $("f-game").appendChild(o); }
-  for (const id of ["ct-check", "tcg-upload-box", "tcg-import", "select-all", "reconcile-all"]) $(id).hidden = !state.canManage;
+  for (const id of ["ct-check", "tcg-upload-box", "tcg-import", "select-all", "reconcile-all", "cleanup-panel"]) $(id).hidden = !state.canManage;
   show("recon");
   await load();
 }
@@ -318,4 +321,120 @@ async function download(path, fallbackName) {
   const url = URL.createObjectURL(await response.blob());
   const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ---------- CardTrader cleanup → Airtable: grouped preview, one confirm, batches, Restore ---------- */
+
+const cleanup = { preview: null, choice: new Map() };
+const where = (r) => [r.set, r.number ? `#${r.number}` : "", r.condition, r.finish].filter(Boolean).join(" · ");
+const usd = (n) => (n == null ? "—" : `$${Number(n).toFixed(2)}`);
+
+async function previewCleanup() {
+  const b = $("cleanup-preview"); b.disabled = true; b.textContent = "Checking CardTrader…";
+  try {
+    const data = await post("/api/reconcile/cleanup/preview");
+    if (!data) return;
+    cleanup.preview = data; cleanup.choice = new Map(data.merges.map((g) => [g.key, "keep"]));
+    renderCleanup();
+  } finally { b.disabled = false; b.textContent = "Preview cleanup (fresh CardTrader check, changes nothing)"; }
+}
+
+function choiceSelect(g) {
+  const sel = document.createElement("select"); sel.setAttribute("aria-label", `Choice for ${g.name}`);
+  for (const [v, t] of [["keep", "Keep CardTrader qty"], ["skip", "Skip this group"]]) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.appendChild(o); }
+  sel.value = cleanup.choice.get(g.key) || "keep";
+  sel.addEventListener("change", () => { cleanup.choice.set(g.key, sel.value); renderCleanup(); });
+  return sel;
+}
+
+function cleanupGroupsToApply() {
+  const p = cleanup.preview;
+  return [...p.merges, ...p.syncs].filter((g) => !(g.qtyMismatch && cleanup.choice.get(g.key) === "skip"));
+}
+
+function renderCleanup() {
+  const p = cleanup.preview; if (!p) return;
+  $("cleanup-box").hidden = false;
+  $("cleanup-meta").textContent = `CardTrader checked ${et(p.ctAt)} ET · removal mode: ${p.removeMode}`;
+  const skipped = p.merges.filter((g) => g.qtyMismatch && cleanup.choice.get(g.key) === "skip");
+  const applying = cleanupGroupsToApply();
+  const deleting = applying.reduce((n, g) => n + g.removed.length, 0);
+  $("cleanup-counts").textContent = `${plural(p.counts.merges, "merge group")} (${plural(p.counts.deletes, "row")} to ${p.removeMode}), ${plural(p.counts.syncs, "qty sync")}, ${p.counts.goneNoSurvivor + p.counts.listingsNoRow} with no match, ${plural(p.counts.qtyMismatches, "qty mismatch", "qty mismatches")}${skipped.length ? ` (${skipped.length} skipped)` : ""}, ${p.counts.ambiguous} left alone.`;
+  $("cl-merge-n").textContent = `(${p.merges.length})`; $("cl-delete-n").textContent = `(${p.deletes.length})`; $("cl-sync-n").textContent = `(${p.syncs.length})`;
+  $("cl-nomatch-n").textContent = `(${p.counts.goneNoSurvivor + p.counts.listingsNoRow}; nothing is done to these)`; $("cl-mm-n").textContent = `(${p.counts.qtyMismatches})`; $("cl-amb-n").textContent = String(p.ambiguous.length);
+  const merges = $("cl-merges"); merges.replaceChildren();
+  for (const g of p.merges) {
+    const tr = document.createElement("tr");
+    cell(tr, g.name); cell(tr, where(g.survivor)); cell(tr, `${g.survivor.qty} → ${g.ctQty}`, g.survivor.recordId);
+    cell(tr, g.removed.map((r) => `${r.recordId} (qty ${r.qty})`).join(", "));
+    const t = cell(tr, `${g.airtableQtySum} vs ${g.ctQty}${g.qtyMismatch ? " · qty mismatch" : ""}`); if (g.qtyMismatch) t.className = "error";
+    cell(tr, g.cost.changed ? `${usd(g.cost.before)} → ${usd(g.cost.after)}` : usd(g.cost.after));
+    const td = document.createElement("td"); if (g.qtyMismatch) td.appendChild(choiceSelect(g)); else td.textContent = "Merge"; tr.appendChild(td);
+    merges.appendChild(tr);
+  }
+  if (!p.merges.length) empty(merges, 7, "No duplicates to merge.");
+  const dels = $("cl-deletes"); dels.replaceChildren();
+  for (const d of p.deletes) { const tr = document.createElement("tr"); const skip = cleanup.choice.get(p.merges.find((g) => g.survivor.recordId === d.intoRecordId)?.key) === "skip"; cell(tr, `${d.name}${skip ? " (group skipped)" : ""}`); cell(tr, d.qty); cell(tr, `${d.intoName} (${d.intoRecordId})`); cell(tr, d.recordId); dels.appendChild(tr); }
+  if (!p.deletes.length) empty(dels, 4, "Nothing to delete.");
+  const syncs = $("cl-syncs"); syncs.replaceChildren();
+  for (const g of p.syncs) { const tr = document.createElement("tr"); cell(tr, `${g.name} · ${where(g.survivor)}`); cell(tr, `${g.survivor.qty} → ${g.ctQty}`); cell(tr, [g.update.cost ? `cost ${usd(g.cost.before)} → ${usd(g.cost.after)}` : "", g.update.listingId ? `listing id → ${g.listingId}` : ""].filter(Boolean).join("; ")); syncs.appendChild(tr); }
+  if (!p.syncs.length) empty(syncs, 3, "Every surviving row already has CardTrader's quantity.");
+  const nm = $("cl-nomatch"); nm.replaceChildren();
+  for (const r of p.noMatch.goneNoSurvivor) { const tr = document.createElement("tr"); cell(tr, "Airtable row, CardTrader listing gone, no survivor"); cell(tr, `${r.name} · ${where(r)}`); cell(tr, `Airtable Qty ${r.qty}, listing ${r.listingId}`); nm.appendChild(tr); }
+  for (const l of p.noMatch.listingsNoRow) { const tr = document.createElement("tr"); cell(tr, "CardTrader listing, no Airtable row"); cell(tr, `listing ${l.id}`); cell(tr, `qty ${l.quantity}${l.recordId ? `, tag ${l.recordId}` : ""}`); nm.appendChild(tr); }
+  if (!nm.children.length) empty(nm, 3, "None.");
+  const mm = $("cl-mm"); mm.replaceChildren();
+  for (const g of p.merges.filter((x) => x.qtyMismatch)) { const tr = document.createElement("tr"); cell(tr, `${g.name} · ${where(g.survivor)}`); cell(tr, g.airtableQtySum); cell(tr, g.ctQty); const td = document.createElement("td"); td.appendChild(choiceSelect(g)); tr.appendChild(td); mm.appendChild(tr); }
+  if (!mm.children.length) empty(mm, 4, "None.");
+  const amb = $("cl-amb"); amb.replaceChildren();
+  for (const a of p.ambiguous) { const tr = document.createElement("tr"); cell(tr, a.key); cell(tr, a.listingIds.join(", ")); amb.appendChild(tr); }
+  const apply = $("cleanup-apply");
+  apply.hidden = !applying.length;
+  apply.textContent = `Apply: update ${plural(applying.filter((g) => g.patch).length, "row")}, ${p.removeMode} ${plural(deleting, "row")}`;
+}
+
+async function applyCleanup() {
+  const p = cleanup.preview; if (!p) return;
+  const groups = cleanupGroupsToApply();
+  const deleting = groups.flatMap((g) => g.removed.map((r) => `• ${r.name} (Airtable Qty ${r.qty}) → into ${g.survivor.recordId}`));
+  const updating = groups.filter((g) => g.patch).map((g) => `• ${g.name}: Qty ${g.survivor.qty} → ${g.ctQty}${g.update.cost ? `, cost ${usd(g.cost.before)} → ${usd(g.cost.after)}` : ""}`);
+  const text = `Apply the CardTrader cleanup?\n\n${p.removeMode === "archive" ? "Archive" : "DELETE from Airtable"} ${plural(deleting.length, "record")}:\n${deleting.slice(0, 40).join("\n")}${deleting.length > 40 ? `\n…and ${deleting.length - 40} more (all listed on the page)` : ""}\n\nUpdate ${plural(updating.length, "row")}:\n${updating.slice(0, 20).join("\n")}${updating.length > 20 ? `\n…and ${updating.length - 20} more` : ""}\n\nEvery record is copied to Hekla first and can be restored. Each group is re-checked against CardTrader and Airtable right before it changes.`;
+  if (!confirm(text)) return;
+  const batchId = crypto.randomUUID();
+  const items = [...groups.map((g) => ({ key: g.key, survivorId: g.survivor.recordId, listingId: g.listingId, ctQty: g.ctQty, removeIds: g.removed.map((r) => r.recordId), mode: "keep" })),
+    ...p.merges.filter((g) => g.qtyMismatch && cleanup.choice.get(g.key) === "skip").map((g) => ({ key: g.key, survivorId: g.survivor.recordId, listingId: g.listingId, ctQty: g.ctQty, removeIds: g.removed.map((r) => r.recordId), mode: "skip" }))];
+  const btn = $("cleanup-apply"); btn.disabled = true; $("cl-results-box").hidden = false; $("cl-results").replaceChildren();
+  const tally = { succeeded: 0, skipped: 0, failed: 0 };
+  const add = (name, status, detail) => { const tr = document.createElement("tr"); cell(tr, name); const s = cell(tr, status); if (status === "failed") s.className = "error"; cell(tr, detail); $("cl-results").appendChild(tr); };
+  try {
+    for (let at = 0; at < items.length; at += p.batchSize) {
+      const batch = items.slice(at, at + p.batchSize);
+      $("cl-progress").textContent = `${at} of ${items.length} groups done…`;
+      const { response, data } = await api("/api/reconcile/cleanup/apply", { method: "POST", body: JSON.stringify({ batchId, groups: batch }) });
+      if (!response.ok) { for (const i of batch) { tally.failed++; add(i.key, "failed", data.error || `HTTP ${response.status}`); } continue; }
+      for (const r of data.results) {
+        tally[r.status]++;
+        add(r.name, r.status, r.status === "succeeded" ? [r.updated ? `updated ${Object.entries(r.updated).map(([k, v]) => `${k}=${v}`).join(", ")}` : "", r.removed.length ? `${data.mode === "archive" ? "archived" : "deleted"} ${r.removed.join(", ")}` : ""].filter(Boolean).join("; ") : `${r.reason || ""}${r.removed?.length ? ` (removed before failing: ${r.removed.join(", ")})` : ""}`);
+      }
+    }
+    $("cl-progress").textContent = `Done: ${tally.succeeded} succeeded, ${tally.skipped} skipped, ${tally.failed} failed.`;
+    say(`Cleanup finished: ${tally.succeeded} succeeded, ${tally.skipped} skipped, ${tally.failed} failed.`, tally.failed > 0);
+    $("cleanup-apply").hidden = true; cleanup.preview = null;
+    await load();
+    if ($("cl-snap-box").open) loadSnapshots();
+  } finally { btn.disabled = false; }
+}
+
+async function loadSnapshots() {
+  const { response, data } = await api("/api/reconcile/cleanup/snapshots");
+  const tb = $("cl-snaps"); tb.replaceChildren();
+  if (!response.ok) { empty(tb, 6, data.error || "Could not load."); return; }
+  for (const s of data.snapshots) {
+    const tr = document.createElement("tr");
+    cell(tr, et(s.takenAt)); cell(tr, s.name); cell(tr, `${s.action}${s.appliedAt ? "" : " (not applied)"}`); cell(tr, s.qty); cell(tr, s.restoredRecordId ? `${s.recordId} → restored as ${s.restoredRecordId}` : s.recordId);
+    const td = document.createElement("td");
+    if (data.canManage && s.appliedAt && !s.restoredAt && s.action !== "update") button(td, "Restore", async () => { if (!confirm(`Re-create “${s.name}” in Airtable from the snapshot?`)) return; const r = await post("/api/reconcile/cleanup/restore", { snapshotId: s.id }); if (r) { say(`Restored as ${r.recordId}.`); loadSnapshots(); load(); } });
+    tr.appendChild(td); tb.appendChild(tr);
+  }
+  if (!data.snapshots.length) empty(tb, 6, "No cleanup snapshots yet.");
 }

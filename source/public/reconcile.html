@@ -58,6 +58,29 @@
       <p id="sku-col" class="hint"></p>
     </section>
 
+    <section id="cleanup-panel" class="panel" hidden>
+      <div class="panel-head"><h2>CardTrader cleanup → Airtable</h2><span id="cleanup-meta" class="hint"></span></div>
+      <p class="hint">After merging or deleting listings on CardTrader: the row that owns each surviving listing takes CardTrader's quantity, and duplicate rows whose listings are gone are removed from Airtable. Every changed or removed record is copied to Hekla first (reason “cardtrader-cleanup”) and can be restored below. Nothing is a sale; the sales log is not touched. Errors or unmatched rows are never treated as 0.</p>
+      <div class="queue-tools"><button id="cleanup-preview" class="ghost tiny" type="button">Preview cleanup (fresh CardTrader check, changes nothing)</button><button id="cleanup-apply" class="primary" type="button" hidden>Apply</button></div>
+      <div id="cleanup-box" hidden>
+        <p id="cleanup-counts" class="flash" role="status"></p>
+        <h3>Merge duplicates <span id="cl-merge-n" class="hint"></span></h3>
+        <p class="hint">Qty mismatch = the Airtable rows add up to a different number than CardTrader's merged listing. Pick per group: keep CardTrader's qty (default) or skip the group.</p>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Set · # · Cond · Finish</th><th>Survivor (Airtable Qty → new)</th><th>Rows merged in (deleted)</th><th>Airtable total vs CardTrader</th><th>Cost</th><th>Action</th></tr></thead><tbody id="cl-merges"></tbody></table></div>
+        <h3>Delete <span id="cl-delete-n" class="hint"></span></h3>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Airtable Qty</th><th>Merges into</th><th>Record</th></tr></thead><tbody id="cl-deletes"></tbody></table></div>
+        <h3>Qty sync <span id="cl-sync-n" class="hint"></span></h3>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Airtable Qty → CardTrader</th><th>Other changes</th></tr></thead><tbody id="cl-syncs"></tbody></table></div>
+        <h3>No match <span id="cl-nomatch-n" class="hint">(nothing is done to these)</span></h3>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Kind</th><th>Card / listing</th><th>Detail</th></tr></thead><tbody id="cl-nomatch"></tbody></table></div>
+        <h3>Qty mismatches <span id="cl-mm-n" class="hint"></span></h3>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Airtable total</th><th>CardTrader</th><th>Choice</th></tr></thead><tbody id="cl-mm"></tbody></table></div>
+        <details><summary class="hint">Left alone: printings with more than one live CardTrader listing (<span id="cl-amb-n"></span>)</summary><div class="table-wrap"><table class="admin-table"><thead><tr><th>Cards</th><th>Listings</th></tr></thead><tbody id="cl-amb"></tbody></table></div></details>
+        <div id="cl-results-box" hidden><p id="cl-progress" class="flash" role="status"></p><div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Result</th><th>Detail</th></tr></thead><tbody id="cl-results"></tbody></table></div></div>
+      </div>
+      <details id="cl-snap-box"><summary class="hint">Removed and changed records (snapshots, Restore)</summary><div class="table-wrap"><table class="admin-table"><thead><tr><th>When (ET)</th><th>Card</th><th>Action</th><th>Qty</th><th>Record</th><th></th></tr></thead><tbody id="cl-snaps"></tbody></table></div></details>
+    </section>
+
     <section class="panel">
       <div class="panel-head"><h2>Cards</h2><span id="counts" class="hint"></span></div>
       <form id="filters" class="queue-tools" autocomplete="off">

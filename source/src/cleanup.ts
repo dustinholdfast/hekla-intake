@@ -137,3 +137,85 @@ export function planCleanup(rows: CleanupRow[], listings: CtListing[]): CleanupP
     skippedSold,
   };
 }
+
+/* ---------- apply (one batch, sequential, each group re-checked against a fresh plan) ---------- */
+
+export const CLEANUP_REASON = "cardtrader-cleanup";
+export const CLEANUP_BATCH = 10;
+export type RemoveMode = "delete" | "archive";
+/** Archive instead of delete: the Waitlist has no Archived field, so Status Skip + Qty 0 (Hekla never creates fields). */
+export const ARCHIVE_FIELDS = { Status: "Skip", Qty: 0 } as const;
+export type ApplyGroup = { key: string; survivorId: string; listingId: number; ctQty: number; removeIds: string[]; mode: "keep" | "skip" };
+export type ApplyResult = { key: string; name: string; status: "succeeded" | "skipped" | "failed"; reason?: string; updated: Record<string, unknown> | null; removed: string[]; snapshotIds: number[] };
+export type CleanupIO = {
+  snapshot(recordId: string, action: "update" | RemoveMode, detail: Record<string, unknown>): Promise<number>;
+  applied(snapshotId: number): Promise<void>;
+  update(recordId: string, fields: Record<string, unknown>): Promise<void>;
+  remove(recordId: string): Promise<void>;
+  archive(recordId: string): Promise<void>;
+};
+
+/** The Airtable fields the survivor needs, or null when it already matches. */
+export function survivorPatch(g: CleanupGroup): Record<string, unknown> | null {
+  const f: Record<string, unknown> = {};
+  if (g.update.qty) f.Qty = g.ctQty;
+  if (g.update.cost && g.cost.after != null) f["Cost Basis USD"] = g.cost.after;
+  if (g.update.listingId) f["CardTrader Listing ID"] = String(g.listingId);
+  return Object.keys(f).length ? f : null;
+}
+const sameSet = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join() === [...b].sort().join();
+
+export async function runCleanupBatch(inputs: ApplyGroup[], fresh: CleanupPlan, io: CleanupIO, mode: RemoveMode = "delete"): Promise<ApplyResult[]> {
+  const byKey = new Map(fresh.groups.map((g) => [g.key, g]));
+  const out: ApplyResult[] = [];
+  for (const i of inputs) {
+    const g = byKey.get(i.key);
+    const base = { key: i.key, name: g?.name ?? i.key, updated: null, removed: [] as string[], snapshotIds: [] as number[] };
+    if (i.mode === "skip") { out.push({ ...base, status: "skipped", reason: "skipped by you" }); continue; }
+    if (!g) { out.push({ ...base, status: "skipped", reason: "no longer a cleanup group (CardTrader or Airtable changed)" }); continue; }
+    if (g.survivor.id !== i.survivorId || g.listingId !== i.listingId) { out.push({ ...base, status: "skipped", reason: "the surviving row or listing changed since the preview" }); continue; }
+    if (g.ctQty !== i.ctQty) { out.push({ ...base, status: "skipped", reason: `CardTrader now shows ${g.ctQty} (preview said ${i.ctQty})` }); continue; }
+    const removeIds = g.removed.map((r) => r.id);
+    if (!sameSet(removeIds, i.removeIds)) { out.push({ ...base, status: "skipped", reason: "the rows to remove changed since the preview" }); continue; }
+    const patch = survivorPatch(g);
+    if (!patch && !removeIds.length) { out.push({ ...base, status: "skipped", reason: "already matches" }); continue; }
+    const result: ApplyResult = { ...base, status: "succeeded" };
+    const detail = { survivor: g.survivor.id, listingId: g.listingId, ctQty: g.ctQty, airtableQtySum: g.airtableQtySum, qtyMismatch: g.qtyMismatch, cost: g.cost, removing: removeIds };
+    try {
+      if (patch) {
+        const id = await io.snapshot(g.survivor.id, "update", { ...detail, patch });
+        result.snapshotIds.push(id);
+        await io.update(g.survivor.id, patch);
+        await io.applied(id);
+        result.updated = patch;
+      }
+      for (const r of g.removed) {
+        const id = await io.snapshot(r.id, mode, { ...detail, into: g.survivor.id, qty: r.qty });
+        result.snapshotIds.push(id);
+        await (mode === "archive" ? io.archive(r.id) : io.remove(r.id));
+        await io.applied(id);
+        result.removed.push(r.id);
+      }
+    } catch (error) {
+      result.status = "failed"; result.reason = error instanceof Error ? error.message : String(error);
+    }
+    out.push(result);
+  }
+  return out;
+}
+
+/** The preview the page shows: plan groups as plain JSON. */
+export function previewJson(p: CleanupPlan) {
+  const r = (x: CleanupRow) => ({ recordId: x.id, name: x.name, game: x.game, set: x.setIdentifier ?? x.setNumber, number: x.collectorNumber, finish: x.finish, condition: x.condition, qty: x.qty, cost: x.costBasisUsd, listingId: x.cardTraderListingId });
+  const g = (x: CleanupGroup) => ({ key: x.key, name: x.name, survivor: r(x.survivor), listingId: x.listingId, ctQty: x.ctQty, airtableQtySum: x.airtableQtySum, qtyMismatch: x.qtyMismatch, cost: x.cost, update: x.update, patch: survivorPatch(x), removed: x.removed.map(r) });
+  const merges = p.groups.filter((x) => x.removed.length).map(g);
+  const syncs = p.groups.filter((x) => !x.removed.length && survivorPatch(x)).map(g);
+  return {
+    merges, syncs,
+    deletes: p.toRemove.map((x) => ({ ...r(x.row), intoRecordId: x.intoRecordId, intoName: x.intoName, listingId: x.listingId })),
+    noMatch: { goneNoSurvivor: p.goneNoSurvivor.map(r), listingsNoRow: p.listingsNoRow },
+    qtyMismatches: p.qtyMismatches.map((x) => x.key),
+    ambiguous: p.ambiguous, skippedSold: p.skippedSold,
+    counts: { merges: merges.length, deletes: p.toRemove.length, syncs: syncs.length, goneNoSurvivor: p.goneNoSurvivor.length, listingsNoRow: p.listingsNoRow.length, qtyMismatches: p.qtyMismatches.length, ambiguous: p.ambiguous.length },
+  };
+}

@@ -62,11 +62,48 @@ export async function removeMatch(env: Env, tenantId: string, recordId: string):
   return (await db(env).query("delete from tcgplayer_matches where tenant_id = $1 and record_id = $2 returning record_id", [tenantId, recordId])).length > 0;
 }
 
-export type ReconAction = "check_cardtrader" | "tcgplayer_upload" | "tcgplayer_confirm" | "tcgplayer_unconfirm" | "tcgplayer_sku_write" | "tcgplayer_import_csv" | "cardtrader_set" | "airtable_set";
+export type ReconAction = "check_cardtrader" | "tcgplayer_upload" | "tcgplayer_confirm" | "tcgplayer_unconfirm" | "tcgplayer_sku_write" | "tcgplayer_import_csv" | "cardtrader_set" | "airtable_set" | "cleanup_update" | "cleanup_delete" | "cleanup_archive" | "cleanup_restore" | "cleanup_skip";
 export async function logAction(env: Env, tenantId: string, userId: string, action: ReconAction, recordId: string | null, detail: Record<string, unknown>): Promise<void> {
   await db(env).query("insert into reconcile_actions (tenant_id, user_id, action, record_id, detail) values ($1, $2, $3, $4, $5::jsonb)", [tenantId, userId, action, recordId, JSON.stringify(detail)]);
 }
 export async function recentActions(env: Env, tenantId: string, limit = 50): Promise<{ id: number; at: string; userId: string; action: string; recordId: string | null; detail: unknown }[]> {
   const rows = await db(env).query("select id, created_at, user_id, action, record_id, detail from reconcile_actions where tenant_id = $1 order by created_at desc, id desc limit $2", [tenantId, limit]);
   return rows.map((r) => ({ id: Number(r.id), at: new Date(r.created_at as string).toISOString(), userId: String(r.user_id), action: String(r.action), recordId: (r.record_id as string) ?? null, detail: r.detail }));
+}
+
+/* ---------- CardTrader cleanup snapshots (0007) ---------- */
+
+export type SnapshotAction = "delete" | "archive" | "update";
+export type RecordSnapshot = { id: number; recordId: string; fields: Record<string, unknown>; action: SnapshotAction; reason: string; batchId: string | null; detail: Record<string, unknown>; takenBy: string; takenAt: string; appliedAt: string | null; restoredAt: string | null; restoredRecordId: string | null };
+const toSnapshot = (r: Record<string, unknown>): RecordSnapshot => ({
+  id: Number(r.id), recordId: String(r.record_id), fields: r.fields as Record<string, unknown>, action: r.action as SnapshotAction, reason: String(r.reason), batchId: (r.batch_id as string) ?? null,
+  detail: (r.detail as Record<string, unknown>) ?? {}, takenBy: String(r.taken_by), takenAt: new Date(String(r.taken_at)).toISOString(),
+  appliedAt: r.applied_at ? new Date(String(r.applied_at)).toISOString() : null, restoredAt: r.restored_at ? new Date(String(r.restored_at)).toISOString() : null, restoredRecordId: (r.restored_record_id as string) ?? null,
+});
+export async function saveRecordSnapshot(env: Env, tenantId: string, s: { recordId: string; baseId: string; tableId: string; fields: Record<string, unknown>; createdTime: string | null; action: SnapshotAction; reason: string; batchId: string | null; detail: Record<string, unknown>; takenBy: string }): Promise<number> {
+  const rows = await db(env).query(
+    `insert into airtable_record_snapshots (tenant_id, record_id, base_id, table_id, fields, record_created_at, action, reason, batch_id, detail, taken_by)
+     values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10::jsonb, $11) returning id`,
+    [tenantId, s.recordId, s.baseId, s.tableId, JSON.stringify(s.fields), s.createdTime, s.action, s.reason, s.batchId, JSON.stringify(s.detail), s.takenBy]);
+  return Number(rows[0]!.id);
+}
+export async function markSnapshotApplied(env: Env, tenantId: string, id: number): Promise<void> {
+  await db(env).query("update airtable_record_snapshots set applied_at = now() where tenant_id = $1 and id = $2", [tenantId, id]);
+}
+export async function listRecordSnapshots(env: Env, tenantId: string, limit = 200): Promise<RecordSnapshot[]> {
+  const rows = await db(env).query("select * from airtable_record_snapshots where tenant_id = $1 order by taken_at desc, id desc limit $2", [tenantId, limit]);
+  return rows.map(toSnapshot);
+}
+export async function getRecordSnapshot(env: Env, tenantId: string, id: number): Promise<RecordSnapshot | null> {
+  const rows = await db(env).query("select * from airtable_record_snapshots where tenant_id = $1 and id = $2", [tenantId, id]);
+  return rows[0] ? toSnapshot(rows[0]) : null;
+}
+/** Claims a snapshot for restore (only once, only applied deletes/archives). Returns false if already restored. */
+export async function claimRestore(env: Env, tenantId: string, id: number, userId: string): Promise<boolean> {
+  const rows = await db(env).query("update airtable_record_snapshots set restored_at = now(), restored_by = $3 where tenant_id = $1 and id = $2 and restored_at is null and applied_at is not null and action in ('delete', 'archive') returning id", [tenantId, id, userId]);
+  return rows.length > 0;
+}
+export async function finishRestore(env: Env, tenantId: string, id: number, newRecordId: string | null): Promise<void> {
+  if (newRecordId) await db(env).query("update airtable_record_snapshots set restored_record_id = $3 where tenant_id = $1 and id = $2", [tenantId, id, newRecordId]);
+  else await db(env).query("update airtable_record_snapshots set restored_at = null, restored_by = null where tenant_id = $1 and id = $2", [tenantId, id]); // failed: release the claim
 }
