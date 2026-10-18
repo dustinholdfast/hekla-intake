@@ -24,8 +24,7 @@ import {
   rescanPage,
   rescanSlotOffset,
   summary,
-  type QueueCard,
-} from "./airtable.ts";
+  type QueueCard, createRecordRaw, deleteRecordRaw, getRecordRaw, patchRecordFields, restorableFields } from "./airtable.ts";
 import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
 import { appInfo, CardTraderError, createProduct, deleteProduct, expansionsFor, exportListings, incrementListing, previewExport, setWebhookUrl, type CtListing } from "./cardtrader.ts";
 import { cleanToken, ConnectionError, connectionSecret, connectionSettings, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
@@ -33,7 +32,8 @@ import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
 import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
 import { getState, listSales, setState } from "./salesdb.ts";
-import { confirmedMatches, confirmMatch, latestSnapshot, logAction, recentActions, removeMatch, saveSnapshot, type ReconAction } from "./recondb.ts";
+import { claimRestore, confirmedMatches, confirmMatch, finishRestore, getRecordSnapshot, latestSnapshot, listRecordSnapshots, logAction, markSnapshotApplied, recentActions, removeMatch, saveRecordSnapshot, saveSnapshot, type ReconAction } from "./recondb.ts";
+import { ARCHIVE_FIELDS, CLEANUP_BATCH, CLEANUP_REASON, planCleanup, previewJson, runCleanupBatch, type ApplyGroup, type RemoveMode } from "./cleanup.ts";
 import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
 import { parseTcgExport } from "./tcgcsv.ts";
 import { groupMagicSets, refreshScryfallStore, scryfallIndexWithSource, setIconSvg, withIcons, type ScryfallSet, type ScryfallStore } from "./scryfall.ts";
@@ -944,6 +944,91 @@ app.post("/api/reconcile/airtable/set", async (c) => {
   await writeStock(c.var.tenantEnv, recordId, qty);
   await reconAudit(c, "airtable_set", recordId, { before: current, after: qty, soldStatus: qty === 0 });
   return c.json({ ok: true, before: current, after: qty });
+});
+
+/* ---------- CardTrader cleanup → Airtable (merged/removed CardTrader listings; docs in src/cleanup.ts) ---------- */
+
+const removeMode = (env: Env): RemoveMode => ((env as { CLEANUP_REMOVE_MODE?: string }).CLEANUP_REMOVE_MODE === "archive" ? "archive" : "delete");
+/** A fresh, successful CardTrader export plus the Airtable rows; throws (no plan) when CardTrader fails. */
+async function cleanupPlan(c: AppContext) {
+  const listings = await exportListings(await cardTraderToken(c));
+  const at = new Date().toISOString();
+  await setState(c.env, c.var.tenant.id, CT_CACHE, { at, listings } satisfies CtCache);
+  const { rows } = await reconcileRows(c.var.tenantEnv);
+  return { at, plan: planCleanup(rows, listings) };
+}
+
+// Preview only: nothing in Airtable or CardTrader changes.
+app.post("/api/reconcile/cleanup/preview", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can preview the cleanup." }, 403);
+  const { at, plan } = await cleanupPlan(c);
+  const preview = previewJson(plan);
+  console.log("cleanup preview", JSON.stringify({ tenant: c.var.tenant.id, ctAt: at, ...preview.counts }));
+  return c.json({ ctAt: at, removeMode: removeMode(c.env), batchSize: CLEANUP_BATCH, ...preview });
+});
+
+// Apply, at most CLEANUP_BATCH groups per request (the page drives the batches). Every group is re-planned from a
+// fresh CardTrader export and Airtable read; a group that changed since the preview is skipped, not guessed.
+app.post("/api/reconcile/cleanup/apply", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can apply the cleanup." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const batchId = String(body.value.batchId ?? "");
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(batchId)) return c.json({ error: "Missing batch id." }, 400);
+  const raw = Array.isArray(body.value.groups) ? (body.value.groups as Record<string, unknown>[]) : [];
+  if (!raw.length || raw.length > CLEANUP_BATCH) return c.json({ error: `Send 1 to ${CLEANUP_BATCH} groups per request.` }, 400);
+  const inputs: ApplyGroup[] = [];
+  for (const g of raw) {
+    const ids = Array.isArray(g?.removeIds) ? (g.removeIds as unknown[]) : null;
+    if (!g || typeof g.key !== "string" || g.key.length > 300 || typeof g.survivorId !== "string" || !/^rec[A-Za-z0-9]{14}$/.test(g.survivorId) || !Number.isInteger(g.listingId) || !Number.isInteger(g.ctQty)
+      || !ids || ids.length > 50 || !ids.every((x) => typeof x === "string" && /^rec[A-Za-z0-9]{14}$/.test(x)) || (g.mode !== "keep" && g.mode !== "skip")) return c.json({ error: "Each group needs key, survivorId, listingId, ctQty, removeIds and mode (keep or skip)." }, 400);
+    inputs.push({ key: g.key, survivorId: g.survivorId, listingId: g.listingId as number, ctQty: g.ctQty as number, removeIds: ids as string[], mode: g.mode });
+  }
+  const { plan } = await cleanupPlan(c);
+  const mode = removeMode(c.env);
+  const env = c.var.tenantEnv; const tenantId = c.var.tenant.id; const userId = c.var.userId;
+  const results = await runCleanupBatch(inputs, plan, {
+    async snapshot(recordId, action, detail) {
+      const rec = await getRecordRaw(env, recordId);
+      return saveRecordSnapshot(c.env, tenantId, { recordId, baseId: env.AIRTABLE_BASE_ID, tableId: env.AIRTABLE_TABLE_ID, fields: rec.fields, createdTime: rec.createdTime, action, reason: CLEANUP_REASON, batchId, detail, takenBy: userId });
+    },
+    applied: (id) => markSnapshotApplied(c.env, tenantId, id),
+    update: (recordId, fields) => patchRecordFields(env, recordId, fields),
+    remove: (recordId) => deleteRecordRaw(env, recordId),
+    archive: (recordId) => patchRecordFields(env, recordId, { ...ARCHIVE_FIELDS }),
+  }, mode);
+  for (const r of results) {
+    console.log("cleanup", JSON.stringify({ tenant: tenantId, batchId, mode, key: r.key, name: r.name, status: r.status, reason: r.reason ?? null, updated: r.updated, removed: r.removed, snapshots: r.snapshotIds }));
+    if (r.updated) await reconAudit(c, "cleanup_update", plan.groups.find((g) => g.key === r.key)?.survivor.id ?? null, { batchId, key: r.key, fields: r.updated, reason: CLEANUP_REASON });
+    for (const id of r.removed) await reconAudit(c, mode === "archive" ? "cleanup_archive" : "cleanup_delete", id, { batchId, key: r.key, reason: CLEANUP_REASON });
+    if (r.status !== "succeeded") await reconAudit(c, "cleanup_skip", null, { batchId, key: r.key, status: r.status, reason: r.reason ?? null, partial: r.removed });
+  }
+  return c.json({ batchId, mode, results });
+});
+
+app.get("/api/reconcile/cleanup/snapshots", async (c) => {
+  return c.json({ snapshots: (await listRecordSnapshots(c.env, c.var.tenant.id, 300)).map((s) => ({ ...s, name: String(s.fields["Card Name"] ?? s.fields["Resolved Name"] ?? s.recordId), qty: s.fields.Qty ?? null, fields: undefined })), canManage: canManageConnections(c) });
+});
+
+// Re-creates a deleted (or un-archives an archived) record from its snapshot. Once per snapshot.
+app.post("/api/reconcile/cleanup/restore", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can restore a record." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const id = Number(body.value.snapshotId);
+  if (!Number.isInteger(id) || id < 1) return c.json({ error: "Pick a snapshot." }, 400);
+  const snap = await getRecordSnapshot(c.env, c.var.tenant.id, id);
+  if (!snap) return c.json({ error: "That snapshot was not found." }, 404);
+  if (!(await claimRestore(c.env, c.var.tenant.id, id, c.var.userId))) return c.json({ error: "Already restored, or that change was never applied." }, 409);
+  let newId: string | null = null;
+  try {
+    const fields = restorableFields(snap.fields);
+    if (snap.action === "archive") { await patchRecordFields(c.var.tenantEnv, snap.recordId, { Status: fields.Status ?? "Listed", Qty: fields.Qty ?? 0 }); newId = snap.recordId; }
+    else newId = await createRecordRaw(c.var.tenantEnv, fields);
+  } finally { await finishRestore(c.env, c.var.tenant.id, id, newId); }
+  console.log("cleanup restore", JSON.stringify({ tenant: c.var.tenant.id, snapshotId: id, from: snap.recordId, to: newId }));
+  await reconAudit(c, "cleanup_restore", newId, { snapshotId: id, from: snap.recordId });
+  return c.json({ ok: true, recordId: newId });
 });
 
 // Magic set symbols, same-origin so the CSP needs no new image host. Public (they are Scryfall's public icons);

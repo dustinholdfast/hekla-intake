@@ -342,3 +342,42 @@ export async function writeTcgplayerSku(env: Env, recordId: string, sku: string)
     throw error;
   }
 }
+
+/* ---------- CardTrader cleanup: whole records ---------- */
+
+export type RawRecord = { id: string; createdTime: string | null; fields: Record<string, unknown> };
+/** Every field of one record (Airtable omits empty fields). */
+export async function getRecordRaw(env: Env, recordId: string): Promise<RawRecord> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
+  const r = await airtable(env, url.toString()) as AirtableRecord;
+  return { id: r.id, createdTime: r.createdTime ?? null, fields: { ...(r.fields as Record<string, unknown>) } };
+}
+export async function patchRecordFields(env: Env, recordId: string, fields: Record<string, unknown>): Promise<void> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
+  await airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields, typecast: false }) });
+}
+export async function deleteRecordRaw(env: Env, recordId: string): Promise<void> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
+  const body = await airtable(env, url.toString(), { method: "DELETE" }) as { deleted?: boolean };
+  if (!body.deleted) throw new AirtableError("Airtable did not confirm the delete.", 502);
+}
+/** Fields Airtable computes (AI text etc.); they cannot be written back on restore. */
+export const COMPUTED_FIELDS = new Set(["Finish description", "Finish condition summary"]);
+/** A snapshot's fields as a create body: computed fields and object-valued (computed) cells dropped. */
+export function restorableFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (COMPUTED_FIELDS.has(k) || v == null) continue;
+    if (typeof v === "object" && !Array.isArray(v)) continue; // aiText / button / lookup objects
+    out[k] = v;
+  }
+  return out;
+}
+export async function createRecordRaw(env: Env, fields: Record<string, unknown>): Promise<string> {
+  const body = await airtable(env, endpoint(env), { method: "POST", body: JSON.stringify({ fields, typecast: false }) }) as { id?: string };
+  if (!body.id) throw new AirtableError("Airtable did not return the restored record.", 502);
+  return body.id;
+}
