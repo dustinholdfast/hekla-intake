@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildRow, createProduct, expansionCode, marketPrice, matchBlueprint, type Blueprint, type ExportCard, type Offer } from "./cardtrader.ts";
+import { buildRow, companionCodes, createProduct, expansionCode, marketPrice, matchBlueprint, type Blueprint, type ExportCard, type Offer } from "./cardtrader.ts";
 
 const conditionProp = { name: "condition", possible_values: ["Mint", "Near Mint", "Slightly Played", "Moderately Played", "Played", "Poor"] };
 const blueprints: Blueprint[] = [
@@ -99,4 +99,10 @@ test("namesMatch accepts prefixes/versions and punctuation, rejects different ca
   assert.ok(!namesMatch("Poro", "Punching Poro"));
   assert.ok(!namesMatch("Mickey Mouse", "Minnie Mouse - Beloved Princess"));
   assert.ok(!namesMatch("", "Nasus"));
+});
+
+test("companionCodes: Magic numbers past the main set are looked up in the Collectors expansion", () => {
+  assert.deepEqual(companionCodes("Magic: The Gathering", "tdm"), ["ctdm"]);
+  assert.deepEqual(companionCodes("Riftbound", "ven"), []);
+  assert.deepEqual(companionCodes("Lorcana", "lor9"), []);
 });

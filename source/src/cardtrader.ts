@@ -189,7 +189,24 @@ export async function findBlueprint(token: string, card: { game: string | null; 
   const code = expansionCode(game, card);
   const expansion = code ? await expansionId(token, config.gameId, code) : null;
   if (!expansion) return { reason: code ? `CardTrader has no ${game} set with code ${code}.` : "This set has no single CardTrader counterpart." };
-  return matchBlueprint(await blueprintsFor(token, expansion), config.singlesCategoryId, card.collectorNumber);
+  const first = matchBlueprint(await blueprintsFor(token, expansion), config.singlesCategoryId, card.collectorNumber);
+  if ("blueprint" in first || !first.reason.startsWith("CardTrader has no card numbered")) return first;
+  for (const extra of companionCodes(game, code!)) {
+    const id = await expansionId(token, config.gameId, extra);
+    if (!id) continue;
+    const hit = matchBlueprint(await blueprintsFor(token, id), config.singlesCategoryId, card.collectorNumber);
+    if (!("reason" in hit && hit.reason.startsWith("CardTrader has no card numbered"))) return hit;
+  }
+  return first;
+}
+
+/**
+ * CardTrader files a Magic set's collector-booster-only cards (borderless, showcase, extended art: the numbers
+ * past the main set, e.g. TDM 292+) under a separate "<Set> Collectors" expansion coded "c" + the set code
+ * (tdm → ctdm). A number missing from the main set is looked up there next.
+ */
+export function companionCodes(game: Game, code: string): string[] {
+  return game === "Magic: The Gathering" && code ? [`c${code}`] : [];
 }
 
 /* ---------- market price ---------- */
