@@ -6,6 +6,7 @@ const state = {
   cards: [],
   truncated: false,
   search: "",
+  priceSort: null, // null (default order), "desc" (highest first) or "asc"
   session: null,
   pending: null,
   bulkPreview: null,
@@ -59,6 +60,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("hekla-close").addEventListener("click", () => $("hekla-dialog").close());
   $("hekla-copy").addEventListener("click", copyHekla);
   $("refresh").addEventListener("click", () => refreshAll());
+  $("sort-price").addEventListener("click", () => {
+    state.priceSort = state.priceSort === null ? "desc" : state.priceSort === "desc" ? "asc" : null;
+    renderQueue();
+  });
   $("search").addEventListener("input", (event) => {
     state.search = event.target.value;
     renderQueue();
@@ -706,14 +711,37 @@ function markTabs() {
 /** The cards in the queue for the selected game, after the search box filter. */
 function shownCards() {
   const query = state.search.trim().toLowerCase();
-  return cardsForGame(state.cards, state.game).filter((card) => {
+  return sortByPrice(cardsForGame(state.cards, state.game).filter((card) => {
     if (!query) return true;
     return [card.name, card.cardName, card.resolvedName, card.collectorNumber, card.setNumber, card.setIdentifier, card.setName, card.game, card.finish, card.condition, card.notes, card.id]
       .filter(Boolean)
       .join(" ")
       .toLowerCase()
       .includes(query);
-  });
+  }), state.priceSort);
+}
+
+/** Cards by market price ("desc" highest first, "asc" lowest first); cards with no price always last. Stable, so ties keep the rank order. */
+function sortByPrice(cards, direction) {
+  if (!direction) return cards;
+  const priceOf = (card) => (card.marketPriceUsd === null || card.marketPriceUsd === undefined || card.marketPriceUsd === "" || !Number.isFinite(Number(card.marketPriceUsd)) ? null : Number(card.marketPriceUsd));
+  return cards
+    .map((card, index) => ({ card, index, price: priceOf(card) }))
+    .sort((a, b) => {
+      if (a.price === null || b.price === null) return (a.price === null) - (b.price === null) || a.index - b.index;
+      return (direction === "desc" ? b.price - a.price : a.price - b.price) || a.index - b.index;
+    })
+    .map((entry) => entry.card);
+}
+
+function markPriceSort() {
+  const button = $("sort-price");
+  if (!button) return;
+  const arrow = state.priceSort === "desc" ? "↓" : state.priceSort === "asc" ? "↑" : "↕";
+  button.querySelector("span").textContent = arrow;
+  button.classList.toggle("on", state.priceSort !== null);
+  button.title = state.priceSort === null ? "Sort by price, highest first" : state.priceSort === "desc" ? "Sort by price, lowest first" : "Back to the default order";
+  $("price-th").setAttribute("aria-sort", state.priceSort === "desc" ? "descending" : state.priceSort === "asc" ? "ascending" : "none");
 }
 
 function renderQueue() {
@@ -737,7 +765,8 @@ function renderQueue() {
   } else {
     for (const card of rows) body.append(renderRow(card));
   }
-  const sortNote = state.status === "Waitlist" ? "Sorted by rank (unsorted last), then priority, then newest." : state.status === "Listed" ? "Sorted by rank, weakest first (pull candidates on top)." : "Sorted by newest.";
+  markPriceSort();
+  const sortNote = state.priceSort ? `Sorted by price, ${state.priceSort === "desc" ? "highest" : "lowest"} first (no price last). Click Price again to change.` : state.status === "Waitlist" ? "Sorted by rank (unsorted last), then priority, then newest." : state.status === "Listed" ? "Sorted by rank, weakest first (pull candidates on top)." : "Sorted by newest.";
   const trunc = state.truncated ? " List truncated." : "";
   $("queue-meta").textContent = `${rows.length} shown · ${state.cards.length} ${state.game} ${state.status}. ${sortNote}${trunc}`;
 }
