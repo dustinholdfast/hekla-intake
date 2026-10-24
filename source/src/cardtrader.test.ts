@@ -106,3 +106,39 @@ test("companionCodes: Magic numbers past the main set are looked up in the Colle
   assert.deepEqual(companionCodes("Riftbound", "ven"), []);
   assert.deepEqual(companionCodes("Lorcana", "lor9"), []);
 });
+
+import { ctRateGate, ctRetry, CT_SECOND_MAX, isChallengePage, resetCtRateGate } from "./cardtrader.ts";
+test("CardTrader turning a request away (429 or site protection) is retried, then reported", async () => {
+  const realWait = ctRetry.wait; const waits: number[] = [];
+  ctRetry.wait = async (ms) => { waits.push(ms); };
+  resetCtRateGate();
+  try {
+    const row = buildRow(card({}), blueprints[0]!);
+    assert.equal(row.ready, true);
+    if (!row.ready) return;
+    const ok = () => new Response(JSON.stringify({ result: "ok", resource: { id: 7, price: { cents: 5, currency: "USD" } } }), { status: 200 });
+    const tooMany = () => new Response(JSON.stringify({ error: "Too many requests: max 10 requests per second" }), { status: 429 });
+    const challenge = () => new Response("<!DOCTYPE html><html lang=\"en-US\"><head><title>Just a moment...</title></head></html>", { status: 403 });
+    let n = 0;
+    const flaky = (async () => (++n === 1 ? tooMany() : ok())) as never;
+    assert.equal((await createProduct("tok", row.product, flaky)).productId, 7);
+    assert.equal(n, 2);
+    n = 0;
+    const blocked = (async () => (++n <= 2 ? challenge() : ok())) as never;
+    assert.equal((await createProduct("tok", row.product, blocked)).productId, 7);
+    assert.equal(n, 3);
+    await assert.rejects(createProduct("tok", row.product, (async () => tooMany()) as never), /Too many requests/);
+    await assert.rejects(createProduct("tok", row.product, (async () => challenge()) as never), /site protection blocked/);
+    assert.ok(waits.length >= 6 && waits.every((ms) => ms > 0 && ms <= 10_000));
+    assert.equal(isChallengePage(200, "<title>Just a moment...</title>"), false);
+  } finally { ctRetry.wait = realWait; resetCtRateGate(); }
+});
+test("the rate gate keeps calls under CardTrader's per-second limit", async () => {
+  resetCtRateGate();
+  let clock = 0; const waits: number[] = [];
+  const now = () => clock; const wait = async (ms: number) => { waits.push(ms); clock += ms; };
+  for (let i = 0; i < CT_SECOND_MAX * 3; i++) await ctRateGate(now, wait);
+  assert.ok(CT_SECOND_MAX < 10);
+  assert.ok(clock >= 2000, "24 calls at 8 per second take at least two seconds");
+  resetCtRateGate();
+});

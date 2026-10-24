@@ -119,39 +119,67 @@ export function buildRow(card: ExportCard, blueprint: Blueprint): ExportRow {
 
 /* ---------- CardTrader API ---------- */
 /**
- * CardTrader allows 200 requests per 10 seconds across all endpoints. This keeps one isolate under 150, which
- * leaves room for starfoil-lgs, which uses the same account. A 429 is surfaced to the caller (status 429).
+ * CardTrader allows 200 requests per 10 seconds across all endpoints, and some endpoints (the marketplace) also
+ * 10 per second. This keeps one isolate under 150 per 10 seconds and 8 per second, which leaves room for
+ * starfoil-lgs and for a second isolate on the same account. A 429 that still gets through is retried in call().
  */
 const CT_WINDOW_MS = 10_000;
 export const CT_WINDOW_MAX = 150;
+const CT_SECOND_MS = 1_000;
+export const CT_SECOND_MAX = 8;
 const recentCalls: number[] = [];
 export async function ctRateGate(now: () => number = Date.now, wait: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): Promise<void> {
   for (;;) {
     const t = now();
     while (recentCalls.length && t - recentCalls[0]! >= CT_WINDOW_MS) recentCalls.shift();
-    if (recentCalls.length < CT_WINDOW_MAX) { recentCalls.push(t); return; }
-    await wait(CT_WINDOW_MS - (t - recentCalls[0]!) + 5);
+    const lastSecond = recentCalls.filter((at) => t - at < CT_SECOND_MS);
+    if (recentCalls.length < CT_WINDOW_MAX && lastSecond.length < CT_SECOND_MAX) { recentCalls.push(t); return; }
+    const untilWindow = recentCalls.length >= CT_WINDOW_MAX ? CT_WINDOW_MS - (t - recentCalls[0]!) : 0;
+    const untilSecond = lastSecond.length >= CT_SECOND_MAX ? CT_SECOND_MS - (t - lastSecond[lastSecond.length - CT_SECOND_MAX]!) : 0;
+    await wait(Math.max(untilWindow, untilSecond) + 5);
   }
 }
 export function resetCtRateGate(): void { recentCalls.length = 0; }
 
+/** How call() waits before a retry. Tests replace it so they don't sleep. */
+export const ctRetry = { wait: (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)) };
+const CT_RETRIES = 2;
+
+/** CardTrader's site protection sometimes answers with a "Just a moment..." web page instead of the API. */
+export function isChallengePage(status: number, text: string): boolean {
+  return (status === 403 || status === 429 || status === 503) && /<title>\s*Just a moment/i.test(text);
+}
+
+/**
+ * One CardTrader request. A 429 or a site-protection page means CardTrader turned the request away without
+ * acting on it, so it is safe to retry, even a POST: up to twice, after a short wait.
+ */
 async function call(token: string, path: string, init: RequestInit = {}, fetcher: typeof fetch = fetch): Promise<J> {
-  await ctRateGate();
-  let response: Response;
-  try {
-    response = await fetcher(`${API}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}) }, signal: AbortSignal.timeout(20000) });
-  } catch {
-    throw new CardTraderError("Could not reach CardTrader.", 502);
+  for (let attempt = 0; ; attempt++) {
+    await ctRateGate();
+    let response: Response;
+    try {
+      response = await fetcher(`${API}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}) }, signal: AbortSignal.timeout(20000) });
+    } catch {
+      throw new CardTraderError("Could not reach CardTrader.", 502);
+    }
+    const text = await response.text();
+    const challenge = isChallengePage(response.status, text);
+    if ((response.status === 429 || challenge) && attempt < CT_RETRIES) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      await ctRetry.wait(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 10) * 1000 : (challenge ? 3000 : 1200) * (attempt + 1));
+      continue;
+    }
+    let body: J | null = null;
+    try { body = JSON.parse(text) as J; } catch { /* not json */ }
+    if (!response.ok) {
+      if (challenge) throw new CardTraderError(`CardTrader's site protection blocked the request (${response.status}); it will be tried again later.`, response.status);
+      const detail = body?.error ?? body?.errors ?? body?.extra?.message ?? text;
+      const message = (typeof detail === "string" ? detail : JSON.stringify(detail)).replace(/\s+/g, " ").slice(0, 200);
+      throw new CardTraderError(response.status === 401 ? "CardTrader no longer accepts the saved token. Reconnect it in Settings." : `CardTrader said: ${message || response.status}`, response.status);
+    }
+    return body ?? {};
   }
-  const text = await response.text();
-  let body: J | null = null;
-  try { body = JSON.parse(text) as J; } catch { /* not json */ }
-  if (!response.ok) {
-    const detail = body?.error ?? body?.errors ?? body?.extra?.message ?? text;
-    const message = (typeof detail === "string" ? detail : JSON.stringify(detail)).replace(/\s+/g, " ").slice(0, 200);
-    throw new CardTraderError(response.status === 401 ? "CardTrader no longer accepts the saved token. Reconnect it in Settings." : `CardTrader said: ${message || response.status}`, response.status);
-  }
-  return body ?? {};
 }
 
 /** Catalogue data is the same for every seller, so it is cached without the token. */
