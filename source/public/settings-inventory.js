@@ -155,7 +155,7 @@
     const trimmed = text.trim();
     if (!trimmed) return null;
     const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(trimmed);
-    if (!match) return { error: `${label} fee must be blank, 0, or a dollar amount like 0.30.` };
+    if (!match) return { error: `${label} must be blank, 0, or a dollar amount like 0.30.` };
     return Number(match[1]) * 100 + Number((match[2] || "").padEnd(2, "0"));
   }
 
