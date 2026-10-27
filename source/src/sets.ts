@@ -148,6 +148,40 @@ export function canonicalFinish(input: string): Finish | null {
   return FINISH_ALIASES[input.trim().toLowerCase()] ?? null;
 }
 
+/**
+ * Read-path alias. Waitlist Finish still stores "Normal": starfoil.store reads that choice, and writers
+ * keep canonicalFinish(), which still returns Normal and does not accept Regular.
+ * Hekla treats Normal and Regular as the same non-foil printing wherever it reads a finish.
+ */
+export function readFinish(input: string | null | undefined): string | null {
+  const value = (input ?? "").trim();
+  if (!value) return null;
+  const lower = value.toLowerCase();
+  if (lower === "normal" || lower === "regular") return "Regular";
+  return value;
+}
+
+export function sameFinish(a: string | null | undefined, b: string | null | undefined): boolean {
+  const left = readFinish(a);
+  const right = readFinish(b);
+  if (left == null || right == null) return left == null && right == null;
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+/** Foil printing. Normal and Regular are not foil. A blank finish is not foil. */
+export function isFoilFinish(input: string | null | undefined): boolean {
+  const read = readFinish(input);
+  return read != null && read !== "Regular";
+}
+
+/** Stored Finish values to search. Normal and Regular are both read. Nothing is written. */
+export function finishQueryValues(input: string | null | undefined): string[] {
+  const stored = (input ?? "").trim();
+  if (!stored) return [];
+  if (readFinish(stored) === "Regular") return ["Normal", "Regular"];
+  return [stored];
+}
+
 export function canonicalCondition(input: string): Condition | null {
   return CONDITION_ALIASES[input.trim().toLowerCase()] ?? null;
 }

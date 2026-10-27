@@ -433,6 +433,7 @@ export type InventoryPayload = {
   totals: { units: number; rows: number; unknownCostUnits: number; knownCostUnits: number; flags: number; low: number; overstock: number; slow: number; needsReview: number };
   facets: { games: string[]; conditions: string[]; finishes: string[] };
   thresholds: Thresholds;
+  thresholdSource: "inventory_settings";
   wantQtyState: "matched" | "unread";
   orderSources: typeof ORDER_SOURCES;
   placeholders: {
@@ -564,6 +565,7 @@ export function buildInventory(
     totals,
     facets: { games: uniq(all.map((row) => row.game)), conditions: uniq(all.map((row) => row.condition)), finishes: uniq(all.map((row) => row.finish)) },
     thresholds,
+    thresholdSource: "inventory_settings",
     wantQtyState,
     orderSources: ORDER_SOURCES,
     placeholders: PLACEHOLDERS,

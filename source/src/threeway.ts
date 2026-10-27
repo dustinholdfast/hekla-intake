@@ -4,7 +4,7 @@
  */
 import type { CtListing } from "./cardtrader.ts";
 import { csvRow } from "./sales.ts";
-import { effectiveGame, type Game } from "./sets.ts";
+import { effectiveGame, isFoilFinish, type Game } from "./sets.ts";
 import { parseTcgCondition, type TcgRow } from "./tcgcsv.ts";
 import { TCGPLAYER_HEADER } from "./tcgplayer.ts";
 
@@ -80,7 +80,7 @@ export function matchScore(row: ReconRow, tcg: TcgRow): number {
   const set = setA && setB ? Math.max(similarity(setA, setB), setB.includes(setA) || setA.includes(setB) ? 0.9 : 0) : 0.5;
   const cond = parseTcgCondition(tcg.condition);
   const condition = !row.condition || !cond.condition ? 0.5 : row.condition === cond.condition ? 1 : 0;
-  const rowFoil = !!row.finish && row.finish !== "Normal";
+  const rowFoil = isFoilFinish(row.finish);
   const finish = row.finish === "Enchanted" ? ((tcg.rarity ?? "").toLowerCase().includes("enchanted") || /enchanted/i.test(tcg.productName) ? 1 : 0.3) : rowFoil === cond.foil ? 1 : 0;
   const number = a && b ? 1 : 0.4;
   const score = 0.4 * name + 0.25 * number + 0.15 * set + 0.12 * condition + 0.08 * finish;

@@ -514,6 +514,28 @@ a.ghost { display: inline-flex; align-items: center; text-decoration: none; }
 .connection-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .connection-row input { flex: 1 1 260px; }
 
+/* Inventory settings (/settings). Rates, fees, and flag thresholds. */
+.inv-settings-form h3, #inv-settings-form h3 { margin: 1.1rem 0 0.25rem; font-size: 1.02rem; color: var(--white); }
+#inv-settings-form .hint { margin: 0.15rem 0 0.55rem; }
+.rate-list, .fee-list, .threshold-list { display: grid; gap: 0.55rem; }
+.rate-row, .fee-row, .threshold-row {
+  display: grid;
+  grid-template-columns: minmax(8.5rem, 0.7fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.45rem 0.6rem;
+  align-items: end;
+}
+.fee-row, .threshold-row { grid-template-columns: minmax(8.5rem, 0.8fr) minmax(0, 1.4fr); }
+.rate-row .grade { font-weight: 600; color: var(--white); padding-bottom: 0.75rem; }
+.rate-row label, .fee-row label, .threshold-row label { margin: 0; }
+.blocked-note { grid-column: 2 / -1; margin: 0; align-self: center; }
+#inv-settings-form .primary { margin-top: 0.9rem; }
+@media (max-width: 520px) {
+  .rate-row, .fee-row, .threshold-row { grid-template-columns: 1fr; }
+  .rate-row .grade { padding-bottom: 0; }
+  .blocked-note { grid-column: 1; }
+  .admin { padding: 0.85rem 0.7rem 2rem; }
+}
+
 /* Inventory ledger (/inventory). Read-only. Later phases stay visibly inert. */
 .preview-banner { display: none; }
 html[data-preview="1"] .preview-banner {

@@ -33,7 +33,8 @@ import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts"
 import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
 import { getState, listSales, setState } from "./salesdb.ts";
 import { buildDetail, buildInventory, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter } from "./inventory.ts";
-import { isMissingLedger, listMovements, readThresholds } from "./inventorydb.ts";
+import { isMissingLedger, isMissingPhase2Settings, listMovements, readInventorySettings, readThresholds, saveInventorySettings } from "./inventorydb.ts";
+import { presentSettings, SettingsError, validateInventorySettings } from "./inventory-settings.ts";
 import { loadBuyList } from "./opening.ts";
 import { claimRestore, confirmedMatches, confirmMatch, finishRestore, getRecordSnapshot, latestSnapshot, listRecordSnapshots, logAction, markSnapshotApplied, recentActions, removeMatch, saveRecordSnapshot, saveSnapshot, type ReconAction } from "./recondb.ts";
 import { ARCHIVE_FIELDS, CLEANUP_BATCH, CLEANUP_REASON, planCleanup, previewJson, runCleanupBatch, type ApplyGroup, type RemoveMode } from "./cleanup.ts";
@@ -714,6 +715,38 @@ app.delete("/api/connections/resend", async (c) => {
   if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can remove alert email." }, 403);
   if (await deleteConnection(c.env, c.var.tenant.id, "resend")) audit(c, "disconnect", [{ id: "resend" }]);
   return c.json({ resend: { connected: false } });
+});
+
+app.get("/api/inventory/settings", async (c) => {
+  try {
+    const loaded = await readInventorySettings(c.env, c.var.tenant.id);
+    return c.json({ ...presentSettings(loaded.settings), stored: loaded.stored, phase2: loaded.phase2, canManage: canManageConnections(c) });
+  } catch (error) {
+    if (isMissingLedger(error)) return c.json({ error: "The inventory ledger is not in this database yet. Apply migration 0008 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
+app.put("/api/inventory/settings", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can change inventory settings." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  let settings;
+  try {
+    settings = validateInventorySettings(body.value);
+  } catch (error) {
+    if (error instanceof SettingsError) return c.json({ error: error.message }, 400);
+    throw error;
+  }
+  try {
+    const saved = await saveInventorySettings(c.env, c.var.tenant.id, settings);
+    return c.json({ ...presentSettings(saved), stored: true, phase2: true, canManage: true });
+  } catch (error) {
+    if (isMissingPhase2Settings(error) || isMissingLedger(error)) {
+      return c.json({ error: "Inventory settings are not in this database yet. Apply migration 0009 before saving. Nothing was written." }, 503);
+    }
+    throw error;
+  }
 });
 
 app.get("/api/inventory", async (c) => {

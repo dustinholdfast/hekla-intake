@@ -17,6 +17,14 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 async function boot() {
+  if (document.documentElement.dataset.preview === "1") {
+    $("tenant-name").textContent = "Fixture ledger";
+    $("logout").hidden = true;
+    $("connections-panel").hidden = true;
+    $("sales-sync-panel").hidden = true;
+    show("settings");
+    return;
+  }
   let clerk;
   try {
     clerk = await loadClerk();
