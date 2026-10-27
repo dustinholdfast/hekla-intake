@@ -16,7 +16,7 @@ import {
   qtyPatchDecision,
   readSellRequest,
 } from "./purchases.ts";
-import { applyPurchaseTables, formatPurchaseSchema, planPurchaseTables, PURCHASE_FIELDS, CREDIT_MIRROR_FIELDS } from "./purchases-schema.ts";
+import { applyPurchaseTables, creditMirrorPlan, fieldCreateBody, formatPurchaseSchema, planPurchaseTables, purchaseTablePlan, PURCHASE_FIELDS, CREDIT_MIRROR_FIELDS, PRIMARY_FIELD_TYPES, tableRequestBody, type FieldCreateBody } from "./purchases-schema.ts";
 
 const NOW = "2026-10-27T15:00:00.000Z";
 
@@ -306,6 +306,98 @@ test("purchase schema dry-run lists Purchases and an optional credit mirror, and
   assert.deepEqual(withMirror.created, ["Purchases"]);
   assert.equal(withMirror.requests.every((request) => request.method === "POST"), true);
   assert.equal(fetches, 1);
+});
+
+test("Airtable create bodies omit options on singleLineText and pin every other field type", async () => {
+  const tables = [purchaseTablePlan(), creditMirrorPlan()];
+  const bodies = tables.map((table) => tableRequestBody(table));
+  const fields = bodies.flatMap((body) => body.fields);
+  const ofType = (type: FieldCreateBody["type"]) => fields.filter((field) => field.type === type);
+
+  for (const table of tables) {
+    const first = table.fields[0];
+    assert.equal(first?.type, "singleLineText");
+    assert.equal(PRIMARY_FIELD_TYPES.includes(first?.type as typeof PRIMARY_FIELD_TYPES[number]), true);
+    assert.equal(table.note.length > 0, true);
+  }
+
+  for (const field of ofType("singleLineText")) {
+    assert.deepEqual(Object.keys(field), ["name", "type", "description"]);
+    assert.equal(JSON.stringify(field).includes("\"options\""), false);
+    assert.equal(field.description.length > 0, true);
+  }
+  assert.equal(ofType("singleLineText").length, 11);
+
+  for (const field of ofType("number")) {
+    assert.deepEqual(field.options, { precision: 0 });
+    assert.deepEqual(Object.keys(field.options ?? {}), ["precision"]);
+  }
+  assert.deepEqual(ofType("number").map((field) => field.name), ["Qty", "Condition Multiplier used", "Over Want Qty"]);
+
+  for (const field of ofType("currency")) {
+    assert.deepEqual(field.options, { precision: 2, symbol: "$" });
+    assert.deepEqual(Object.keys(field.options ?? {}), ["precision", "symbol"]);
+  }
+  assert.equal(ofType("currency").length, 7);
+
+  for (const field of ofType("date")) {
+    assert.deepEqual(field.options, { dateFormat: { name: "iso", format: "YYYY-MM-DD" } });
+    assert.deepEqual(Object.keys(field.options ?? {}), ["dateFormat"]);
+  }
+  assert.deepEqual(ofType("date").map((field) => field.name), ["Date Received", "Date"]);
+
+  for (const field of ofType("checkbox")) {
+    assert.deepEqual(field.options, { icon: "check", color: "greenBright" });
+    assert.deepEqual(Object.keys(field.options ?? {}), ["icon", "color"]);
+  }
+  assert.deepEqual(ofType("checkbox").map((field) => field.name), ["Condition Confirmed"]);
+
+  const choices: Record<string, string[]> = {
+    Condition: ["NM", "LP", "MP", "HP", "DMG"],
+    "Payment Type": ["Cash", "Store credit"],
+    Status: ["Accepted", "Received", "Rejected", "Cancelled"],
+    Entry: ["Issue", "Redemption"],
+  };
+  for (const field of ofType("singleSelect")) {
+    const options = field.options as { choices: { name: string }[] };
+    assert.deepEqual(Object.keys(options), ["choices"]);
+    for (const choice of options.choices) assert.deepEqual(Object.keys(choice), ["name"]);
+    assert.deepEqual(options.choices.map((choice) => choice.name), choices[field.name]);
+  }
+  assert.equal(ofType("singleSelect").length, 4);
+
+  const links: Record<string, string> = {
+    "Purchases.Sell Request": "tbltX89tiY4H2cvuu",
+    "Purchases.Buy List row": "tbleeKxJPfpQAAdnC",
+    "Purchases.Stock row": "tblvHPu7dgDHA91bc",
+    "Store Credit Ledger.Sell Request": "tbltX89tiY4H2cvuu",
+  };
+  for (const body of bodies) {
+    for (const field of body.fields.filter((row) => row.type === "multipleRecordLinks")) {
+      const options = field.options as { linkedTableId: string };
+      assert.deepEqual(Object.keys(options), ["linkedTableId"]);
+      assert.match(options.linkedTableId, /^tbl[A-Za-z0-9]{14}$/);
+      assert.equal(options.linkedTableId, links[`${body.name}.${field.name}`]);
+    }
+  }
+
+  const purchases = bodies[0]!;
+  assert.deepEqual(purchases.fields[0], fieldCreateBody(PURCHASE_FIELDS[0]!));
+  assert.deepEqual(purchases.fields.find((field) => field.name === "Cost Basis USD")?.options, { precision: 2, symbol: "$" });
+  const credit = bodies[1]!;
+  assert.equal(Object.hasOwn(credit.fields[0]!, "options"), false);
+  assert.deepEqual(credit.fields.find((field) => field.name === "Amount USD")?.options, { precision: 2, symbol: "$" });
+
+  const posted: unknown[] = [];
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    posted.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ id: "tblNew" }), { status: 200 });
+  };
+  const applied = await applyPurchaseTables({ token: "patSECRETVALUE", existingTables: [], includeCreditMirror: true, fetchImpl });
+  assert.deepEqual(applied.created, ["Purchases", "Store Credit Ledger"]);
+  assert.deepEqual(posted, [tableRequestBody(purchaseTablePlan()), tableRequestBody(creditMirrorPlan())]);
+  assert.equal(JSON.stringify(posted).includes("\"options\":{}"), false);
+  assert.equal(JSON.stringify(posted).includes("patSECRETVALUE"), false);
 });
 
 test("the example catalog matches ember and leaves moss untracked", () => {

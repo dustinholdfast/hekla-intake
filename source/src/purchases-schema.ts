@@ -9,11 +9,41 @@ import { SELL_REQUEST_TABLE_ID } from "./purchases.ts";
 export const PURCHASES_TABLE = "Purchases";
 export const CREDIT_MIRROR_TABLE = "Store Credit Ledger";
 
+export type TableFieldType = "singleLineText" | "number" | "currency" | "date" | "checkbox" | "singleSelect" | "multipleRecordLinks";
+
+/**
+ * Field types Airtable allows as the first column.
+ * https://support.airtable.com/docs/the-primary-field
+ * singleLineText is the type the create-table example uses, and it takes no options.
+ */
+export const PRIMARY_FIELD_TYPES = [
+  "singleLineText",
+  "multilineText",
+  "date",
+  "phoneNumber",
+  "email",
+  "url",
+  "number",
+  "currency",
+  "percent",
+  "duration",
+  "formula",
+  "autoNumber",
+  "barcode",
+] as const;
+
 export type TableField = {
   name: string;
-  type: "singleLineText" | "number" | "currency" | "date" | "checkbox" | "singleSelect" | "multipleRecordLinks";
+  type: TableFieldType;
   description: string;
-  options: Record<string, unknown>;
+  options?: Record<string, unknown>;
+};
+
+export type FieldCreateBody = {
+  name: string;
+  type: TableFieldType;
+  description: string;
+  options?: Record<string, unknown>;
 };
 
 export type TablePlan = {
@@ -31,16 +61,16 @@ const isoDate = { dateFormat: { name: "iso", format: "YYYY-MM-DD" } };
 const link = (tableId: string) => ({ linkedTableId: tableId });
 
 export const PURCHASE_FIELDS: readonly TableField[] = [
-  { name: "Hekla Purchase Line ID", type: "singleLineText", description: "Idempotency key mirror. One Airtable row per purchase line.", options: {} },
+  { name: "Hekla Purchase Line ID", type: "singleLineText", description: "Idempotency key mirror. One Airtable row per purchase line." },
   { name: "Sell Request", type: "multipleRecordLinks", description: "Link only. Seller name, email, and phone stay on the sell request.", options: link(SELL_REQUEST_TABLE_ID) },
   { name: "Buy List row", type: "multipleRecordLinks", description: "Set when a buy-list row matched. Empty when nothing matched.", options: link(BUY_LIST_TABLE_ID) },
   { name: "Stock row", type: "multipleRecordLinks", description: "Waitlist row. Set at receive, not at accept.", options: link(WAITLIST_TABLE_ID) },
-  { name: "Game", type: "singleLineText", description: "Game as shown on the line.", options: {} },
-  { name: "Item", type: "singleLineText", description: "Card name from the line. Not the seller.", options: {} },
-  { name: "Set", type: "singleLineText", description: "Set name or identifier.", options: {} },
-  { name: "Collector #", type: "singleLineText", description: "Collector number.", options: {} },
-  { name: "Finish", type: "singleLineText", description: "Printing as Hekla reads it. Regular is the non-foil printing. Waitlist itself still stores Normal.", options: {} },
-  { name: "Language", type: "singleLineText", description: "English unless the line says otherwise.", options: {} },
+  { name: "Game", type: "singleLineText", description: "Game as shown on the line." },
+  { name: "Item", type: "singleLineText", description: "Card name from the line. Not the seller." },
+  { name: "Set", type: "singleLineText", description: "Set name or identifier." },
+  { name: "Collector #", type: "singleLineText", description: "Collector number." },
+  { name: "Finish", type: "singleLineText", description: "Printing as Hekla reads it. Regular is the non-foil printing. Waitlist itself still stores Normal." },
+  { name: "Language", type: "singleLineText", description: "English unless the line says otherwise." },
   { name: "Condition", type: "singleSelect", description: "Confirmed condition when received. Offered condition until then.", options: choice(["NM", "LP", "MP", "HP", "DMG"]) },
   { name: "Qty", type: "number", description: "Copies on this line.", options: { precision: 0 } },
   { name: "Payment Type", type: "singleSelect", description: "Cash for PayPal, Venmo, or Check. Store credit when the payout is Store Credit.", options: choice(["Cash", "Store credit"]) },
@@ -50,7 +80,7 @@ export const PURCHASE_FIELDS: readonly TableField[] = [
   { name: "Cash Paid USD", type: "currency", description: "Cash paid for this line. Zero on a store-credit line.", options: currency },
   { name: "Store Credit Issued USD", type: "currency", description: "Store credit issued for this line. Zero on a cash line. Separate from cost basis.", options: currency },
   { name: "Cost Basis USD", type: "currency", description: "Per-unit cost. Cash: cash paid. Store credit: face value of the credit issued (credit rule v1).", options: currency },
-  { name: "Cost Rule", type: "singleLineText", description: "cash paid, credit rule v1, or unknown.", options: {} },
+  { name: "Cost Rule", type: "singleLineText", description: "cash paid, credit rule v1, or unknown." },
   { name: "Date Received", type: "date", description: "The day the cards were received. New stock rows use this as Date Acquired.", options: isoDate },
   { name: "Condition Confirmed", type: "checkbox", description: "Set when receive & confirm records the condition in hand.", options: { icon: "check", color: "greenBright" } },
   { name: "Over Want Qty", type: "number", description: "Copies above Want Qty. Flagged. Zero when Want Qty is blank.", options: { precision: 0 } },
@@ -58,13 +88,13 @@ export const PURCHASE_FIELDS: readonly TableField[] = [
 ];
 
 export const CREDIT_MIRROR_FIELDS: readonly TableField[] = [
-  { name: "Hekla Credit Entry ID", type: "singleLineText", description: "Idempotency key mirror for one issue or redemption.", options: {} },
-  { name: "Customer Reference", type: "singleLineText", description: "Sell Request record id only. No name, email, or phone.", options: {} },
+  { name: "Hekla Credit Entry ID", type: "singleLineText", description: "Idempotency key mirror for one issue or redemption." },
+  { name: "Customer Reference", type: "singleLineText", description: "Sell Request record id only. No name, email, or phone." },
   { name: "Sell Request", type: "multipleRecordLinks", description: "Optional link to the same sell request. Contact details stay there.", options: link(SELL_REQUEST_TABLE_ID) },
   { name: "Amount USD", type: "currency", description: "Positive when issued, negative when redeemed.", options: currency },
   { name: "Entry", type: "singleSelect", description: "Issue or Redemption.", options: choice(["Issue", "Redemption"]) },
   { name: "Date", type: "date", description: "The day of the issue or redemption.", options: isoDate },
-  { name: "Source", type: "singleLineText", description: "sell_request line key, or the redemption source id.", options: {} },
+  { name: "Source", type: "singleLineText", description: "sell_request line key, or the redemption source id." },
   { name: "Balance After USD", type: "currency", description: "Unspent balance for that sell request after this row.", options: currency },
 ];
 
@@ -116,11 +146,20 @@ export function planPurchaseTables(existingTables: readonly string[]): SchemaTab
   return { mode: "dry-run", baseId: WAITLIST_BASE_ID, create, skip, writes: "none" };
 }
 
-export function tableRequestBody(table: TablePlan): { name: string; description: string; fields: { name: string; type: string; description: string; options: Record<string, unknown> }[] } {
+/** Write body for one field. singleLineText has no options key. Other types send only their documented options. */
+export function fieldCreateBody(field: TableField): FieldCreateBody {
+  const body: FieldCreateBody = { name: field.name, type: field.type, description: field.description };
+  if (field.type === "singleLineText") return body;
+  if (!field.options) throw new Error(`${field.name} (${field.type}) needs options.`);
+  body.options = structuredClone(field.options);
+  return body;
+}
+
+export function tableRequestBody(table: TablePlan): { name: string; description: string; fields: FieldCreateBody[] } {
   return {
     name: table.name,
     description: table.note,
-    fields: table.fields.map((field) => ({ name: field.name, type: field.type, description: field.description, options: structuredClone(field.options) })),
+    fields: table.fields.map((field) => fieldCreateBody(field)),
   };
 }
 
@@ -137,10 +176,11 @@ export function formatPurchaseSchema(plan: SchemaTablePlan): string {
     lines.push(`  note: ${table.note}`);
     for (const target of table.links) lines.push(`  link: ${target.field} → ${target.table} (${target.tableId})`);
     for (const field of table.fields) {
+      const request = fieldCreateBody(field);
       lines.push(`  FIELD ${field.name}`);
       lines.push(`    type: ${field.type}`);
       lines.push(`    description: ${field.description}`);
-      lines.push(`    options: ${JSON.stringify(field.options)}`);
+      lines.push(request.options ? `    options: ${JSON.stringify(request.options)}` : "    options: omitted");
     }
     lines.push(`  request: ${JSON.stringify(tableRequestBody(table))}`);
     lines.push("");
