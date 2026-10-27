@@ -10,7 +10,8 @@
     "types": "wrangler types",
     "deploy": "wrangler deploy",
     "check": "npm run typecheck && npm test",
-    "opening": "node --experimental-strip-types src/opening-cli.ts"
+    "opening": "node --experimental-strip-types src/opening-cli.ts",
+    "schema": "node --experimental-strip-types src/waitlist-schema-cli.ts"
   },
   "dependencies": {
     "@clerk/hono": "^0.1.88",

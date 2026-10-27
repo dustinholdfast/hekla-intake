@@ -1,9 +1,10 @@
-/** Local inventory page against fixture movements. Does not call Neon or Airtable. */
-import { createServer } from "node:http";
+/** Local inventory and settings pages against fixtures. Does not call Neon or Airtable. */
+import { createServer, type IncomingMessage } from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildDetail, buildInventory, DEFAULT_THRESHOLDS, type InventoryFilter } from "./inventory.ts";
+import { buildDetail, buildInventory, type InventoryFilter } from "./inventory.ts";
+import { defaultInventorySettings, presentSettings, SettingsError, validateInventorySettings } from "./inventory-settings.ts";
 import { fixtureBuyList, fixtureMovements } from "./inventory-fixtures.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -12,6 +13,8 @@ const port = Number(process.env.PORT || 47232);
 const now = new Date();
 const movements = fixtureMovements(now);
 const buyList = fixtureBuyList();
+let settings = defaultInventorySettings();
+let settingsStored = false;
 
 const types: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -36,23 +39,57 @@ function filterOf(url: URL): InventoryFilter {
   };
 }
 
+function sendJson(res: import("node:http").ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (!text.trim()) return {};
+  return JSON.parse(text) as unknown;
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
+  if (url.pathname === "/api/inventory/settings") {
+    if (req.method === "PUT") {
+      let parsed: unknown;
+      try {
+        parsed = await readJson(req);
+      } catch {
+        sendJson(res, 400, { error: "That was not valid JSON." });
+        return;
+      }
+      try {
+        settings = validateInventorySettings(parsed);
+        settingsStored = true;
+      } catch (error) {
+        const message = error instanceof SettingsError ? error.message : "Could not read those settings.";
+        sendJson(res, 400, { error: message });
+        return;
+      }
+    }
+    sendJson(res, 200, { ...presentSettings(settings), stored: settingsStored, phase2: true, canManage: true });
+    return;
+  }
   if (url.pathname === "/api/inventory") {
-    const body = JSON.stringify(buildInventory(movements, buyList, { ...DEFAULT_THRESHOLDS }, now, filterOf(url), "matched"));
+    const body = JSON.stringify(buildInventory(movements, buyList, settings.thresholds, now, filterOf(url), "matched"));
     res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     res.end(body);
     return;
   }
   const detail = /^\/api\/inventory\/(rec[A-Za-z0-9]{14})$/.exec(url.pathname);
   if (detail?.[1]) {
-    const body = buildDetail(movements, buyList, { ...DEFAULT_THRESHOLDS }, now, detail[1]);
+    const body = buildDetail(movements, buyList, settings.thresholds, now, detail[1]);
     res.writeHead(body ? 200 : 404, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     res.end(JSON.stringify(body ?? { error: "That card is not in the fixture ledger." }));
     return;
   }
-  const rel = url.pathname === "/" || url.pathname === "/inventory" ? "/inventory.html" : url.pathname;
-  const file = path.normalize(path.join(publicDir, rel));
+  const page = url.pathname === "/" || url.pathname === "/inventory" ? "/inventory.html" : url.pathname === "/settings" ? "/settings.html" : url.pathname;
+  const file = path.normalize(path.join(publicDir, page));
   if (!file.startsWith(publicDir)) {
     res.writeHead(403);
     res.end();
@@ -60,7 +97,7 @@ const server = createServer(async (req, res) => {
   }
   try {
     let data = await readFile(file);
-    if (file.endsWith("inventory.html")) {
+    if (file.endsWith("inventory.html") || file.endsWith("settings.html")) {
       const html = data.toString("utf8").replace("<html lang=\"en\">", "<html lang=\"en\" data-preview=\"1\">");
       data = Buffer.from(html);
     }
@@ -74,4 +111,5 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`inventory preview http://127.0.0.1:${port}/inventory`);
+  console.log(`settings preview http://127.0.0.1:${port}/settings`);
 });

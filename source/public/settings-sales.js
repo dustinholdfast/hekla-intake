@@ -6,6 +6,7 @@
   const since = (s) => new Date(s.connectedAt).toLocaleDateString();
 
   document.addEventListener("DOMContentLoaded", () => {
+    if (document.documentElement.dataset.preview === "1") return;
     $("wh-check").addEventListener("click", checkWebhook);
     $("wh-enable").addEventListener("click", () => enableWebhook(null));
     $("wh-disable").addEventListener("click", disableWebhook);

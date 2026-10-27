@@ -73,6 +73,14 @@ async function checkCardTrader() {
   }
 }
 
+function readFinishLabel(value) {
+  const text = (value || "").trim();
+  if (!text) return "—";
+  const lower = text.toLowerCase();
+  if (lower === "normal" || lower === "regular") return "Regular";
+  return text;
+}
+
 function renderCardTraderRows() {
   const money = (value) => (typeof value === "number" ? `$${value.toFixed(2)}` : "—");
   const cell = (text, className) => { const td = document.createElement("td"); td.textContent = text; if (className) td.className = className; return td; };
@@ -94,7 +102,7 @@ function renderCardTraderRows() {
       cell(label),
       cell(row.ready ? row.cardTraderName : "—"),
       cell(row.ready ? row.condition : card.condition || "—"),
-      cell(row.ready ? (row.foil ? "Foil" : "Normal") : card.finish || "—"),
+      cell(row.ready ? (row.foil ? "Foil" : "Regular") : readFinishLabel(card.finish)),
       cell(String(row.ready ? row.quantity : card.qty ?? "—")),
       cell(money(row.ready ? row.price : card.marketPriceUsd)),
       cell(row.note || (row.ready ? "Ready" : row.reason), row.done === "listed" ? "flash" : row.ready && !row.note ? "" : "warn"),

@@ -10,6 +10,7 @@
  */
 import type { StockCard } from "./airtable.ts";
 import { csvRow, type SaleRow } from "./sales.ts";
+import { isFoilFinish } from "./sets.ts";
 
 export const TCGPLAYER_HEADER = [
   "TCGplayer Id", "Product Line", "Set Name", "Product Name", "Title", "Number", "Rarity", "Condition",
@@ -57,7 +58,7 @@ export function buildPullList(sales: SaleRow[], cards: StockCard[]): PullItem[] 
 
 const conditionName = (item: PullItem) => {
   const base = CONDITION[item.condition ?? ""] ?? "";
-  return base && item.finish && item.finish !== "Normal" ? `${base} Foil` : base;
+  return base && isFoilFinish(item.finish) ? `${base} Foil` : base;
 };
 
 /** The importable CSV: only rows with a TCGplayer SKU and a price. Add to Quantity subtracts what sold. */
