@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1628" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Hekla · Store credit</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <p class="preview-banner">Preview · fixture ledger · no customer contact · not production</p>
+  <p id="boot" class="boot">Opening the liability…</p>
+
+  <section id="login-view" class="login" hidden>
+    <div class="login-card">
+      <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
+      <h1>Store credit</h1>
+      <p>Sign in to read the unspent balance.</p>
+      <div id="clerk-mount"></div>
+      <p id="login-error" class="error" role="alert"></p>
+      <a class="ghost tiny" href="/inventory">Inventory</a>
+    </div>
+  </section>
+
+  <div id="credit-view" class="admin credit-page" hidden>
+    <header class="admin-top">
+      <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+      <div>
+        <h1>Store credit liability</h1>
+        <p class="lede"><span id="tenant-name"></span> · read only · a customer is a sell request id</p>
+      </div>
+      <div class="actions">
+        <a class="ghost tiny" href="/inventory">Inventory</a>
+        <a class="ghost tiny" href="/purchases/new">Purchases</a>
+        <button id="logout" class="ghost tiny" type="button">Sign out</button>
+      </div>
+    </header>
+    <p id="credit-error" class="error" role="alert"></p>
+    <section class="inv-caps" aria-label="Liability">
+      <section class="inv-cap">
+        <div class="cap-label">Outstanding</div>
+        <div class="cap-num" id="outstanding">–</div>
+        <p class="cap-note" id="outstanding-note"></p>
+      </section>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Ledger</h2>
+        <span class="hint">Issued at receive. Redemptions are not wired to checkout.</span>
+      </div>
+      <div class="table-wrap credit-table">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Customer reference</th>
+              <th>Entry</th>
+              <th class="num">Amount</th>
+              <th class="num">Balance after</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody id="entries"></tbody>
+        </table>
+      </div>
+      <div id="entry-cards" class="line-cards"></div>
+      <p class="hint" id="empty-note"></p>
+    </section>
+  </div>
+  <script src="/session.js"></script>
+  <script src="/credit.js"></script>
+</body>
+</html>
