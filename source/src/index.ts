@@ -74,6 +74,7 @@ import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
 import { canonicalGame, CONDITIONS, effectiveGame, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, RARITIES, SETS, type Game } from "./sets.ts";
 import { assetVersion, versionedUrl } from "./assets.ts";
+import { pageAssetRequest } from "./pages.ts";
 import { db, listTenantPlans, listTenants, recordAudit, setCompPlan, tenantById, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
 
 type Variables = { tenant: Tenant; tenantEnv: Env; userId: string; orgRole: string | null };
@@ -1244,17 +1245,7 @@ app.post("/api/credit/redeem", async (c) => {
 });
 
 app.get("*", async (c) => {
-  let raw = c.req.raw;
-  const path = new URL(raw.url).pathname;
-  if (path === "/purchases/new" || path === "/purchases") {
-    const url = new URL(raw.url);
-    url.pathname = "/purchases.html";
-    raw = new Request(url, raw);
-  } else if (path === "/credit") {
-    const url = new URL(raw.url);
-    url.pathname = "/credit.html";
-    raw = new Request(url, raw);
-  }
+  const raw = pageAssetRequest(c.req.raw);
   let response = await c.env.ASSETS.fetch(raw);
   const headers = new Headers(response.headers);
   if ((headers.get("content-type") ?? "").includes("text/html") && response.status === 200) {
