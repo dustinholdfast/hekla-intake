@@ -9,7 +9,8 @@
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "types": "wrangler types",
     "deploy": "wrangler deploy",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "opening": "node --experimental-strip-types src/opening-cli.ts"
   },
   "dependencies": {
     "@clerk/hono": "^0.1.88",

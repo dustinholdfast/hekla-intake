@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1628" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Hekla · Inventory</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <p class="preview-banner">Preview · fixture ledger only · Airtable was not written · not production</p>
+  <p id="boot" class="boot">Opening inventory…</p>
+
+  <section id="login-view" class="login" hidden>
+    <div class="login-card">
+      <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
+      <h1>Inventory</h1>
+      <p>On-hand quantities come from the ledger. Sign in to read them.</p>
+      <div id="clerk-mount"></div>
+      <p id="login-error" class="error" role="alert"></p>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Back to intake</a>
+        <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="inventory-view" class="admin inventory-page" hidden>
+    <header class="admin-top">
+      <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+      <div>
+        <h1>Inventory</h1>
+        <p class="lede"><span id="tenant-name"></span> · on hand is the sum of ledger movements · read only</p>
+      </div>
+      <div class="actions">
+        <a class="ghost tiny" href="/">Intake</a>
+        <a class="ghost tiny" href="/sales">Sales</a>
+        <a class="ghost tiny" href="/reconcile">Reconcile</a>
+        <a class="ghost tiny" href="/settings">Settings</a>
+        <button id="logout" class="ghost tiny" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <p id="inventory-error" class="error" role="alert"></p>
+
+    <div class="inv-caps" aria-label="Inventory totals">
+      <section class="inv-cap inert-cap">
+        <div class="cap-label">TCGplayer level</div>
+        <div class="cap-num">Not connected</div>
+        <p class="cap-note" id="tcg-note"></p>
+      </section>
+      <section class="inv-cap">
+        <div class="cap-label">Units on hand</div>
+        <div class="cap-num" id="units">–</div>
+        <p class="cap-note" id="units-note"></p>
+      </section>
+      <section class="inv-cap">
+        <div class="cap-label">Cost basis</div>
+        <div class="cap-num" id="unknown-cost">–</div>
+        <p class="cap-note" id="cost-note"></p>
+      </section>
+      <section class="inv-cap">
+        <div class="cap-label">Flags for Florin</div>
+        <div class="cap-num" id="flag-count">–</div>
+        <p class="cap-note" id="flag-note"></p>
+      </section>
+      <section class="inv-cap inert-cap">
+        <div class="cap-label">Store credit liability</div>
+        <div class="cap-num">Later</div>
+        <p class="cap-note" id="credit-note"></p>
+      </section>
+    </div>
+
+    <div class="inv-split">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Stock</h2>
+          <span class="hint">Waitlist is the stock record. This page does not change it.</span>
+        </div>
+        <form id="filters" class="queue-tools" autocomplete="off">
+          <input id="f-q" type="search" placeholder="Card, set, or number" aria-label="Search" />
+          <select id="f-game" aria-label="Game"><option value="">All games</option></select>
+          <select id="f-condition" aria-label="Condition"><option value="">Any condition</option></select>
+          <select id="f-finish" aria-label="Finish"><option value="">Any finish</option></select>
+          <select id="f-flag" aria-label="Flag">
+            <option value="">Any flag</option>
+            <option value="low">Low stock</option>
+            <option value="overstock">Overstock</option>
+            <option value="slow">Slow mover</option>
+            <option value="review">Needs review</option>
+          </select>
+          <select id="f-cost" aria-label="Cost">
+            <option value="">Any cost</option>
+            <option value="unknown">Cost unknown</option>
+            <option value="known">Cost known</option>
+          </select>
+          <button class="primary tiny" type="submit">Apply</button>
+        </form>
+        <p id="threshold-note" class="hint"></p>
+        <p class="hint">TCGplayer listed quantity and reserved quantity are left off this list. There is no Starfoil seller account to read, and reserved quantity is a later phase.</p>
+        <div class="table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Card</th><th>Finish</th><th>Cond</th><th>Lang</th>
+                <th class="num">On hand</th>
+                <th class="num">Cost/unit</th><th class="num">Market</th><th class="num">Days</th><th>State</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <p id="rows-meta" class="hint"></p>
+      </section>
+
+      <section class="panel" id="detail">
+        <div class="panel-head">
+          <h2 id="detail-name">Card</h2>
+          <button id="detail-close" class="ghost tiny" type="button">Close</button>
+        </div>
+        <p id="detail-empty" class="hint">Select a card. History is every ledger row for that Waitlist record.</p>
+        <div id="detail-body" hidden>
+          <dl class="kv" id="detail-id"></dl>
+          <h3 class="section-title">Movement history</h3>
+          <div class="table-wrap">
+            <table class="admin-table">
+              <thead><tr><th>When (ET)</th><th class="num">Δ</th><th class="num">Qty</th><th>Source</th></tr></thead>
+              <tbody id="history"></tbody>
+            </table>
+          </div>
+          <p class="hint">Adjust, reserve, and purchases are later phases. Nothing on this page writes to Airtable or the ledger.</p>
+          <div class="actions">
+            <button class="ghost tiny" type="button" disabled>Adjust qty…</button>
+            <button class="ghost tiny" type="button" disabled>Reserve…</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <h2 class="section-title" id="purchase">Log buy-list purchase</h2>
+    <section class="panel phase-note" id="purchase-panel">
+      <p><strong>Not in this phase.</strong> <span id="purchase-note"></span></p>
+      <button class="primary" type="button" disabled>Receive &amp; confirm</button>
+    </section>
+
+    <h2 class="section-title" id="event-sale">Event sale</h2>
+    <section class="panel phase-note">
+      <p><strong>Not in this phase.</strong> <span id="event-note"></span></p>
+      <button class="primary" type="button" disabled>Sell</button>
+    </section>
+  </div>
+
+  <script src="/session.js"></script>
+  <script src="/inventory.js"></script>
+</body>
+</html>

@@ -514,6 +514,58 @@ a.ghost { display: inline-flex; align-items: center; text-decoration: none; }
 .connection-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .connection-row input { flex: 1 1 260px; }
 
+/* Inventory ledger (/inventory). Read-only. Later phases stay visibly inert. */
+.preview-banner { display: none; }
+html[data-preview="1"] .preview-banner {
+  display: block; background: #2a2410; color: #F6E05E; text-align: center; font-size: 0.8rem; padding: 0.45rem 0.7rem;
+}
+.admin.inventory-page { max-width: 1280px; }
+.inv-caps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.6rem; margin-bottom: 1rem; }
+.inv-cap { background: var(--panel); border: 1px solid var(--slate); border-radius: 12px; padding: 0.8rem 0.9rem; min-width: 0; }
+.inv-cap .cap-num { font-size: 1.35rem; overflow-wrap: anywhere; }
+.inert-cap { opacity: 0.85; border-style: dashed; }
+.inv-split { display: grid; grid-template-columns: minmax(0, 1.85fr) minmax(280px, 0.72fr); gap: 0.8rem; align-items: start; }
+.inventory-page .admin-table { font-size: 0.84rem; }
+.inventory-page .admin-table td { padding: 0.45rem 0.35rem; }
+.inventory-page .queue-tools input,
+.inventory-page .queue-tools select { width: auto; min-width: 0; flex: 1 1 8.5rem; }
+.inventory-page .cell-card { display: flex; gap: 0.55rem; align-items: center; min-width: 0; }
+.inventory-page .thumb {
+  width: 36px; height: 50px; border-radius: 4px; display: grid; place-items: center; flex: none;
+  font-size: 0.68rem; font-weight: 700; color: var(--navy); background: #F6E05E;
+}
+.inventory-page .thumb.magic { background: #B794F4; }
+.inventory-page .thumb.rift { background: #4FD1C5; }
+.inventory-page tr[aria-selected="true"] td { background: rgba(229, 62, 62, 0.1); }
+.inventory-page .flag-row { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.inventory-page .status.ok { color: #68D391; }
+.inventory-page .status.bad { color: #FC8181; }
+.inventory-page .status.warn { color: #F6AD55; }
+.inventory-page .status.gold { color: #F6E05E; }
+.inventory-page .unk { color: #F6AD55; font-style: italic; }
+.inventory-page .later { color: var(--muted); }
+.inventory-page td.num, .inventory-page th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.inventory-page .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.28rem 0.75rem; font-size: 0.86rem; margin: 0.4rem 0 0.8rem; }
+.inventory-page .kv dt { color: var(--muted); }
+.inventory-page .kv dd { margin: 0; }
+.inventory-page .section-title { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; margin: 1.2rem 0 0.45rem; }
+.inventory-page .delta-p { color: #68D391; font-weight: 700; }
+.inventory-page .delta-m { color: #FC8181; font-weight: 700; }
+.inventory-page .phase-note { border-style: dashed; }
+.inventory-page .phase-note p { margin: 0 0 0.7rem; color: var(--muted); }
+.inventory-page .phase-note strong { color: var(--white); }
+.inventory-page button:disabled { opacity: 0.55; cursor: not-allowed; }
+@media (max-width: 980px) {
+  .inv-caps { grid-template-columns: 1fr 1fr; }
+  .inv-split { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .inv-caps { grid-template-columns: 1fr; }
+  .inventory-page .queue-tools input,
+  .inventory-page .queue-tools select { flex-basis: 100%; width: 100%; }
+  .admin.inventory-page { padding: 0.85rem 0.7rem 2rem; }
+}
+
 /* Set identifier combobox (Quick add). Symbols are masks filled with currentColor, so they follow the theme. */
 .combo { position: relative; display: block; }
 .combo input { width: 100%; }

@@ -32,6 +32,9 @@ import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
 import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
 import { getState, listSales, setState } from "./salesdb.ts";
+import { buildDetail, buildInventory, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter } from "./inventory.ts";
+import { isMissingLedger, listMovements, readThresholds } from "./inventorydb.ts";
+import { loadBuyList } from "./opening.ts";
 import { claimRestore, confirmedMatches, confirmMatch, finishRestore, getRecordSnapshot, latestSnapshot, listRecordSnapshots, logAction, markSnapshotApplied, recentActions, removeMatch, saveRecordSnapshot, saveSnapshot, type ReconAction } from "./recondb.ts";
 import { ARCHIVE_FIELDS, CLEANUP_BATCH, CLEANUP_REASON, planCleanup, previewJson, runCleanupBatch, type ApplyGroup, type RemoveMode } from "./cleanup.ts";
 import { reconcileSummary, type ReconcileReport } from "./reconcile.ts";
@@ -713,6 +716,29 @@ app.delete("/api/connections/resend", async (c) => {
   return c.json({ resend: { connected: false } });
 });
 
+app.get("/api/inventory", async (c) => {
+  try {
+    return c.json(await inventoryPayload(c, inventoryQuery(c.req.query())));
+  } catch (error) {
+    if (isMissingLedger(error)) return c.json({ error: "The inventory ledger is not in this database yet. Apply migration 0008 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
+app.get("/api/inventory/:recordId", async (c) => {
+  const recordId = c.req.param("recordId");
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) return c.json({ error: "That is not a stock row." }, 400);
+  try {
+    const loaded = await loadLedger(c);
+    const detail = buildDetail(loaded.movements, loaded.buyList, loaded.thresholds, loaded.now, recordId);
+    if (!detail) return c.json({ error: "That card has no ledger rows yet." }, 404);
+    return c.json(detail);
+  } catch (error) {
+    if (isMissingLedger(error)) return c.json({ error: "The inventory ledger is not in this database yet. Apply migration 0008 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
 app.get("/api/sales", async (c) => {
   const filter = readSalesFilter(c.req.query());
   const { rows, truncated } = await listSales(c.env, c.var.tenant.id, filter, 1000);
@@ -1069,6 +1095,42 @@ app.onError((error, c) => {
 });
 
 type AppContext = Context<{ Bindings: Env; Variables: Variables }>;
+
+function inventoryQuery(query: Record<string, string>): InventoryFilter {
+  const flag = query.flag;
+  const cost = query.cost;
+  return {
+    game: query.game || undefined,
+    condition: query.condition || undefined,
+    finish: query.finish || undefined,
+    q: query.q || undefined,
+    flag: flag === "low" || flag === "overstock" || flag === "slow" || flag === "review" ? flag : undefined,
+    cost: cost === "known" || cost === "unknown" ? cost : undefined,
+  };
+}
+
+/** Ledger rows plus an optional read-only Buy List match. Never writes Airtable. */
+async function loadLedger(c: AppContext): Promise<{ movements: Awaited<ReturnType<typeof listMovements>>; buyList: BuyListInput[]; thresholds: Awaited<ReturnType<typeof readThresholds>>; wantQtyState: "matched" | "unread"; now: Date }> {
+  const movements = await listMovements(c.env, c.var.tenant.id);
+  const thresholds = await readThresholds(c.env, c.var.tenant.id);
+  let buyList: BuyListInput[] = [];
+  let wantQtyState: "matched" | "unread" = "unread";
+  const token = c.env.AIRTABLE_API_KEY?.trim() || c.env.AIRTABLE_PAT?.trim() || "";
+  if (token && c.var.tenant.airtableBaseId === WAITLIST_BASE_ID) {
+    try {
+      buyList = await loadBuyList(token);
+      wantQtyState = "matched";
+    } catch (error) {
+      console.error("inventory buy list read failed", error instanceof Error ? error.message : "read failed");
+    }
+  }
+  return { movements, buyList, thresholds, wantQtyState, now: new Date() };
+}
+
+async function inventoryPayload(c: AppContext, filter: InventoryFilter) {
+  const loaded = await loadLedger(c);
+  return buildInventory(loaded.movements, loaded.buyList, loaded.thresholds, loaded.now, filter, loaded.wantQtyState);
+}
 
 function backgroundEnrich(c: AppContext, id: string): void {
   const env = c.var.tenantEnv;
