@@ -32,8 +32,10 @@ import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
 import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
 import { getState, listSales, setState } from "./salesdb.ts";
-import { buildDetail, buildInventory, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter } from "./inventory.ts";
+import { buildDetail, buildInventory, onHand, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter, type MovementDraft, type WaitlistInput } from "./inventory.ts";
 import { isMissingLedger, isMissingPhase2Settings, listMovements, readInventorySettings, readThresholds, saveInventorySettings } from "./inventorydb.ts";
+import { applyReceiveWrites, fetchSellRequest, matchLines, planAcceptance, planReceipt, planRedemption, splitCardList, type CatalogLine, type SellRequestView } from "./purchases.ts";
+import { customerBalance, isMissingPurchases, listCredit, loadPurchase, readLiability, saveAcceptance, saveReceipt, saveRedemption } from "./purchasesdb.ts";
 import { presentSettings, SettingsError, validateInventorySettings } from "./inventory-settings.ts";
 import { loadBuyList } from "./opening.ts";
 import { claimRestore, confirmedMatches, confirmMatch, finishRestore, getRecordSnapshot, latestSnapshot, listRecordSnapshots, logAction, markSnapshotApplied, recentActions, removeMatch, saveRecordSnapshot, saveSnapshot, type ReconAction } from "./recondb.ts";
@@ -70,7 +72,7 @@ import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
-import { canonicalGame, CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, RARITIES, SETS, type Game } from "./sets.ts";
+import { canonicalGame, CONDITIONS, effectiveGame, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, RARITIES, SETS, type Game } from "./sets.ts";
 import { assetVersion, versionedUrl } from "./assets.ts";
 import { db, listTenantPlans, listTenants, recordAudit, setCompPlan, tenantById, tenantEnv, tenantForOrg, type AuditAction, type Tenant } from "./tenants.ts";
 
@@ -1099,8 +1101,161 @@ app.get("/set-icons/:file", async (c) => {
   return c.body(svg, 200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "public, max-age=86400, stale-while-revalidate=604800", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
 });
 
+app.get("/api/purchases/draft", async (c) => {
+  const sellRequestId = c.req.query("sr") ?? "";
+  try {
+    const opened = await openSellRequest(c, sellRequestId);
+    if (!opened.ok) return c.json({ error: opened.error }, opened.status);
+    const saved = await loadPurchase(c.env, c.var.tenant.id, sellRequestId).catch((error: unknown) => {
+      if (isMissingPurchases(error)) return null;
+      throw error;
+    });
+    let preview = null;
+    let planError: string | null = null;
+    try {
+      const settings = await readInventorySettings(c.env, c.var.tenant.id);
+      const planned = planAcceptance({ tenantId: c.var.tenant.id, request: opened.request, lines: opened.lines, settings: settings.settings });
+      if (planned.ok) preview = planned.purchase;
+      else planError = planned.error;
+    } catch (error) {
+      if (!isMissingPhase2Settings(error) && !isMissingLedger(error)) throw error;
+      planError = "Inventory settings are not in this database yet. Apply migration 0009 before go-live. Nothing was written.";
+    }
+    return c.json({ request: opened.request, lines: opened.lines, preview, purchase: saved, error: planError, liability: await safeLiability(c) });
+  } catch (error) {
+    if (isMissingLedger(error)) return c.json({ error: "The inventory ledger is not in this database yet. Apply migration 0008 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
+app.post("/api/purchases", async (c) => {
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const sellRequestId = typeof body.value.sellRequestId === "string" ? body.value.sellRequestId : "";
+  const overrides = Array.isArray(body.value.overrides)
+    ? body.value.overrides.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const lineNo = Number((row as { lineNo?: unknown }).lineNo);
+      const marketRefCents = Number((row as { marketRefCents?: unknown }).marketRefCents);
+      return Number.isInteger(lineNo) && Number.isInteger(marketRefCents) && marketRefCents >= 0 ? [{ lineNo, marketRefCents }] : [];
+    })
+    : [];
+  try {
+    const opened = await openSellRequest(c, sellRequestId);
+    if (!opened.ok) return c.json({ error: opened.error }, opened.status);
+    const settings = await readInventorySettings(c.env, c.var.tenant.id);
+    const planned = planAcceptance({ tenantId: c.var.tenant.id, request: opened.request, lines: opened.lines, settings: settings.settings, overrides });
+    if (!planned.ok) return c.json({ error: planned.error }, 400);
+    const saved = await saveAcceptance(c.env, planned.purchase);
+    return c.json({ purchase: planned.purchase, created: saved.created, stockChanged: false, wantChanged: false });
+  } catch (error) {
+    if (isMissingPurchases(error)) return c.json({ error: "Purchases are not in this database yet. Apply migration 0010 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
+app.post("/api/purchases/receive", async (c) => {
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const sellRequestId = typeof body.value.sellRequestId === "string" ? body.value.sellRequestId : "";
+  const receivedOn = typeof body.value.receivedOn === "string" ? body.value.receivedOn : "";
+  const confirms = Array.isArray(body.value.lines)
+    ? body.value.lines.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const lineNo = Number((row as { lineNo?: unknown }).lineNo);
+      const condition = String((row as { condition?: unknown }).condition ?? "");
+      return Number.isInteger(lineNo) && condition ? [{ lineNo, condition }] : [];
+    })
+    : [];
+  const token = c.env.AIRTABLE_API_KEY?.trim() || c.env.AIRTABLE_PAT?.trim() || "";
+  if (!token) return c.json({ error: "Airtable is not configured on this server. Nothing was received." }, 503);
+  try {
+    const purchase = await loadPurchase(c.env, c.var.tenant.id, sellRequestId);
+    if (!purchase) return c.json({ error: "Save the sell request before receiving it." }, 404);
+    for (const line of purchase.lines) {
+      if (!line.stockRecordId) continue;
+      const qty = await readStock(c.var.tenantEnv, line.stockRecordId);
+      if (qty != null) line.onHand = qty;
+    }
+    const balance = await customerBalance(c.env, c.var.tenant.id, sellRequestId);
+    const planned = planReceipt({
+      purchase,
+      receivedOn,
+      now: new Date().toISOString(),
+      confirms,
+      balanceCents: balance,
+      mintRecordId: (lineNo) => `recPendCreate${String(lineNo).padStart(4, "0")}`,
+    });
+    if (!planned.ok) return c.json({ error: planned.error }, 400);
+    const stockWrites = planned.plan.writes.filter((write) => write.kind !== "create_purchase");
+    const stockApplied = await applyReceiveWrites({ token, writes: stockWrites });
+    for (const made of stockApplied.stock) {
+      const lineNo = Number(made.lineKey.split(":").pop());
+      const temp = `recPendCreate${String(lineNo).padStart(4, "0")}`;
+      for (const line of planned.plan.purchase.lines) if (line.stockRecordId === temp) line.stockRecordId = made.recordId;
+      for (const movement of planned.plan.movements) if (movement.recordId === temp) movement.recordId = made.recordId;
+      for (const lot of planned.plan.lots) if (lot.recordId === temp) lot.recordId = made.recordId;
+      for (const write of planned.plan.writes) {
+        if (write.kind === "create_purchase" && write.lineKey === made.lineKey && Array.isArray(write.fields["Stock row"])) {
+          write.fields["Stock row"] = [made.recordId];
+        }
+      }
+    }
+    const purchaseWrites = planned.plan.writes.filter((write) => write.kind === "create_purchase");
+    const purchaseApplied = await applyReceiveWrites({ token, writes: purchaseWrites });
+    const stored = await saveReceipt(c.env, planned.plan);
+    const applied = { created: [...stockApplied.created, ...purchaseApplied.created], patched: [...stockApplied.patched, ...purchaseApplied.patched], stock: stockApplied.stock };
+    return c.json({ purchase: planned.plan.purchase, movementsInserted: stored.movementsInserted, creditsInserted: stored.creditsInserted, airtable: applied });
+  } catch (error) {
+    if (isMissingPurchases(error)) return c.json({ error: "Purchases are not in this database yet. Apply migration 0010 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
+app.get("/api/credit", async (c) => {
+  try {
+    const entries = await listCredit(c.env, c.var.tenant.id);
+    const liability = await readLiability(c.env, c.var.tenant.id);
+    return c.json({ ...liability, entries, readOnly: true });
+  } catch (error) {
+    if (isMissingPurchases(error)) return c.json({ error: "The store credit ledger is not in this database yet. Apply migration 0010 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
+app.post("/api/credit/redeem", async (c) => {
+  if (!canManageConnections(c)) return c.json({ error: "Only an organization admin can redeem store credit." }, 403);
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const customerRef = typeof body.value.customerRef === "string" ? body.value.customerRef : "";
+  const sourceRef = typeof body.value.sourceRef === "string" ? body.value.sourceRef : "";
+  const amountCents = Number(body.value.amountCents);
+  const occurredOn = typeof body.value.occurredOn === "string" ? body.value.occurredOn : new Date().toISOString().slice(0, 10);
+  try {
+    const balance = await customerBalance(c.env, c.var.tenant.id, customerRef);
+    const planned = planRedemption({ tenantId: c.var.tenant.id, customerRef, amountCents, sourceRef, balanceCents: balance, now: new Date().toISOString(), occurredOn });
+    if (!planned.ok) return c.json({ error: planned.error }, 400);
+    const saved = await saveRedemption(c.env, planned.entry);
+    return c.json({ entry: planned.entry, created: saved.created });
+  } catch (error) {
+    if (isMissingPurchases(error)) return c.json({ error: "The store credit ledger is not in this database yet. Apply migration 0010 before go-live. Nothing was written." }, 503);
+    throw error;
+  }
+});
+
 app.get("*", async (c) => {
-  let response = await c.env.ASSETS.fetch(c.req.raw);
+  let raw = c.req.raw;
+  const path = new URL(raw.url).pathname;
+  if (path === "/purchases/new" || path === "/purchases") {
+    const url = new URL(raw.url);
+    url.pathname = "/purchases.html";
+    raw = new Request(url, raw);
+  } else if (path === "/credit") {
+    const url = new URL(raw.url);
+    url.pathname = "/credit.html";
+    raw = new Request(url, raw);
+  }
+  let response = await c.env.ASSETS.fetch(raw);
   const headers = new Headers(response.headers);
   if ((headers.get("content-type") ?? "").includes("text/html") && response.status === 200) {
     // Cache-bust: every same-origin script and stylesheet gets ?v=<deployed version>, and the HTML itself is never
@@ -1160,9 +1315,72 @@ async function loadLedger(c: AppContext): Promise<{ movements: Awaited<ReturnTyp
   return { movements, buyList, thresholds, wantQtyState, now: new Date() };
 }
 
+async function safeLiability(c: AppContext) {
+  try {
+    return await readLiability(c.env, c.var.tenant.id);
+  } catch (error) {
+    if (isMissingPurchases(error)) return null;
+    throw error;
+  }
+}
+
+function stockRowsFromLedger(movements: readonly MovementDraft[]): { rows: WaitlistInput[]; onHandByRecord: Map<string, number>; known: Set<string> } {
+  const grouped = new Map<string, MovementDraft[]>();
+  for (const movement of movements) {
+    const list = grouped.get(movement.recordId) ?? [];
+    list.push(movement);
+    grouped.set(movement.recordId, list);
+  }
+  const rows: WaitlistInput[] = [];
+  const onHandByRecord = new Map<string, number>();
+  const known = new Set<string>();
+  for (const [recordId, list] of grouped) {
+    const snap = [...list].reverse().find((row) => row.snapshot)?.snapshot;
+    if (!snap) continue;
+    if (list.some((row) => row.unitCostCents != null)) known.add(recordId);
+    const qty = onHand(list);
+    onHandByRecord.set(recordId, qty);
+    rows.push({
+      id: recordId,
+      fields: {
+        "Card Name": snap.cardName,
+        Game: snap.game,
+        "Set #": snap.setNumber,
+        "Set Identifier": snap.setIdentifier,
+        "Collector Number": snap.collectorNumber,
+        Finish: snap.finishRaw,
+        Condition: snap.condition,
+        Language: snap.language,
+        Qty: qty,
+        "Market Price USD": snap.marketPriceUsd,
+        Status: snap.status,
+      },
+    });
+  }
+  return { rows, onHandByRecord, known };
+}
+
+async function openSellRequest(c: AppContext, sellRequestId: string): Promise<{ ok: true; request: SellRequestView; lines: CatalogLine[] } | { ok: false; error: string; status: 400 | 503 }> {
+  const token = c.env.AIRTABLE_API_KEY?.trim() || c.env.AIRTABLE_PAT?.trim() || "";
+  if (!token) return { ok: false, error: "Airtable is not configured on this server. Nothing was read.", status: 503 };
+  const opened = await fetchSellRequest(token, sellRequestId);
+  if (!opened.ok) return { ok: false, error: opened.error, status: 400 };
+  const loaded = await loadLedger(c);
+  const stock = stockRowsFromLedger(loaded.movements);
+  const game = (effectiveGame(opened.request.game) ?? "Lorcana") as Game;
+  const lines = matchLines(splitCardList(opened.request.cardsText, game), loaded.buyList, stock.rows, stock.onHandByRecord, stock.known);
+  return { ok: true, request: opened.request, lines };
+}
+
 async function inventoryPayload(c: AppContext, filter: InventoryFilter) {
   const loaded = await loadLedger(c);
-  return buildInventory(loaded.movements, loaded.buyList, loaded.thresholds, loaded.now, filter, loaded.wantQtyState);
+  let liability = null;
+  try {
+    liability = await readLiability(c.env, c.var.tenant.id);
+  } catch (error) {
+    if (!isMissingPurchases(error)) throw error;
+  }
+  return buildInventory(loaded.movements, loaded.buyList, loaded.thresholds, loaded.now, filter, loaded.wantQtyState, liability);
 }
 
 function backgroundEnrich(c: AppContext, id: string): void {

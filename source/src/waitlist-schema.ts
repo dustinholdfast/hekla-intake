@@ -4,6 +4,8 @@
  * Existing fields are skipped. Nothing is renamed, edited, or deleted.
  * Qty, Status and Finish are never in the create list. Cost Basis USD is reused, not created.
  */
+import { applyPurchaseTables, formatPurchaseSchema, planPurchaseTables } from "./purchases-schema.ts";
+
 export const WAITLIST_BASE_ID = "app4Tjz72sZtVMQyp";
 export const WAITLIST_TABLE_ID = "tblvHPu7dgDHA91bc";
 export const COST_BASIS_FIELD = "Cost Basis USD";
@@ -228,13 +230,17 @@ export async function applyWaitlistSchema(args: {
   return { created, skipped: plan.skip.map((field) => field.name), requests };
 }
 
-export function parseSchemaArgs(argv: readonly string[]): { apply: boolean; existing: string[] } {
+export function parseSchemaArgs(argv: readonly string[]): { apply: boolean; existing: string[]; applyPurchases: boolean; includeCreditMirror: boolean; existingTables: string[] } {
   const apply = argv.includes("--apply");
   const index = argv.indexOf("--existing");
   const raw = index >= 0 ? argv[index + 1] ?? "" : "";
   if (raw.startsWith("--")) throw new Error("--existing needs a comma-separated field list.");
   const existing = raw.split(",").map((name) => name.trim()).filter(Boolean);
-  return { apply, existing };
+  const tablesIndex = argv.indexOf("--existing-tables");
+  const tablesRaw = tablesIndex >= 0 ? argv[tablesIndex + 1] ?? "" : "";
+  if (tablesRaw.startsWith("--")) throw new Error("--existing-tables needs a comma-separated table list.");
+  const existingTables = tablesRaw.split(",").map((name) => name.trim()).filter(Boolean);
+  return { apply, existing, applyPurchases: argv.includes("--apply-purchases"), includeCreditMirror: argv.includes("--include-credit-mirror"), existingTables };
 }
 
 /** Default is dry-run and does not call fetch. --apply creates missing fields only. */
@@ -245,13 +251,27 @@ export async function runSchemaCli(
 ): Promise<number> {
   const args = parseSchemaArgs(argv);
   const plan = planWaitlistSchema(args.existing);
-  if (!args.apply) {
+  const purchases = planPurchaseTables(args.existingTables);
+  if (!args.apply && !args.applyPurchases) {
     log(formatSchemaPlan(plan, args.existing));
+    log(formatPurchaseSchema(purchases));
     return 0;
   }
   const token = process.env.AIRTABLE_API_KEY?.trim() || process.env.AIRTABLE_PAT?.trim() || "";
-  const result = await applyWaitlistSchema({ token, existingNames: args.existing, fetchImpl });
-  log(`created: ${result.created.join(", ") || "(none)"}`);
-  log(`skipped: ${result.skipped.join(", ") || "(none)"}`);
+  if (args.apply) {
+    const result = await applyWaitlistSchema({ token, existingNames: args.existing, fetchImpl });
+    log(`created: ${result.created.join(", ") || "(none)"}`);
+    log(`skipped: ${result.skipped.join(", ") || "(none)"}`);
+  } else {
+    log(formatSchemaPlan(plan, args.existing));
+  }
+  if (args.applyPurchases) {
+    const result = await applyPurchaseTables({ token, existingTables: args.existingTables, includeCreditMirror: args.includeCreditMirror, fetchImpl });
+    log(`purchases created: ${result.created.join(", ") || "(none)"}`);
+    log(`purchases skipped: ${result.skipped.join(", ") || "(none)"}`);
+  } else {
+    log(formatPurchaseSchema(purchases));
+    log("Purchases table was not created. Pass --apply-purchases to create it. The optional credit mirror also needs --include-credit-mirror.");
+  }
   return 0;
 }

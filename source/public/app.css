@@ -588,6 +588,32 @@ html[data-preview="1"] .preview-banner {
   .admin.inventory-page { padding: 0.85rem 0.7rem 2rem; }
 }
 
+.purchase-page, .credit-page { max-width: 1280px; }
+.purchase-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.6rem; margin: 0.6rem 0; }
+.purchase-facts label, .receive-line { display: grid; gap: 0.25rem; color: var(--muted); font-size: 0.85rem; }
+.purchase-facts input, .receive-line select { width: 100%; }
+.purchase-lines td, .purchase-lines th { white-space: nowrap; }
+.purchase-totals { margin: 0.7rem 0; color: var(--white); }
+.purchase-actions { justify-content: flex-end; }
+.receive-line { grid-template-columns: 1fr minmax(6rem, 8rem); align-items: center; margin: 0.35rem 0; }
+.purchase-page .section-title { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; margin: 1.2rem 0 0.45rem; }
+.line-cards { display: none; }
+.line-card { border: 1px solid var(--slate); border-radius: 12px; padding: 0.7rem 0.75rem; background: var(--panel); }
+.line-card h3 { margin: 0 0 0.2rem; font-size: 1rem; color: var(--white); }
+.line-card p { margin: 0.15rem 0; color: var(--ice-white); font-size: 0.88rem; overflow-wrap: anywhere; }
+.mono { font-family: var(--mono); }
+@media (max-width: 800px) {
+  .purchase-facts { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 520px) {
+  .purchase-facts, .receive-line { grid-template-columns: 1fr; }
+  .admin.purchase-page, .admin.credit-page { padding: 0.85rem 0.7rem 2rem; }
+  .purchase-actions { justify-content: stretch; }
+  .purchase-actions .primary, .purchase-actions .ghost { flex: 1 1 auto; }
+  .purchase-table, .credit-table { display: none; }
+  .line-cards { display: grid; gap: 0.55rem; }
+}
+
 /* Set identifier combobox (Quick add). Symbols are masks filled with currentColor, so they follow the theme. */
 .combo { position: relative; display: block; }
 .combo input { width: 100%; }

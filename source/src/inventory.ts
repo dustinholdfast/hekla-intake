@@ -29,7 +29,7 @@ export const ORDER_SOURCES = [
   { kind: "cardtrader_order", label: "CardTrader order", available: false, note: "Can be logged later on the same idempotency key." },
   { kind: "starfoil_order", label: "starfoil.store order", available: false, note: "Can be logged later on the same idempotency key." },
   { kind: "tcgplayer_order", label: "TCGplayer order", available: false, note: "Parked until Starfoil has its own seller account. No other account is read." },
-  { kind: "sell_request", label: "Sell request", available: false, note: "Buy-list purchases are a later phase." },
+  { kind: "sell_request", label: "Sell request", available: true, note: "Buy-list purchases are logged on the purchase page. This list does not write them." },
   { kind: "event_sale", label: "In-person sale", available: false, note: "Event sales are a later phase." },
   { kind: "manual", label: "Manual adjustment", available: false, note: "Adjustments are a later phase." },
 ] as const;
@@ -425,6 +425,8 @@ export type InventoryRow = {
   flags: StockFlagResult & { needsReview: string | null };
 };
 
+export type LiabilitySummary = { outstandingCents: number; customers: number; entries: number };
+
 export type InventoryPayload = {
   phase: 1;
   readOnly: true;
@@ -436,6 +438,7 @@ export type InventoryPayload = {
   thresholdSource: "inventory_settings";
   wantQtyState: "matched" | "unread";
   orderSources: typeof ORDER_SOURCES;
+  liability: LiabilitySummary | null;
   placeholders: {
     tcgplayerLevel: string;
     storeCredit: string;
@@ -447,8 +450,8 @@ export type InventoryPayload = {
 
 const PLACEHOLDERS = {
   tcgplayerLevel: "Not connected. Starfoil does not have its own TCGplayer seller account, and this page does not read any other account.",
-  storeCredit: "Store credit liability ships with purchases. Nothing is issued or redeemed here.",
-  purchases: "Logging a buy-list purchase is a later phase. This page does not write to Airtable.",
+  storeCredit: "Unspent store credit. A credit row is written when a credit purchase is received, not when the offer is accepted.",
+  purchases: "Open an accepted sell request to log the purchase. Saving does not change stock. Receive does.",
   eventSale: "In-person sales are a later phase.",
 } as const;
 
@@ -533,6 +536,7 @@ export function buildInventory(
   now: Date,
   filter: InventoryFilter = {},
   wantQtyState: "matched" | "unread" = buyList.length ? "matched" : "unread",
+  liability: LiabilitySummary | null = null,
 ): InventoryPayload {
   const byRecord = new Map<string, MovementDraft[]>();
   for (const movement of movements) {
@@ -568,6 +572,7 @@ export function buildInventory(
     thresholdSource: "inventory_settings",
     wantQtyState,
     orderSources: ORDER_SOURCES,
+    liability,
     placeholders: PLACEHOLDERS,
     generatedAt: now.toISOString(),
   };

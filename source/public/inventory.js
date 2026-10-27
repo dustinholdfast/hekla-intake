@@ -75,6 +75,10 @@ function cell(tr, label, text, className) {
   return td;
 }
 
+function money(cents) {
+  return (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
 function badge(parent, text, kind) {
   const span = document.createElement("span");
   span.className = `status ${kind || ""}`.trim();
@@ -88,8 +92,17 @@ async function load() {
   if (!response.ok) { $("inventory-error").textContent = data.error || "Could not load inventory."; return; }
   state.payload = data;
   $("tcg-note").textContent = data.placeholders.tcgplayerLevel;
-  $("credit-note").textContent = data.placeholders.storeCredit;
+  const liability = data.liability;
+  if (liability && Number.isInteger(liability.outstandingCents)) {
+    $("credit-cap").classList.remove("inert-cap");
+    $("credit-total").textContent = money(liability.outstandingCents);
+    $("credit-note").textContent = `${liability.entries} ledger row${liability.entries === 1 ? "" : "s"} · ${liability.customers} customer reference${liability.customers === 1 ? "" : "s"} · issued at receive`;
+  } else {
+    $("credit-total").textContent = "–";
+    $("credit-note").textContent = data.placeholders.storeCredit;
+  }
   $("purchase-note").textContent = data.placeholders.purchases;
+  if (document.documentElement.dataset.preview === "1" && !$("sr-id").value) $("sr-id").value = "recSRPhase3Ex0012";
   $("event-note").textContent = data.placeholders.eventSale;
   $("units").textContent = String(data.totals.units);
   $("units-note").textContent = `Across ${data.totals.rows} stock rows · from the ledger`;

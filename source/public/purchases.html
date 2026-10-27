@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1628" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Hekla · Purchase</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <p class="preview-banner">Preview · fixture sell request · Airtable was not written · not production</p>
+  <p id="boot" class="boot">Opening the sell request…</p>
+
+  <section id="login-view" class="login" hidden>
+    <div class="login-card">
+      <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
+      <h1>Purchase</h1>
+      <p>Sign in to log an accepted sell request.</p>
+      <div id="clerk-mount"></div>
+      <p id="login-error" class="error" role="alert"></p>
+      <div class="actions">
+        <a class="ghost tiny" href="/inventory">Inventory</a>
+        <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="purchase-view" class="admin purchase-page" hidden>
+    <header class="admin-top">
+      <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+      <div>
+        <h1>Log buy-list purchase</h1>
+        <p class="lede"><span id="tenant-name"></span> · seller contact stays on the sell request</p>
+      </div>
+      <div class="actions">
+        <a class="ghost tiny" href="/inventory">Inventory</a>
+        <a class="ghost tiny" href="/credit">Liability</a>
+        <button id="logout" class="ghost tiny" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <p id="purchase-error" class="error" role="alert"></p>
+    <p id="purchase-note" class="hint"></p>
+
+    <section class="panel" id="purchase-screen">
+      <div class="panel-head">
+        <div>
+          <h2>Sell Request <span class="mono" id="sr-ref">–</span></h2>
+          <p class="hint" id="sr-meta"></p>
+        </div>
+        <span class="status gold" id="sr-status">–</span>
+      </div>
+      <div class="purchase-facts">
+        <label>Payment type <input id="pay-type" disabled /></label>
+        <label>Offer accepted <input id="offer" disabled /></label>
+        <label>Rate <input id="rate" disabled /></label>
+        <label>Date received <input id="received-on" type="date" value="2026-10-27" /></label>
+      </div>
+      <div class="table-wrap purchase-table">
+        <table class="admin-table purchase-lines">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Line</th>
+              <th>Buy List</th>
+              <th>Finish</th>
+              <th>Cond</th>
+              <th class="num">Qty</th>
+              <th class="num">Market ref</th>
+              <th class="num">Rate</th>
+              <th class="num">Line offer</th>
+              <th class="num">Cost/unit</th>
+              <th>Want Qty</th>
+              <th>In hand</th>
+            </tr>
+          </thead>
+          <tbody id="lines"></tbody>
+        </table>
+      </div>
+      <div id="line-cards" class="line-cards"></div>
+      <p class="hint" id="split-note"></p>
+      <div class="purchase-totals" id="totals"></div>
+      <div class="actions purchase-actions">
+        <button id="save" class="ghost" type="button">Save as accepted</button>
+      </div>
+    </section>
+
+    <h2 class="section-title" id="receive">Receive &amp; confirm</h2>
+    <section class="panel" id="receive-screen">
+      <p class="hint" id="receive-note">Saving does not change stock or Want Qty. Receive does, once per line.</p>
+      <div id="receive-lines"></div>
+      <div class="actions purchase-actions">
+        <button id="receive-btn" class="primary" type="button" disabled>Receive &amp; confirm</button>
+        <a class="ghost" id="liability-link" href="/credit">Store credit liability</a>
+      </div>
+      <div id="receive-result" class="hint"></div>
+    </section>
+  </div>
+
+  <script src="/session.js"></script>
+  <script src="/purchases.js"></script>
+</body>
+</html>

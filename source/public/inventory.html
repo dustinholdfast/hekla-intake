@@ -40,6 +40,8 @@
         <a class="ghost tiny" href="/">Intake</a>
         <a class="ghost tiny" href="/sales">Sales</a>
         <a class="ghost tiny" href="/reconcile">Reconcile</a>
+        <a class="ghost tiny" href="/purchases/new">Purchases</a>
+        <a class="ghost tiny" href="/credit">Liability</a>
         <a class="ghost tiny" href="/settings">Settings</a>
         <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
@@ -68,10 +70,11 @@
         <div class="cap-num" id="flag-count">–</div>
         <p class="cap-note" id="flag-note"></p>
       </section>
-      <section class="inv-cap inert-cap">
+      <section class="inv-cap inert-cap" id="credit-cap">
         <div class="cap-label">Store credit liability</div>
-        <div class="cap-num">Later</div>
+        <div class="cap-num" id="credit-total">–</div>
         <p class="cap-note" id="credit-note"></p>
+        <a class="ghost tiny" id="credit-link" href="/credit">Liability view</a>
       </section>
     </div>
 
@@ -142,9 +145,12 @@
     </div>
 
     <h2 class="section-title" id="purchase">Log buy-list purchase</h2>
-    <section class="panel phase-note" id="purchase-panel">
-      <p><strong>Not in this phase.</strong> <span id="purchase-note"></span></p>
-      <button class="primary" type="button" disabled>Receive &amp; confirm</button>
+    <section class="panel" id="purchase-panel">
+      <p class="hint" id="purchase-note"></p>
+      <form id="open-purchase" class="queue-tools" action="/purchases/new" method="get">
+        <input id="sr-id" name="sr" type="text" placeholder="Sell request record id" aria-label="Sell request record id" autocomplete="off" />
+        <button class="primary" type="submit">Open sell request</button>
+      </form>
     </section>
 
     <h2 class="section-title" id="event-sale">Event sale</h2>
