@@ -75,10 +75,6 @@ function cell(tr, label, text, className) {
   return td;
 }
 
-function money(cents) {
-  return (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
-}
-
 function badge(parent, text, kind) {
   const span = document.createElement("span");
   span.className = `status ${kind || ""}`.trim();
@@ -95,7 +91,7 @@ async function load() {
   const liability = data.liability;
   if (liability && Number.isInteger(liability.outstandingCents)) {
     $("credit-cap").classList.remove("inert-cap");
-    $("credit-total").textContent = money(liability.outstandingCents);
+    $("credit-total").textContent = money(liability.outstandingCents / 100);
     $("credit-note").textContent = `${liability.entries} ledger row${liability.entries === 1 ? "" : "s"} · ${liability.customers} customer reference${liability.customers === 1 ? "" : "s"} · issued at receive`;
   } else {
     $("credit-total").textContent = "–";

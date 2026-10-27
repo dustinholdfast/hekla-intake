@@ -79,6 +79,7 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (url.pathname === "/api/purchases" && req.method === "POST") {
+    try { await readJson(req); } catch { sendJson(res, 400, { error: "That was not valid JSON." }); return; }
     const saved = purchases.accept(exampleAcceptInput(FIXTURE_TENANT));
     if (!saved.ok) { sendJson(res, 400, { error: saved.error }); return; }
     sendJson(res, 200, { purchase: saved.purchase, created: saved.created, stockChanged: false, wantChanged: false });
