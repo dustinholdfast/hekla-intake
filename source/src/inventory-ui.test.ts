@@ -13,7 +13,7 @@ const defer = () => {
 class Element {
   textContent = ''; value = ''; hidden = false; children: Element[] = [];
   dataset: Record<string, string> = {};
-  classList = { remove() {}, add() {} };
+  classList = { remove() {}, add() {}, toggle() {} };
   appendChild(child: Element) { this.children.push(child); return child; }
   append(...children: Element[]) { this.children.push(...children); }
   replaceChildren(...children: Element[]) { this.children = children; }

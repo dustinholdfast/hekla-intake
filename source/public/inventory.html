@@ -23,59 +23,55 @@
       <div id="clerk-mount"></div>
       <p id="login-error" class="error" role="alert"></p>
       <div class="actions">
-        <a class="ghost tiny" href="/">Back to intake</a>
+        <a class="ghost tiny" href="/">Buy / Intake</a>
         <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
       </div>
     </div>
   </section>
 
   <div id="inventory-view" class="admin inventory-page" hidden>
+    <nav class="workspace-nav" aria-label="Workspaces">
+      <a class="workspace-brand" href="/inventory" aria-label="Hekla inventory"><img src="/hekla-icon-dark.png" alt="" width="28" height="40" /><span>HEKLA<small>Store workspace</small></span></a>
+      <div class="workspace-links"><a href="/inventory" aria-current="page">Inventory</a><a href="/">Buy / Intake</a><a href="/sales">Sales</a><a href="/settings">Settings</a></div>
+    </nav>
     <header class="admin-top">
       <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
       <div>
         <h1>Inventory</h1>
-        <p class="lede"><span id="tenant-name"></span> · current stock from Airtable · read only</p>
+        <p class="lede"><span id="tenant-name"></span> · find stock, review details, and resolve exceptions</p>
       </div>
       <div class="actions">
-        <a class="ghost tiny" href="/">Intake</a>
-        <a class="ghost tiny" href="/sales">Sales</a>
-        <a class="ghost tiny" href="/reconcile">Reconcile</a>
-        <a class="ghost tiny" href="/purchases/new">Purchases</a>
-        <a class="ghost tiny" href="/credit">Liability</a>
-        <a class="ghost tiny" href="/settings">Settings</a>
         <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
     </header>
+    <nav class="workspace-subnav" aria-label="inventory tools"><a href="/inventory" aria-current="page">All stock</a><a href="/inventory?flag=review">Needs attention</a><a href="/credit">Store credit</a><a href="/reconcile">Marketplace checks</a></nav>
 
+    <div class="workspace-heading-actions"><a class="primary mail" href="/#quick-add">Add stock</a><button id="inventory-refresh" class="ghost" type="button">Refresh stock</button></div>
     <p id="inventory-error" class="error" role="alert"></p>
     <p id="accuracy-note" class="hint" role="status"></p>
 
     <div class="inv-caps" aria-label="Inventory totals">
-      <section class="inv-cap inert-cap">
-        <div class="cap-label">TCGplayer level</div>
-        <div class="cap-num">Not connected</div>
-        <p class="cap-note" id="tcg-note"></p>
-      </section>
       <section class="inv-cap">
         <div class="cap-label">Units on hand</div>
         <div class="cap-num" id="units">–</div>
         <p class="cap-note" id="units-note"></p>
       </section>
       <section class="inv-cap">
-        <div class="cap-label">Cost basis</div>
+        <div class="cap-label">Units with unknown cost</div>
         <div class="cap-num" id="unknown-cost">–</div>
         <p class="cap-note" id="cost-note"></p>
       </section>
       <section class="inv-cap">
-        <div class="cap-label">Flags for Florin</div>
+        <div class="cap-label">Needs review</div>
         <div class="cap-num" id="flag-count">–</div>
         <p class="cap-note" id="flag-note"></p>
+        <button id="review-stock" class="text-button" type="button">Review stock →</button>
       </section>
       <section class="inv-cap inert-cap" id="credit-cap">
-        <div class="cap-label">Store credit liability</div>
+        <div class="cap-label">Outstanding store credit</div>
         <div class="cap-num" id="credit-total">–</div>
         <p class="cap-note" id="credit-note"></p>
-        <a class="ghost tiny" id="credit-link" href="/credit">Liability view</a>
+        <a class="ghost tiny" id="credit-link" href="/credit">View store credit →</a>
       </section>
     </div>
 
@@ -83,10 +79,10 @@
       <section class="panel">
         <div class="panel-head">
           <h2>Stock</h2>
-          <span class="hint">Waitlist is the stock record. This page does not change it.</span>
+          <span class="hint">Search, select a card, then choose an action.</span>
         </div>
-        <form id="filters" class="queue-tools" autocomplete="off">
-          <input id="f-q" type="search" placeholder="Card, set, or number" aria-label="Search" />
+        <form id="filters" class="queue-tools stock-filters" autocomplete="off">
+          <input id="f-q" type="search" placeholder="Search card, set, number, or stock ID" aria-label="Search inventory" />
           <select id="f-game" aria-label="Game"><option value="">All games</option></select>
           <select id="f-condition" aria-label="Condition"><option value="">Any condition</option></select>
           <select id="f-finish" aria-label="Finish"><option value="">Any finish</option></select>
@@ -101,17 +97,17 @@
             <option value="unknown">Cost unknown</option>
             <option value="known">Cost known</option>
           </select>
-          <button class="primary tiny" type="submit">Apply</button>
+          <button class="primary tiny" type="submit">Search</button>
+          <button id="clear-filters" class="ghost tiny" type="button">Clear</button>
         </form>
-        <p id="threshold-note" class="hint"></p>
-        <p class="hint">TCGplayer listed quantity and reserved quantity are left off this list. There is no Starfoil seller account to read, and reserved quantity is a later phase.</p>
+        <details class="stock-explainer"><summary>How stock and review flags are calculated</summary><p id="threshold-note" class="hint"></p><p class="hint">Current quantities come from Airtable. Recorded history may omit changes. Slow-mover flags and reserved quantities are not available yet.</p></details>
         <div class="table-wrap">
           <table class="admin-table">
             <thead>
               <tr>
                 <th>Card</th><th>Finish</th><th>Cond</th><th>Lang</th>
                 <th class="num">On hand</th>
-                <th class="num">Cost/unit</th><th class="num">Market</th><th class="num">Days</th><th>State</th>
+                <th class="num">Cost/unit</th><th class="num">Market</th><th>State</th>
               </tr>
             </thead>
             <tbody id="rows"></tbody>
@@ -127,8 +123,10 @@
         </div>
         <p id="detail-empty" class="hint">Select a card to compare current stock with its recorded history.</p>
         <div id="detail-body" hidden>
+          <p id="detail-review" class="stock-review" role="status"></p>
+          <div class="stock-actions"><a id="open-intake-row" class="primary mail" hidden>Open in intake</a><a class="ghost mail" href="/reconcile">Check marketplaces</a></div>
           <dl class="kv" id="detail-id"></dl>
-          <h3 class="section-title">Movement history</h3>
+          <details class="stock-history"><summary>Recorded movement history</summary>
           <p id="history-note" class="hint">Recorded history may omit stock changes. Current quantity is read separately from Airtable.</p>
           <div class="table-wrap">
             <table class="admin-table">
@@ -136,29 +134,11 @@
               <tbody id="history"></tbody>
             </table>
           </div>
-          <p class="hint">Adjust and reserve are later phases. Purchases are logged on their own page. Nothing on this page writes to Airtable or the ledger.</p>
-          <div class="actions">
-            <button class="ghost tiny" type="button" disabled>Adjust qty…</button>
-            <button class="ghost tiny" type="button" disabled>Reserve…</button>
-          </div>
+          </details>
         </div>
       </section>
     </div>
 
-    <h2 class="section-title" id="purchase">Log buy-list purchase</h2>
-    <section class="panel" id="purchase-panel">
-      <p class="hint" id="purchase-note"></p>
-      <form id="open-purchase" class="queue-tools" action="/purchases/new" method="get">
-        <input id="sr-id" name="sr" type="text" placeholder="Sell request record id" aria-label="Sell request record id" autocomplete="off" />
-        <button class="primary" type="submit">Open sell request</button>
-      </form>
-    </section>
-
-    <h2 class="section-title" id="event-sale">Event sale</h2>
-    <section class="panel phase-note">
-      <p><strong>Not in this phase.</strong> <span id="event-note"></span></p>
-      <button class="primary" type="button" disabled>Sell</button>
-    </section>
   </div>
 
   <script src="/session.js"></script>

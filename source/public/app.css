@@ -641,3 +641,79 @@ html[data-preview="1"] .preview-banner {
   padding: 0.35rem 0.6rem; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.7;
   color: var(--muted); border-top: 1px solid var(--muted); border-radius: 0; margin-top: 0.15rem;
 }
+
+/* Four shared workspaces; task-specific tools stay beneath the page title. */
+.workspace-nav { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 1.5rem; padding: 0.85rem 0; margin-bottom: 1.5rem; border-bottom: 1px solid var(--line); }
+.workspace-brand { display: flex; align-items: center; gap: 0.65rem; text-decoration: none; color: var(--text); font-weight: 750; letter-spacing: 0.14em; }
+.workspace-brand img { object-fit: contain; width: 26px; height: 38px; }
+.workspace-brand small { display: block; margin-top: 0.2rem; color: var(--muted); font-size: 0.65rem; font-weight: 400; letter-spacing: 0.02em; }
+.workspace-links, .workspace-subnav { display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 0.35rem; }
+.workspace-links a, .workspace-subnav a { text-decoration: none; color: var(--muted); padding: 0.6rem 0.9rem; border-radius: 9px; white-space: nowrap; font-size: 0.9rem; }
+.workspace-links a:hover, .workspace-subnav a:hover { color: var(--text); background: var(--panel-2); }
+.workspace-links a[aria-current="page"] { color: var(--gold); background: rgba(232, 184, 74, 0.1); box-shadow: inset 0 0 0 1px rgba(232, 184, 74, 0.3); }
+.workspace-subnav { margin: -0.2rem 0 1.4rem; border-bottom: 1px solid var(--line); padding-bottom: 0.7rem; }
+.workspace-subnav a { padding: 0.45rem 0.65rem; font-size: 0.83rem; }
+.workspace-subnav a[aria-current="page"] { color: var(--text); background: var(--panel-2); }
+.admin-top > .admin-logo { display: none; }
+.workspace-heading-actions { display: flex; gap: 0.5rem; margin: 0 0 1rem; }
+.workspace-heading-actions .primary, .stock-actions .primary { text-decoration: none; }
+.admin.inventory-page { max-width: 1480px; }
+.inventory-page .inv-caps { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.8rem; margin: 1.25rem 0; }
+.inventory-page .inv-cap { padding: 1rem; border-radius: 12px; }
+.inventory-page .inv-cap .cap-num { font-size: 1.8rem; margin: 0.5rem 0; }
+.inventory-page .inv-split { grid-template-columns: minmax(0, 1.65fr) minmax(310px, 0.85fr); }
+.inventory-page #detail { position: sticky; top: 1rem; }
+.inventory-page .stock-filters #f-q { flex: 1 1 100%; width: 100%; padding: 0.85rem 1rem; }
+.inventory-page .stock-filters select { flex: 1 1 110px; font-size: 0.82rem; padding: 0.55rem; }
+.stock-explainer, .stock-history { border-top: 1px solid var(--line); margin-top: 0.8rem; padding-top: 0.75rem; }
+.stock-explainer summary, .stock-history summary, .advanced-tools > summary { color: var(--muted); cursor: pointer; font-size: 0.84rem; padding: 0.3rem 0; }
+.stock-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.8rem 0 1rem; }
+.stock-actions .primary, .stock-actions .ghost { min-height: 40px; padding: 0.5rem 0.7rem; font-size: 0.82rem; }
+.stock-review { font-size: 0.86rem; line-height: 1.55; color: var(--muted); padding: 0.75rem; border-radius: 9px; background: var(--bg); }
+.stock-review.has-issue { border-left: 3px solid var(--warn); color: var(--text); }
+.text-button { border: 0; background: none; color: var(--ice); padding: 0.3rem 0; font-size: 0.82rem; text-align: left; }
+.text-button:hover { text-decoration: underline; }
+.task-link { display: inline-block; color: var(--ice); font-size: 0.87rem; margin: 0.25rem 0; }
+.queue-label { color: var(--muted); font-size: 0.8rem; font-weight: 600; }
+.queue-advanced { position: relative; }
+.queue-advanced > summary { padding: 0.7rem; font-size: 0.85rem; cursor: pointer; color: var(--muted); }
+.queue-tool-list { position: absolute; top: 100%; right: 0; z-index: 15; width: 230px; display: grid; gap: 0.4rem; padding: 0.6rem; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 25px #0006; }
+.purchase-open { margin-bottom: 1rem; }
+.purchase-open input { flex: 1 1 16rem; width: auto; }
+.advanced-tools { padding: 1rem; }
+.advanced-tools > summary { color: var(--text); }
+.app > .workspace-nav { grid-column: 1 / -1; grid-row: 1; margin: 0; padding: 0.8rem 1.25rem; }
+.app > .game-bar { grid-row: 2; position: static; }
+.app > aside { grid-row: 3; position: static; }
+.app > main { grid-row: 3; }
+.app { grid-template-rows: auto auto 1fr; }
+@media (max-width: 1120px) {
+  .inventory-page .inv-split { grid-template-columns: 1fr; }
+  .inventory-page #detail { position: static; }
+}
+@media (max-width: 860px) {
+  .workspace-nav { align-items: flex-start; flex-direction: column; gap: 0.75rem; margin-bottom: 1rem; }
+  .workspace-links { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: 100%; gap: 0.2rem; }
+  .workspace-links a { text-align: center; padding: 0.65rem 0.25rem; font-size: 0.78rem; }
+  .app > aside, .app > main { grid-column: 1; grid-row: auto; }
+  .inventory-page .inv-caps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workspace-subnav { gap: 0.2rem; }
+  .workspace-subnav a { font-size: 0.78rem; }
+}
+@media (max-width: 520px) {
+  .inventory-page .stock-filters select { flex-basis: calc(50% - 0.5rem); width: calc(50% - 0.5rem); }
+  .inventory-page .inv-cap { padding: 0.8rem; }
+  .inventory-page .inv-cap .cap-num { font-size: 1.4rem; }
+  .inventory-page .kv { grid-template-columns: 1fr; gap: 0.15rem; }
+  .inventory-page .kv dd { margin-bottom: 0.6rem; overflow-wrap: anywhere; }
+  .workspace-heading-actions > * { flex: 1; justify-content: center; text-align: center; font-size: 0.87rem; }
+  .inventory-page #rows tr { display: grid; grid-template-columns: 1fr 1fr; gap: 0.1rem 0.6rem; padding: 0.7rem; }
+  .inventory-page #rows td { display: flex; justify-content: space-between; align-items: baseline; gap: 0.3rem; text-align: left; padding: 0.25rem 0; border: 0; }
+  .inventory-page #rows td::before { position: static; width: auto; flex: none; font-size: 0.7rem; }
+  .inventory-page #rows td:first-child, .inventory-page #rows td:last-child { grid-column: 1 / -1; }
+  .inventory-page #rows td:first-child::before { display: none; }
+  .inventory-page #rows .cell-card { width: 100%; align-items: flex-start; }
+  .inventory-page #rows .thumb { width: 25px; height: 35px; font-size: 0.6rem; }
+  .inventory-page #rows .sub { font-size: 0.72rem; }
+  .inventory-page #rows .flag-row { justify-content: flex-end; }
+}

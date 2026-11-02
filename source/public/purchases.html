@@ -30,23 +30,27 @@
   </section>
 
   <div id="purchase-view" class="admin purchase-page" hidden>
+    <nav class="workspace-nav" aria-label="Workspaces">
+      <a class="workspace-brand" href="/inventory" aria-label="Hekla inventory"><img src="/hekla-icon-dark.png" alt="" width="28" height="40" /><span>HEKLA<small>Store workspace</small></span></a>
+      <div class="workspace-links"><a href="/inventory">Inventory</a><a href="/" aria-current="page">Buy / Intake</a><a href="/sales">Sales</a><a href="/settings">Settings</a></div>
+    </nav>
     <header class="admin-top">
       <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
       <div>
-        <h1>Log buy-list purchase</h1>
-        <p class="lede"><span id="tenant-name"></span> · seller contact stays on the sell request</p>
+        <h1>Receive purchases</h1>
+        <p class="lede"><span id="tenant-name"></span> · open an accepted sell request, review it, then receive</p>
       </div>
       <div class="actions">
-        <a class="ghost tiny" href="/inventory">Inventory</a>
-        <a class="ghost tiny" href="/credit">Liability</a>
         <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
     </header>
+    <nav class="workspace-subnav" aria-label="Buying tools"><a href="/">Add cards</a><a href="/purchases/new" aria-current="page">Receive purchases</a></nav>
 
+    <section class="panel purchase-open"><h2>Open a sell request</h2><p class="hint">Paste the record ID from an accepted sell request. Opening it changes no stock.</p><form class="queue-tools" action="/purchases/new" method="get"><label class="sr" for="open-sr">Sell request record ID</label><input id="open-sr" name="sr" placeholder="rec…" required pattern="rec[A-Za-z0-9]{14}" autocomplete="off" /><button class="primary" type="submit">Open purchase</button></form></section>
     <p id="purchase-error" class="error" role="alert"></p>
     <p id="purchase-note" class="hint"></p>
 
-    <section class="panel" id="purchase-screen">
+    <section class="panel" id="purchase-screen" hidden>
       <div class="panel-head">
         <div>
           <h2>Sell Request <span class="mono" id="sr-ref">–</span></h2>
@@ -89,8 +93,8 @@
       </div>
     </section>
 
-    <h2 class="section-title" id="receive">Receive &amp; confirm</h2>
-    <section class="panel" id="receive-screen">
+    <h2 class="section-title" id="receive" hidden>Receive &amp; confirm</h2>
+    <section class="panel" id="receive-screen" hidden>
       <p class="hint" id="receive-note">Saving does not change stock or Want Qty. Receive does, once per line.</p>
       <div id="receive-lines"></div>
       <div class="actions purchase-actions">

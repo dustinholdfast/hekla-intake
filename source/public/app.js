@@ -128,10 +128,17 @@ async function boot() {
   $("admin-link").hidden = !data.platformAdmin;
   buildForm(data);
   applyDefaults();
+  const route = new URLSearchParams(location.search);
+  const requestedGame = route.get("game");
+  if (requestedGame && data.games.includes(requestedGame)) selectGame(requestedGame, { refresh: false });
+  if (["Waitlist", "Listed", "Sold", "Skip"].includes(route.get("status"))) state.status = route.get("status");
+  state.search = route.get("q") || "";
+  $("search").value = state.search;
   markTabs();
   show("app");
   await refreshAll();
-  $("collector").focus();
+  if (route.has("q")) { $("queue-panel").scrollIntoView({ block: "start" }); $("search").focus(); }
+  else $("collector").focus();
 }
 
 function show(name) {

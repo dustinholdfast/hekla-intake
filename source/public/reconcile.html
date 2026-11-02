@@ -17,31 +17,32 @@
   <section id="login-view" class="login" hidden>
     <div class="login-card">
       <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
-      <h1>Reconcile</h1>
+      <h1>Marketplace checks</h1>
       <div id="clerk-mount"></div>
       <p id="login-error" class="error" role="alert"></p>
       <div class="actions">
-        <a class="ghost tiny" href="/">Back to intake</a>
+        <a class="ghost tiny" href="/">Buy / Intake</a>
         <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
       </div>
     </div>
   </section>
 
   <div id="recon-view" class="admin" hidden>
+    <nav class="workspace-nav" aria-label="Workspaces">
+      <a class="workspace-brand" href="/inventory" aria-label="Hekla inventory"><img src="/hekla-icon-dark.png" alt="" width="28" height="40" /><span>HEKLA<small>Store workspace</small></span></a>
+      <div class="workspace-links"><a href="/inventory" aria-current="page">Inventory</a><a href="/">Buy / Intake</a><a href="/sales">Sales</a><a href="/settings">Settings</a></div>
+    </nav>
     <header class="admin-top">
       <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
       <div>
-        <h1>Reconcile</h1>
+        <h1>Marketplace checks</h1>
         <p class="lede"><span id="tenant-name"></span> · Airtable Qty vs CardTrader vs TCGplayer</p>
       </div>
       <div class="actions">
-        <a class="ghost tiny" href="/">Back to intake</a>
-        <a class="ghost tiny" href="/inventory">Inventory</a>
-        <a class="ghost tiny" href="/sales">Sales</a>
-        <a class="ghost tiny" href="/settings">Settings</a>
         <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
     </header>
+    <nav class="workspace-subnav" aria-label="inventory tools"><a href="/inventory">All stock</a><a href="/inventory?flag=review">Needs attention</a><a href="/credit">Store credit</a><a href="/reconcile" aria-current="page">Marketplace checks</a></nav>
 
     <p id="error" class="error" role="alert"></p>
     <p id="flash" class="flash" role="status"></p>
@@ -59,7 +60,8 @@
       <p id="sku-col" class="hint"></p>
     </section>
 
-    <section id="cleanup-panel" class="panel" hidden>
+    <details id="cleanup-panel" class="panel advanced-tools" hidden>
+      <summary>Advanced: duplicate cleanup &amp; recovery</summary>
       <div class="panel-head"><h2>CardTrader cleanup → Airtable</h2><span id="cleanup-meta" class="hint"></span></div>
       <p class="hint">After merging or deleting listings on CardTrader: the row that owns each surviving listing takes CardTrader's quantity, and duplicate rows whose listings are gone are removed from Airtable. Every changed or removed record is copied to Hekla first (reason “cardtrader-cleanup”) and can be restored below. Nothing is a sale; the sales log is not touched. Errors or unmatched rows are never treated as 0.</p>
       <div class="queue-tools"><button id="cleanup-preview" class="ghost tiny" type="button">Preview cleanup (fresh CardTrader check, changes nothing)</button><button id="cleanup-apply" class="primary" type="button" hidden>Apply</button></div>
@@ -80,7 +82,7 @@
         <div id="cl-results-box" hidden><p id="cl-progress" class="flash" role="status"></p><div class="table-wrap"><table class="admin-table"><thead><tr><th>Card</th><th>Result</th><th>Detail</th></tr></thead><tbody id="cl-results"></tbody></table></div></div>
       </div>
       <details id="cl-snap-box"><summary class="hint">Removed and changed records (snapshots, Restore)</summary><div class="table-wrap"><table class="admin-table"><thead><tr><th>When (ET)</th><th>Card</th><th>Action</th><th>Qty</th><th>Record</th><th></th></tr></thead><tbody id="cl-snaps"></tbody></table></div></details>
-    </section>
+    </details>
 
     <section class="panel">
       <div class="panel-head"><h2>Cards</h2><span id="counts" class="hint"></span></div>

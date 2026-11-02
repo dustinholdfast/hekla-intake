@@ -47,6 +47,7 @@ async function boot() {
     return;
   }
   $("tenant-name").textContent = session.data.tenant || "";
+  $("platform-tools").hidden = !session.data.platformAdmin;
   const { response, data } = await api("/api/connections");
   show("settings");
   if (!response.ok) {

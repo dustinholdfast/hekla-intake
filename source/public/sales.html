@@ -21,13 +21,17 @@
       <div id="clerk-mount"></div>
       <p id="login-error" class="error" role="alert"></p>
       <div class="actions">
-        <a class="ghost tiny" href="/">Back to intake</a>
+        <a class="ghost tiny" href="/">Buy / Intake</a>
         <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
       </div>
     </div>
   </section>
 
   <div id="sales-view" class="admin" hidden>
+    <nav class="workspace-nav" aria-label="Workspaces">
+      <a class="workspace-brand" href="/inventory" aria-label="Hekla inventory"><img src="/hekla-icon-dark.png" alt="" width="28" height="40" /><span>HEKLA<small>Store workspace</small></span></a>
+      <div class="workspace-links"><a href="/inventory">Inventory</a><a href="/">Buy / Intake</a><a href="/sales" aria-current="page">Sales</a><a href="/settings">Settings</a></div>
+    </nav>
     <header class="admin-top">
       <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
       <div>
@@ -35,13 +39,10 @@
         <p class="lede"><span id="tenant-name"></span> · <span id="modes"></span></p>
       </div>
       <div class="actions">
-        <a class="ghost tiny" href="/">Back to intake</a>
-        <a class="ghost tiny" href="/inventory">Inventory</a>
-        <a class="ghost tiny" href="/reconcile">Reconcile</a>
-        <a class="ghost tiny" href="/settings">Settings</a>
         <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
     </header>
+    <nav class="workspace-subnav" aria-label="sales tools"><a href="/sales" aria-current="page">Sales log</a><a href="/sales#marketplace-pulls">Marketplace pull list</a><a href="/reconcile">Marketplace checks</a></nav>
 
     <p id="sales-error" class="error" role="alert"></p>
     <p id="sales-flash" class="flash" role="status"></p>
@@ -65,8 +66,8 @@
       <p id="rows-meta" class="hint"></p>
     </section>
 
-    <section class="panel">
-      <div class="panel-head"><h2>Pull from TCGplayer</h2>
+    <section class="panel" id="marketplace-pulls">
+      <div class="panel-head"><h2>Marketplace pull list</h2>
         <div class="actions">
           <select id="pull-hours" aria-label="Window"><option value="24">Last 24 hours</option><option value="48">Last 48 hours</option><option value="168">Last 7 days</option></select>
           <button id="pull-csv" class="primary" type="button">Download TCGplayer import CSV</button>

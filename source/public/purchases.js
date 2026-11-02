@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { draft: null, savedTwice: false };
+const state = { draft: null, savedTwice: false, busy: false };
 
 document.addEventListener("DOMContentLoaded", () => {
   $("logout").addEventListener("click", () => { if (document.documentElement.dataset.preview === "1") return; signOut(); });
@@ -46,13 +46,21 @@ async function boot() {
 async function load() {
   $("purchase-error").textContent = "";
   const id = srId();
+  $("open-sr").value = id;
+  $("purchase-screen").hidden = true;
+  $("receive-screen").hidden = true;
+  $("receive").hidden = true;
   if (!id) {
-    $("purchase-error").textContent = "Add the sell request id, for example /purchases/new?sr=rec…";
+    $("purchase-note").textContent = "Open an accepted sell request above to review its cards and offer.";
     return;
   }
+  if (!/^rec[A-Za-z0-9]{14}$/.test(id)) { $("purchase-error").textContent = "Enter a valid sell request record ID."; return; }
   const { response, data } = await api(`/api/purchases/draft?sr=${encodeURIComponent(id)}`);
   if (!response.ok) { $("purchase-error").textContent = data.error || "Could not open that sell request."; return; }
   state.draft = data;
+  $("purchase-screen").hidden = false;
+  $("receive-screen").hidden = false;
+  $("receive").hidden = false;
   render();
 }
 
@@ -182,7 +190,25 @@ function renderReceive(lines, purchase) {
   }
 }
 
-async function save() {
+async function save() { return purchaseAction(savePurchase); }
+async function receive() { return purchaseAction(receivePurchase); }
+
+async function purchaseAction(action) {
+  if (state.busy) return;
+  state.busy = true;
+  $("save").disabled = true;
+  $("receive-btn").disabled = true;
+  try { await action(); }
+  catch { $("purchase-error").textContent = "The result could not be confirmed. Refresh this purchase and check its status before trying again."; }
+  finally {
+    state.busy = false;
+    const purchase = state.draft?.purchase;
+    $("save").disabled = !state.draft || Boolean(state.draft.error) || Boolean(purchase && purchase.status !== "accepted");
+    $("receive-btn").disabled = !purchase || purchase.status !== "accepted";
+  }
+}
+
+async function savePurchase() {
   $("purchase-error").textContent = "";
   const { response, data } = await api("/api/purchases", { method: "POST", body: JSON.stringify({ sellRequestId: srId() }) });
   if (!response.ok) { $("purchase-error").textContent = data.error || "Could not save."; return; }
@@ -193,7 +219,7 @@ async function save() {
   await load();
 }
 
-async function receive() {
+async function receivePurchase() {
   $("purchase-error").textContent = "";
   const lines = [...document.querySelectorAll("#receive-lines select")].map((select) => ({
     lineNo: Number(select.dataset.lineNo),

@@ -26,18 +26,22 @@
   </section>
 
   <div id="app-view" class="app" hidden>
+    <nav class="workspace-nav" aria-label="Workspaces">
+      <a class="workspace-brand" href="/inventory" aria-label="Hekla inventory"><img src="/hekla-icon-dark.png" alt="" width="28" height="40" /><span>HEKLA<small>Store workspace</small></span></a>
+      <div class="workspace-links"><a href="/inventory">Inventory</a><a href="/" aria-current="page">Buy / Intake</a><a href="/sales">Sales</a><a href="/settings">Settings</a></div>
+    </nav>
     <div class="game-bar" id="game-bar" role="tablist" aria-label="Game"></div>
     <aside>
       <div class="brand-row">
-        <img class="wordmark brand-full" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" /><img class="brand-icon" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
+        <span class="queue-label">Card queue</span>
         <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
       <nav aria-label="Queue">
-        <button type="button" data-go="form">Intake</button>
-        <button type="button" data-status="Waitlist" class="on">Waitlist <em data-count="Waitlist">0</em></button>
+        <button type="button" data-go="form">Add cards</button>
+        <button type="button" data-status="Waitlist" class="on">Waiting to list <em data-count="Waitlist">0</em></button>
         <button type="button" data-status="Listed">Listed <em data-count="Listed">0</em></button>
         <button type="button" data-status="Sold">Sold <em data-count="Sold">0</em></button>
-        <button type="button" data-status="Skip">Skip <em data-count="Skip">0</em></button>
+        <button type="button" data-status="Skip">Skipped <em data-count="Skip">0</em></button>
       </nav>
       <section class="cap" aria-label="Inventory">
         <div class="cap-label"><span data-cap-game>Lorcana</span> listed on CardTrader</div>
@@ -46,18 +50,15 @@
         <p id="cap-error" class="error"></p>
       </section>
       <a class="airtable-link text-link" href="https://airtable.com/app4Tjz72sZtVMQyp/tblvHPu7dgDHA91bc" target="_blank" rel="noopener noreferrer">Open Waitlist in Airtable</a>
-      <a class="text-link admin-link" href="/inventory">Inventory</a>
-      <a class="text-link admin-link" href="/sales">Sales</a>
-      <a class="text-link admin-link" href="/reconcile">Reconcile</a>
-      <a class="text-link admin-link" href="/settings">Settings</a>
       <a id="admin-link" class="text-link admin-link" href="/admin" hidden>Platform admin</a>
     </aside>
 
     <main>
       <header class="top">
         <div>
-          <h1>Intake</h1>
-          <p>Add cards, price them from CardTrader, and list them there when you approve.</p>
+          <h1>Buy / Intake</h1>
+          <p>Add stock or receive a purchase. Review prices before listing.</p>
+          <a class="task-link" href="/purchases/new">Receive an accepted purchase →</a>
         </div>
         <section class="mobile-cap" aria-label="Inventory">
           <div class="cap-label"><span data-cap-game>Lorcana</span> listed on CardTrader</div>
@@ -72,10 +73,10 @@
             <h2>Quick add</h2>
             <button id="open-bulk" class="ghost" type="button">Bulk paste</button>
           </div>
-          <p class="lede">Sticky defaults, including the game, stay on this device. Enter adds the card and jumps back to the collector number.</p>
+          <p class="lede">Choose the printing and quantity. Your last choices stay on this device.</p>
           <form id="add-form" autocomplete="off">
             <fieldset class="defaults">
-              <legend>Sticky defaults</legend>
+              <legend>Printing & quantity</legend>
               <label id="set-number-field">Set #
                 <select id="set" name="setNumber"></select>
               </label>
@@ -138,10 +139,12 @@
             <h2>Queue</h2>
             <div class="hekla-actions">
               <button id="ask-process" class="ghost" type="button">Auto-sort pending</button>
-              <button id="rerank-listed" class="ghost" type="button" hidden>Re-rank listed cards</button>
-              <button id="rescan" class="ghost" type="button">Scan for changes</button>
-              <button id="ct-export" class="ghost" type="button">Export to CardTrader</button>
-              <button id="ask-greenlight" class="ghost" type="button">Greenlight shortlist</button>
+              <button id="ct-export" class="primary" type="button">List on CardTrader</button>
+              <details class="queue-advanced"><summary>More tools</summary><div class="queue-tool-list">
+                <button id="rerank-listed" class="ghost" type="button" hidden>Re-rank listed cards</button>
+                <button id="rescan" class="ghost" type="button">Scan for price changes</button>
+                <button id="ask-greenlight" class="ghost" type="button">Send shortlist to Hekla</button>
+              </div></details>
             </div>
           </div>
           <div class="queue-tools">

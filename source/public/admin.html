@@ -21,13 +21,17 @@
       <div id="clerk-mount"></div>
       <p id="login-error" class="error" role="alert"></p>
       <div class="actions">
-        <a class="ghost tiny" href="/">Back to intake</a>
+        <a class="ghost tiny" href="/">Buy / Intake</a>
         <button id="login-signout" class="ghost tiny" type="button" hidden>Sign out</button>
       </div>
     </div>
   </section>
 
   <div id="admin-view" class="admin" hidden>
+    <nav class="workspace-nav" aria-label="Workspaces">
+      <a class="workspace-brand" href="/inventory" aria-label="Hekla inventory"><img src="/hekla-icon-dark.png" alt="" width="28" height="40" /><span>HEKLA<small>Store workspace</small></span></a>
+      <div class="workspace-links"><a href="/inventory">Inventory</a><a href="/">Buy / Intake</a><a href="/sales">Sales</a><a href="/settings" aria-current="page">Settings</a></div>
+    </nav>
     <header class="admin-top">
       <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
       <div>
@@ -35,10 +39,10 @@
         <p class="lede">Grant or remove complimentary Pro for an account. Paid plans are never changed here.</p>
       </div>
       <div class="actions">
-        <a class="ghost tiny" href="/">Back to intake</a>
         <button id="logout" class="ghost tiny" type="button">Sign out</button>
       </div>
     </header>
+    <nav class="workspace-subnav" aria-label="settings tools"><a href="/settings#inventory-settings-panel">Inventory & buy rates</a><a href="/settings#connections-panel">Connections</a></nav>
 
     <section class="panel">
       <div class="panel-head">
