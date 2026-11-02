@@ -19,7 +19,7 @@
     <div class="login-card">
       <img class="wordmark" src="/hekla-logo-dark.png" alt="Hekla" width="480" height="523" />
       <h1>Inventory</h1>
-      <p>On-hand quantities come from the ledger. Sign in to read them.</p>
+      <p>Read current stock and compare it with recorded movement history.</p>
       <div id="clerk-mount"></div>
       <p id="login-error" class="error" role="alert"></p>
       <div class="actions">
@@ -34,7 +34,7 @@
       <img class="admin-logo" src="/hekla-icon-dark.png" alt="Hekla" width="160" height="234" />
       <div>
         <h1>Inventory</h1>
-        <p class="lede"><span id="tenant-name"></span> · on hand is the sum of ledger movements · read only</p>
+        <p class="lede"><span id="tenant-name"></span> · current stock from Airtable · read only</p>
       </div>
       <div class="actions">
         <a class="ghost tiny" href="/">Intake</a>
@@ -48,6 +48,7 @@
     </header>
 
     <p id="inventory-error" class="error" role="alert"></p>
+    <p id="accuracy-note" class="hint" role="status"></p>
 
     <div class="inv-caps" aria-label="Inventory totals">
       <section class="inv-cap inert-cap">
@@ -93,7 +94,6 @@
             <option value="">Any flag</option>
             <option value="low">Low stock</option>
             <option value="overstock">Overstock</option>
-            <option value="slow">Slow mover</option>
             <option value="review">Needs review</option>
           </select>
           <select id="f-cost" aria-label="Cost">
@@ -125,10 +125,11 @@
           <h2 id="detail-name">Card</h2>
           <button id="detail-close" class="ghost tiny" type="button">Close</button>
         </div>
-        <p id="detail-empty" class="hint">Select a card. History is every ledger row for that Waitlist record.</p>
+        <p id="detail-empty" class="hint">Select a card to compare current stock with its recorded history.</p>
         <div id="detail-body" hidden>
           <dl class="kv" id="detail-id"></dl>
           <h3 class="section-title">Movement history</h3>
+          <p id="history-note" class="hint">Recorded history may omit stock changes. Current quantity is read separately from Airtable.</p>
           <div class="table-wrap">
             <table class="admin-table">
               <thead><tr><th>When (ET)</th><th class="num">Δ</th><th class="num">Qty</th><th>Source</th></tr></thead>

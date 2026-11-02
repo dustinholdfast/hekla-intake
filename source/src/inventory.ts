@@ -417,7 +417,7 @@ export type InventoryRow = {
   unitCostCents: number | null;
   marketPriceUsd: number | null;
   daysInStock: number | null;
-  state: "In hand" | "Sold";
+  state: "In hand" | "Sold" | "Missing";
   wantQty: number | null;
   dateAcquired: null;
   firstSeen: string | null;
@@ -430,7 +430,7 @@ export type LiabilitySummary = { outstandingCents: number; customers: number; en
 export type InventoryPayload = {
   phase: 1;
   readOnly: true;
-  onHandSource: "ledger";
+  onHandSource: "ledger" | "airtable";
   rows: InventoryRow[];
   totals: { units: number; rows: number; unknownCostUnits: number; knownCostUnits: number; flags: number; low: number; overstock: number; slow: number; needsReview: number };
   facets: { games: string[]; conditions: string[]; finishes: string[] };

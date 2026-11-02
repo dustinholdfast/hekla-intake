@@ -10,6 +10,7 @@ import {
   type PrintingRef,
 } from "./fields.ts";
 import { effectiveGame, finishQueryValues, readFinish, sameFinish, setName, type Game, type Status } from "./sets.ts";
+import { scanInventoryStock } from "./stock-scan.ts";
 
 const READ_FIELDS = [
   "Card Name", "Resolved Name", "Game", "Set #", "Set Identifier", "Collector Number",
@@ -35,6 +36,22 @@ export type Summary = { listedQty: number; waitlistQty: number; counts: Record<S
 function tokenOf(env: Env): string { const token = env.AIRTABLE_API_KEY?.trim() || env.AIRTABLE_PAT?.trim(); if (!token) throw new AirtableError("Set AIRTABLE_API_KEY (or AIRTABLE_PAT) before intake can read or write.", 503); return token; }
 function endpoint(env: Env): string { const baseId = env.AIRTABLE_BASE_ID; const tableId = env.AIRTABLE_TABLE_ID; return `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableId)}`; }
 function formulaString(value: string): string { return `'${value.replace(/'/g, "''")}'`; }
+
+/** Always use the resolved tenant base/table, never the fixed opening-import base. */
+export async function inventoryStock(env: Env, recordId?: string) {
+  if (!env.TENANT_ID || !env.AIRTABLE_BASE_ID || !env.AIRTABLE_TABLE_ID) throw new AirtableError('Choose a configured organization before reading inventory.', 503);
+  const url = new URL(endpoint(env));
+  if (recordId !== undefined) {
+    if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError('That is not a stock row.', 400);
+    url.searchParams.set('filterByFormula', `RECORD_ID()='${recordId}'`);
+  }
+  try {
+    return await scanInventoryStock(url.toString(), url => airtable(env, url, { signal: AbortSignal.timeout(10000) }));
+  } catch (error) {
+    if (error instanceof AirtableError) throw error;
+    throw new AirtableError(error instanceof Error ? error.message : 'Current stock could not be read. Refresh inventory.', 503);
+  }
+}
 
 let lastAirtableCall = 0;
 async function throttle(): Promise<void> { const wait = lastAirtableCall + 220 - Date.now(); if (wait > 0) await new Promise((r) => setTimeout(r, wait)); lastAirtableCall = Date.now(); }

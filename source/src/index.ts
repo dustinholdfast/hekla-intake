@@ -3,6 +3,7 @@ import { Hono, type Context } from "hono";
 import {
   AirtableError,
   readStock,
+  inventoryStock,
   reconcileRows,
   stockCardsByIds,
   writeStock,
@@ -32,7 +33,8 @@ import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
 import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
 import { getState, listSales, setState } from "./salesdb.ts";
-import { buildDetail, buildInventory, onHand, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter, type MovementDraft, type WaitlistInput } from "./inventory.ts";
+import { onHand, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter, type MovementDraft, type WaitlistInput } from "./inventory.ts";
+import { buildLiveDetail, buildLiveInventory, InventoryReadError } from "./live-inventory.ts";
 import { isMissingLedger, isMissingPhase2Settings, listMovements, readInventorySettings, readThresholds, saveInventorySettings } from "./inventorydb.ts";
 import { applyReceiveWrites, fetchSellRequest, matchLines, planAcceptance, planReceipt, planRedemption, splitCardList, type CatalogLine, type SellRequestView } from "./purchases.ts";
 import { customerBalance, isMissingPurchases, listCredit, loadPurchase, readLiability, saveAcceptance, saveReceipt, saveRedemption } from "./purchasesdb.ts";
@@ -765,9 +767,11 @@ app.get("/api/inventory/:recordId", async (c) => {
   const recordId = c.req.param("recordId");
   if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) return c.json({ error: "That is not a stock row." }, 400);
   try {
-    const loaded = await loadLedger(c);
-    const detail = buildDetail(loaded.movements, loaded.buyList, loaded.thresholds, loaded.now, recordId);
-    if (!detail) return c.json({ error: "That card has no ledger rows yet." }, 404);
+    const [loaded, stock] = await Promise.all([loadLedger(c, recordId), inventoryStock(c.var.tenantEnv, recordId)]);
+    const payload = buildLiveInventory({ tenantId: c.var.tenant.id, stock, movements: loaded.movements,
+      buyList: loaded.buyList, thresholds: loaded.thresholds, wantQtyState: loaded.wantQtyState });
+    const detail = buildLiveDetail(payload, loaded.movements, recordId);
+    if (!detail) return c.json({ error: "That stock row was not found." }, 404);
     return c.json(detail);
   } catch (error) {
     if (isMissingLedger(error)) return c.json({ error: "The inventory ledger is not in this database yet. Apply migration 0008 before go-live. Nothing was written." }, 503);
@@ -1263,6 +1267,7 @@ app.get("*", async (c) => {
 });
 
 app.onError((error, c) => {
+  if (error instanceof InventoryReadError) return c.json({ error: error.message }, 503);
   if (error instanceof ConnectionError) return c.json({ error: error.message }, error.status === 503 ? 503 : error.status === 409 ? 409 : 400);
   if (error instanceof CardTraderError) return c.json({ error: error.message }, 502);
   if (error instanceof AirtableError) {
@@ -1289,8 +1294,8 @@ function inventoryQuery(query: Record<string, string>): InventoryFilter {
 }
 
 /** Ledger rows plus an optional read-only Buy List match. Never writes Airtable. */
-async function loadLedger(c: AppContext): Promise<{ movements: Awaited<ReturnType<typeof listMovements>>; buyList: BuyListInput[]; thresholds: Awaited<ReturnType<typeof readThresholds>>; wantQtyState: "matched" | "unread"; now: Date }> {
-  const movements = await listMovements(c.env, c.var.tenant.id);
+async function loadLedger(c: AppContext, recordId: string | null = null): Promise<{ movements: Awaited<ReturnType<typeof listMovements>>; buyList: BuyListInput[]; thresholds: Awaited<ReturnType<typeof readThresholds>>; wantQtyState: "matched" | "unread"; now: Date }> {
+  const movements = await listMovements(c.env, c.var.tenant.id, recordId);
   const thresholds = await readThresholds(c.env, c.var.tenant.id);
   let buyList: BuyListInput[] = [];
   let wantQtyState: "matched" | "unread" = "unread";
@@ -1364,14 +1369,15 @@ async function openSellRequest(c: AppContext, sellRequestId: string): Promise<{ 
 }
 
 async function inventoryPayload(c: AppContext, filter: InventoryFilter) {
-  const loaded = await loadLedger(c);
+  const [loaded, stock] = await Promise.all([loadLedger(c), inventoryStock(c.var.tenantEnv)]);
   let liability = null;
   try {
     liability = await readLiability(c.env, c.var.tenant.id);
   } catch (error) {
     if (!isMissingPurchases(error)) throw error;
   }
-  return buildInventory(loaded.movements, loaded.buyList, loaded.thresholds, loaded.now, filter, loaded.wantQtyState, liability);
+  return buildLiveInventory({ tenantId: c.var.tenant.id, stock, movements: loaded.movements,
+    buyList: loaded.buyList, thresholds: loaded.thresholds, filter, wantQtyState: loaded.wantQtyState, liability });
 }
 
 function backgroundEnrich(c: AppContext, id: string): void {

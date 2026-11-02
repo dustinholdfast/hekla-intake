@@ -3,9 +3,10 @@ import { createServer, type IncomingMessage } from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildDetail, buildInventory, type InventoryFilter } from "./inventory.ts";
+import { type InventoryFilter, type WaitlistInput } from "./inventory.ts";
+import { buildLiveDetail, buildLiveInventory } from "./live-inventory.ts";
 import { defaultInventorySettings, presentSettings, SettingsError, validateInventorySettings } from "./inventory-settings.ts";
-import { fixtureBuyList, fixtureMovements, FIXTURE_TENANT } from "./inventory-fixtures.ts";
+import { fixtureBuyList, fixtureMovements, fixtureRows, FIXTURE_TENANT } from "./inventory-fixtures.ts";
 import { exampleAcceptInput, EXAMPLE_RECEIVED_ON, EXAMPLE_SR_ID } from "./purchases-fixtures.ts";
 import { planAcceptance, PurchaseBook } from "./purchases.ts";
 
@@ -14,6 +15,13 @@ const publicDir = path.join(root, "public");
 const port = Number(process.env.PORT || 47232);
 const now = new Date("2026-10-27T15:00:00.000Z");
 let movements = fixtureMovements(now);
+// A local operational snapshot deliberately differs from the recorded openings.
+const currentStock = fixtureRows(now).filter(row => row.id !== 'recFIXTURETIDE002');
+currentStock[0]!.fields.Qty = 3;
+currentStock.push({ id: 'recNEWINTAKE00001', createdTime: now.toISOString(), fields: {
+  'Card Name': 'Example newly received card', Game: 'Lorcana', 'Set #': '1', 'Collector Number': '99',
+  Finish: 'Normal', Condition: 'NM', Qty: 2, Status: 'Waitlist',
+} });
 const buyList = fixtureBuyList();
 let settings = defaultInventorySettings();
 let settingsStored = false;
@@ -97,6 +105,19 @@ const server = createServer(async (req, res) => {
     });
     if (!received.ok) { sendJson(res, 400, { error: received.error }); return; }
     movements = movements.concat(received.plan.movements);
+    for (const movement of received.plan.movements) {
+      const existing = currentStock.find(row => row.id === movement.recordId);
+      if (existing) existing.fields.Qty = Number(existing.fields.Qty ?? 0) + movement.delta;
+      else if (movement.snapshot) {
+        const snap = movement.snapshot;
+        const made: WaitlistInput = { id: movement.recordId, createdTime: now.toISOString(), fields: {
+          'Card Name': snap.cardName, Game: snap.game, 'Set #': snap.setNumber, 'Set Identifier': snap.setIdentifier,
+          'Collector Number': snap.collectorNumber, Finish: snap.finishRaw, Condition: snap.condition,
+          Language: snap.language, Qty: movement.qtyAfter, Status: snap.status,
+        } };
+        currentStock.push(made);
+      }
+    }
     sendJson(res, 200, {
       purchase: received.plan.purchase,
       movementsInserted: received.movementsInserted,
@@ -132,14 +153,19 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (url.pathname === "/api/inventory") {
-    const body = JSON.stringify(buildInventory(movements, buyList, settings.thresholds, now, filterOf(url), "matched", purchases.liability(FIXTURE_TENANT)));
+    const body = JSON.stringify(buildLiveInventory({ tenantId: FIXTURE_TENANT,
+      stock: { rows: currentStock, startedAt: now.toISOString(), completedAt: now.toISOString() },
+      movements, buyList, thresholds: settings.thresholds, filter: filterOf(url), wantQtyState: 'matched', liability: purchases.liability(FIXTURE_TENANT) }));
     res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     res.end(body);
     return;
   }
   const detail = /^\/api\/inventory\/(rec[A-Za-z0-9]{14})$/.exec(url.pathname);
   if (detail?.[1]) {
-    const body = buildDetail(movements, buyList, settings.thresholds, now, detail[1]);
+    const payload = buildLiveInventory({ tenantId: FIXTURE_TENANT,
+      stock: { rows: currentStock, startedAt: now.toISOString(), completedAt: now.toISOString() },
+      movements, buyList, thresholds: settings.thresholds, wantQtyState: 'matched' });
+    const body = buildLiveDetail(payload, movements, detail[1]);
     res.writeHead(body ? 200 : 404, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     res.end(JSON.stringify(body ?? { error: "That card is not in the fixture ledger." }));
     return;

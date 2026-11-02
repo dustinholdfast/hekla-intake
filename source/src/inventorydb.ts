@@ -84,12 +84,31 @@ function toMovement(row: Record<string, unknown>): MovementDraft {
   };
 }
 
-export async function listMovements(env: Env, tenantId: string): Promise<MovementDraft[]> {
-  const rows = await db(env).query(
-    `select ${MOVEMENT_COLUMNS} from stock_movements where tenant_id = $1 order by created_at, id limit 20000`,
-    [tenantId],
-  );
-  return rows.map(toMovement);
+type HistoryQuery = (query: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
+
+/** Bound the scan to the starting high-water ID, page by ID, and keep bigint IDs as strings.
+ * There is no silent total-history cutoff. An interrupted page fails the whole read. */
+export async function readMovementHistory(tenantId: string, query: HistoryQuery, recordId: string | null = null): Promise<MovementDraft[]> {
+  const bound = await query('select coalesce(max(id), 0)::text as high_water from stock_movements where tenant_id = $1 and ($2::text is null or record_id = $2)', [tenantId, recordId]);
+  const highWater = String(bound[0]?.high_water ?? '');
+  if (!/^\d+$/.test(highWater)) throw new Error('The inventory history bound could not be read.');
+  let cursor = '0';
+  const all: Record<string, unknown>[] = [];
+  while (BigInt(cursor) < BigInt(highWater)) {
+    const page = await query(`select ${MOVEMENT_COLUMNS} from stock_movements
+      where tenant_id = $1 and id > $2::bigint and id <= $3::bigint and ($4::text is null or record_id = $4) order by id limit 1000`, [tenantId, cursor, highWater, recordId]);
+    if (!page.length) throw new Error('Inventory history changed during the read. Refresh inventory.');
+    const next = String(page.at(-1)!.id);
+    if (!/^\d+$/.test(next) || BigInt(next) <= BigInt(cursor) || BigInt(next) > BigInt(highWater)) throw new Error('Inventory history pagination did not advance.');
+    all.push(...page);
+    cursor = next;
+  }
+  all.sort((a, b) => iso(a.created_at).localeCompare(iso(b.created_at)) || (BigInt(String(a.id)) < BigInt(String(b.id)) ? -1 : 1));
+  return all.map(toMovement);
+}
+
+export async function listMovements(env: Env, tenantId: string, recordId: string | null = null): Promise<MovementDraft[]> {
+  return readMovementHistory(tenantId, (query, params) => db(env).query(query, params), recordId);
 }
 
 export async function readThresholds(env: Env, tenantId: string): Promise<Thresholds> {

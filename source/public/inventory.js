@@ -1,5 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const state = { payload: null, selected: "", opened: false };
+let loadVersion = 0;
+let detailVersion = 0;
 
 document.addEventListener("DOMContentLoaded", () => {
   $("logout").addEventListener("click", () => { if (document.documentElement.dataset.preview === "1") return; signOut(); });
@@ -83,10 +85,22 @@ function badge(parent, text, kind) {
 }
 
 async function load() {
+  const version = ++loadVersion;
+  ++detailVersion;
   $("inventory-error").textContent = "";
-  const { response, data } = await api(`/api/inventory?${query()}`);
-  if (!response.ok) { $("inventory-error").textContent = data.error || "Could not load inventory."; return; }
+  $("accuracy-note").textContent = "Reading current stock…";
+  let result;
+  try { result = await api(`/api/inventory?${query()}`); }
+  catch { if (version === loadVersion) unavailable("Current stock could not be reached. Refresh to try again."); return; }
+  if (version !== loadVersion) return;
+  const { response, data } = result;
+  if (!response.ok) { unavailable(data.error || "Could not load inventory."); return; }
   state.payload = data;
+  const live = data.onHandSource === "airtable";
+  const accuracy = data.accuracy;
+  $("accuracy-note").textContent = live
+    ? `Stock read ${et(data.generatedAt)}. ${accuracy.different} quantity or identity differences · ${accuracy.unrecorded} rows without recorded history · ${accuracy.missing} records missing from Airtable. History does not yet cover every stock change. Slow-mover flags are unavailable until sales history is complete.`
+    : "Fixture quantities from recorded movements. This is not a live stock read.";
   $("tcg-note").textContent = data.placeholders.tcgplayerLevel;
   const liability = data.liability;
   if (liability && Number.isInteger(liability.outstandingCents)) {
@@ -101,13 +115,13 @@ async function load() {
   if (document.documentElement.dataset.preview === "1" && !$("sr-id").value) $("sr-id").value = "recSRPhase3Ex0012";
   $("event-note").textContent = data.placeholders.eventSale;
   $("units").textContent = String(data.totals.units);
-  $("units-note").textContent = `Across ${data.totals.rows} stock rows · from the ledger`;
+  $("units-note").textContent = `Across ${data.totals.rows} stock rows · from ${live ? "Airtable" : "fixture movements"}`;
   $("unknown-cost").textContent = String(data.totals.unknownCostUnits);
-  $("cost-note").textContent = `${data.totals.knownCostUnits} known · existing stock is never backfilled`;
+  $("cost-note").textContent = `${data.totals.knownCostUnits} known units · ${data.totals.unknownCostUnits} unknown · mixed-cost rows split by quantity`;
   $("flag-count").textContent = String(data.totals.flags);
   $("flag-note").textContent = `${data.totals.low} low · ${data.totals.overstock} overstock · ${data.totals.slow} slow · ${data.totals.needsReview} review`;
   const t = data.thresholds;
-  $("threshold-note").textContent = `Low: Want Qty is set and on hand is ${t.lowStockOnHand}. Overstock: above Want Qty, or more than ${t.overstockSkuLimit} while the level setting is ${t.tcgplayerLevel} (a default, not a connected account). Slow: ${t.slowMoverDays} days with no sale. The Days column stays blank because Date Acquired is blank; a slow flag uses first seen, labeled as an estimate.`;
+  $("threshold-note").textContent = `Low: Want Qty is set and on hand is at most ${t.lowStockOnHand}. Overstock: above Want Qty, or more than ${t.overstockSkuLimit} while the level setting is ${t.tcgplayerLevel}. Acquisition dates are not inferred from row creation. Sold or skipped rows with a positive quantity need review.`;
   fillSelect("f-game", data.facets.games, $("f-game").value, "All games");
   fillSelect("f-condition", data.facets.conditions, $("f-condition").value, "Any condition");
   fillSelect("f-finish", data.facets.finishes, $("f-finish").value, "Any finish");
@@ -115,7 +129,7 @@ async function load() {
   body.replaceChildren();
   if (!data.rows.length) {
     const tr = document.createElement("tr");
-    const td = cell(tr, "", data.totals.rows ? "Nothing matches these filters." : "No opening entries in the ledger yet. Apply migration 0008 and run the opening-entry script before go-live.", "empty");
+    const td = cell(tr, "", data.totals.rows ? "Nothing matches these filters." : "No stock rows found in this organization's Airtable table.", "empty");
     td.colSpan = 9;
     body.appendChild(tr);
   }
@@ -123,9 +137,22 @@ async function load() {
   if (!state.opened && data.rows[0]) state.selected = data.rows[0].recordId;
   else if (state.selected && !visible) state.selected = data.rows[0]?.recordId || "";
   for (const row of data.rows) body.appendChild(renderRow(row));
-  $("rows-meta").textContent = `${data.rows.length} shown · on hand ${data.onHandSource} · ${data.wantQtyState === "matched" ? "Want Qty read from Buy List" : "Want Qty not loaded"}`;
+  $("rows-meta").textContent = `${data.rows.length} shown · quantities from ${live ? "Airtable" : "fixture movements"} · ${data.wantQtyState === "matched" ? "Want Qty read from Buy List" : "Want Qty not loaded"}`;
   if (state.selected) await loadDetail(state.selected);
   else select("");
+}
+
+function unavailable(message) {
+  state.payload = null;
+  ++detailVersion;
+  $("inventory-error").textContent = message;
+  $("accuracy-note").textContent = "Current inventory is unavailable. Previous totals have been cleared.";
+  for (const id of ["units", "unknown-cost", "flag-count", "credit-total"]) $(id).textContent = "—";
+  for (const id of ["units-note", "cost-note", "flag-note", "credit-note", "rows-meta"]) $(id).textContent = "";
+  $("rows").replaceChildren();
+  $("detail-body").hidden = true;
+  $("detail-empty").hidden = false;
+  $("detail-name").textContent = "Card";
 }
 
 function renderRow(row) {
@@ -168,13 +195,14 @@ function renderRow(row) {
   cell(tr, "On hand", row.onHand, "num");
   const cost = cell(tr, "Cost/unit", row.unitCostCents == null ? "unknown" : money(row.unitCostCents / 100), row.unitCostCents == null ? "num unk" : "num");
   if (row.unitCostCents == null) cost.classList.add("unk");
+  if (row.knownCostQty != null) cost.title = `${row.knownCostQty} units with known cost; ${row.unknownCostQty} units with unknown cost. The unit price applies only to known-cost units.`;
   cell(tr, "Market", money(row.marketPriceUsd), "num");
   const days = cell(tr, "Days", "—", "num");
   days.title = "Date acquired is blank, so days in stock are unknown.";
   const stateCell = cell(tr, "State", "");
   const flags = document.createElement("div");
   flags.className = "flag-row";
-  badge(flags, row.state, row.state === "Sold" ? "Sold" : "ok");
+  badge(flags, row.state, row.state === "Missing" ? "bad" : row.state === "Sold" ? "Sold" : "ok");
   if (row.flags.low) badge(flags, "low", "bad");
   if (row.flags.overstock) badge(flags, row.flags.overstockBy ? `overstock +${row.flags.overstockBy}` : "overstock", "gold");
   if (row.flags.slow) badge(flags, row.flags.ageSource === "first_seen" ? `slow · ${row.flags.daysWithoutSale}d first seen` : "slow", "warn");
@@ -195,6 +223,7 @@ function thumbText(game) {
 }
 
 async function select(recordId) {
+  ++detailVersion;
   state.opened = true;
   state.selected = recordId;
   for (const tr of $("rows").querySelectorAll("tr")) tr.setAttribute("aria-selected", tr.dataset.recordId === recordId ? "true" : "false");
@@ -208,7 +237,13 @@ async function select(recordId) {
 }
 
 async function loadDetail(recordId) {
-  const { response, data } = await api(`/api/inventory/${recordId}`);
+  const version = ++detailVersion;
+  $("detail-body").hidden = true;
+  let result;
+  try { result = await api(`/api/inventory/${recordId}`); }
+  catch { if (version === detailVersion) $("inventory-error").textContent = "Could not load that card. Try again."; return; }
+  if (version !== detailVersion || state.selected !== recordId) return;
+  const { response, data } = result;
   if (!response.ok) { $("inventory-error").textContent = data.error || "Could not load that card."; return; }
   const row = data.row;
   for (const tr of $("rows").querySelectorAll("tr")) tr.setAttribute("aria-selected", tr.dataset.recordId === recordId ? "true" : "false");
@@ -219,7 +254,8 @@ async function loadDetail(recordId) {
   dl.replaceChildren();
   const lines = [
     ["Identity", [row.game, row.setLabel, row.collectorNumber ? `#${row.collectorNumber}` : "", row.finish || row.finishRaw, row.condition, row.language].filter(Boolean).join(" · ")],
-    ["On hand", `${row.onHand} from the ledger`],
+    ["On hand", row.state === "Missing" ? "Not present in Airtable; not counted as current stock" : `${row.onHand} from ${data.onHandSource === "airtable" ? "Airtable" : "fixture movements"}`],
+    ["Recorded quantity", row.accuracy ? (row.accuracy.ledgerQty == null ? "No recorded history" : String(row.accuracy.ledgerQty)) : String(row.onHand)],
     ["Want Qty", row.wantQty == null ? "Not tracked" : String(row.wantQty)],
     ["Cost", row.unitCostCents == null ? "unknown" : money(row.unitCostCents / 100)],
     ["Date acquired", "Blank"],
@@ -237,6 +273,14 @@ async function loadDetail(recordId) {
   }
   const history = $("history");
   history.replaceChildren();
+  $("history-note").textContent = data.historyComplete === false
+    ? `Recorded movements only; some stock changes may be missing. Current stock was read ${et(data.generatedAt)}.`
+    : "Fixture movement history.";
+  if (!data.movements.length) {
+    const tr = document.createElement("tr");
+    cell(tr, "", "No movements have been recorded for this stock row.").colSpan = 4;
+    history.appendChild(tr);
+  }
   for (const movement of data.movements) {
     const tr = document.createElement("tr");
     cell(tr, "When (ET)", et(movement.createdAt));
