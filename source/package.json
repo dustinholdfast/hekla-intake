@@ -9,7 +9,8 @@
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "types": "wrangler types",
     "deploy": "wrangler deploy",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm test && npm run test:postgres",
+    "test:postgres": "node --experimental-strip-types --test integration/sales-postgres.test.ts",
     "opening": "node --experimental-strip-types src/opening-cli.ts",
     "schema": "node --experimental-strip-types src/waitlist-schema-cli.ts"
   },
@@ -19,6 +20,7 @@
     "hono": "^4.9.6"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.14",
     "@types/node": "^26.6.3",
     "typescript": "^5.9.2",
     "wrangler": "^4.40.0"

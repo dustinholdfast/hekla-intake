@@ -6,8 +6,20 @@ type Row = Record<string, unknown>;
 const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string).toISOString());
 const num = (v: unknown): number | null => (v == null ? null : Number(v));
 
+export type SaleQuery = (query: string, params: unknown[]) => Promise<Row[]>;
+const PENDING_COLUMNS = `s.id, s.record_id, s.qty, s.platform, s.external_order_id, s.order_code, s.card_name,
+  s.qty_before, s.qty_target, s.decrement_started_at`;
+function pendingRow(r: Row): PendingDecrement {
+  return { id: Number(r.id), recordId: String(r.record_id), qty: Number(r.qty), platform: r.platform as Platform,
+    externalOrderId: String(r.external_order_id), orderCode: (r.order_code as string) ?? null, cardName: (r.card_name as string) ?? null,
+    qtyBefore: num(r.qty_before), qtyTarget: num(r.qty_target), started: r.decrement_started_at != null };
+}
 export function neonSaleStore(env: Env): SaleStore {
-  const sql = db(env);
+  return saleStoreWithQuery((query, params) => db(env).query(query, params));
+}
+/** Query injection allows the production SQL transitions to be checked against an isolated Postgres engine. */
+export function saleStoreWithQuery(query: SaleQuery): SaleStore {
+  const sql = { query };
   return {
     async insertLines(tenantId, lines) {
       if (lines.length === 0) return 0;
@@ -34,13 +46,13 @@ export function neonSaleStore(env: Env): SaleStore {
     async markCancelled(tenantId, platform, externalOrderId, at, state) {
       const rows = await sql.query(
         `update sales set cancelled_at = $4, order_state = $5,
-           needs_review = case when decrement_owner = 'hekla' and decremented_at is not null
-             then 'Cancelled after Hekla lowered Qty. If the cards are back in stock, add them back in Airtable.' else needs_review end
+           needs_review = case when decrement_owner = 'hekla' and decrement_started_at is not null
+             then 'Cancelled during or after a stock update. Check the sale and Qty before restocking.' else needs_review end
          where tenant_id = $1 and platform = $2 and external_order_id = $3 and cancelled_at is null
-         returning id, record_id, qty, card_name, decrement_owner, decremented_at`,
+         returning id, record_id, qty, card_name, decrement_owner, decrement_started_at`,
         [tenantId, platform, externalOrderId, at, state],
       );
-      return rows.filter((r) => r.decrement_owner === "hekla" && r.decremented_at != null).map((r) => ({ id: Number(r.id), recordId: (r.record_id as string) ?? null, qty: Number(r.qty), cardName: (r.card_name as string) ?? null }));
+      return rows.filter((r) => r.decrement_owner === "hekla" && r.decrement_started_at != null).map((r) => ({ id: Number(r.id), recordId: (r.record_id as string) ?? null, qty: Number(r.qty), cardName: (r.card_name as string) ?? null }));
     },
     async pendingDecrements(tenantId, limit) {
       const rows = await sql.query(
@@ -51,25 +63,58 @@ export function neonSaleStore(env: Env): SaleStore {
          order by sold_at, id limit $2`,
         [tenantId, limit],
       );
-      return rows.map((r): PendingDecrement => ({
-        id: Number(r.id), recordId: String(r.record_id), qty: Number(r.qty), platform: r.platform as Platform, externalOrderId: String(r.external_order_id),
-        orderCode: (r.order_code as string) ?? null, cardName: (r.card_name as string) ?? null, qtyBefore: num(r.qty_before), qtyTarget: num(r.qty_target), started: r.decrement_started_at != null,
-      }));
+      return rows.map(pendingRow);
     },
-    async startDecrement(id, before, target) {
-      await sql.query("update sales set decrement_started_at = now(), qty_before = $2, qty_target = $3 where id = $1", [id, before, target]);
+    async pendingDecrement(scope, id) {
+      const rows = await sql.query(`select ${PENDING_COLUMNS} from sales s join stock_locks l
+        on l.tenant_id = s.tenant_id and l.record_id = s.record_id
+        where s.tenant_id = $1 and s.record_id = $2 and s.id = $3 and l.holder = $4 and l.expires_at > now()
+          and s.decrement_owner = 'hekla' and s.decremented_at is null and s.cancelled_at is null and s.needs_review is null`,
+        [scope.tenantId, scope.recordId, id, scope.holder]);
+      return rows[0] ? pendingRow(rows[0]) : null;
     },
-    async finishDecrement(id, oversold, review) {
-      await sql.query("update sales set decremented_at = now(), oversold = $2, needs_review = coalesce($3, needs_review) where id = $1", [id, oversold, review]);
+    async startDecrement(scope, id, before, target) {
+      const rows = await sql.query(`with lease as (
+        update stock_locks set expires_at = now() + interval '60 seconds'
+        where tenant_id = $1 and record_id = $2 and holder = $4 and expires_at > now() returning tenant_id, record_id
+      ) update sales s set decrement_started_at = coalesce(s.decrement_started_at, now()), qty_before = $5, qty_target = $6
+        from lease l where s.tenant_id = l.tenant_id and s.record_id = l.record_id and s.id = $3
+          and s.decrement_owner = 'hekla' and s.decremented_at is null and s.cancelled_at is null and s.needs_review is null
+          and (s.decrement_started_at is null or (s.qty_before = $5 and s.qty_target = $6))
+          and not exists (select 1 from sales other where other.tenant_id = s.tenant_id and other.record_id = s.record_id
+            and other.id <> s.id and other.decrement_owner = 'hekla' and other.decrement_started_at is not null and other.decremented_at is null)
+        returning s.id`, [scope.tenantId, scope.recordId, id, scope.holder, before, target]);
+      return rows.length > 0;
     },
-    async flag(id, review) {
-      await sql.query("update sales set needs_review = $2 where id = $1", [id, review]);
+    async finishDecrement(scope, id, oversold, review) {
+      const rows = await sql.query(`update sales s set decremented_at = now(), oversold = $5, needs_review = $6
+        from stock_locks l where s.tenant_id = $1 and s.record_id = $2 and s.id = $3
+          and l.tenant_id = s.tenant_id and l.record_id = s.record_id and l.holder = $4 and l.expires_at > now()
+          and s.decrement_owner = 'hekla' and s.decrement_started_at is not null
+          and s.decremented_at is null and s.cancelled_at is null and s.needs_review is null returning s.id`,
+        [scope.tenantId, scope.recordId, id, scope.holder, oversold, review]);
+      return rows.length > 0;
+    },
+    async flag(scope, id, review) {
+      const rows = await sql.query(`update sales s set needs_review = $5 from stock_locks l
+        where s.tenant_id = $1 and s.record_id = $2 and s.id = $3 and s.decrement_owner = 'hekla' and s.decremented_at is null
+          and l.tenant_id = s.tenant_id and l.record_id = s.record_id and l.holder = $4 and l.expires_at > now()
+        returning s.id`, [scope.tenantId, scope.recordId, id, scope.holder, review]);
+      return rows.length > 0;
     },
     async acquireLock(tenantId, recordId, holder, seconds) {
+      // A timed-out lease with a persisted plan can still have an external request in flight.
+      // Mark that uncertainty for operators; do not give another worker permission to overwrite it.
+      await sql.query(`update sales s set needs_review = coalesce(s.needs_review, 'Stock lease expired during an unfinished update. Check Airtable and the sale before clearing review.')
+        from stock_locks l where s.tenant_id = $1 and s.record_id = $2 and l.tenant_id = s.tenant_id and l.record_id = s.record_id
+          and l.expires_at <= now() and s.decrement_owner = 'hekla' and s.decrement_started_at is not null and s.decremented_at is null`, [tenantId, recordId]);
       const rows = await sql.query(
         `insert into stock_locks (tenant_id, record_id, holder, expires_at) values ($1, $2, $3, now() + make_interval(secs => $4))
          on conflict (tenant_id, record_id) do update set holder = excluded.holder, expires_at = excluded.expires_at
-           where stock_locks.expires_at < now() or stock_locks.holder = excluded.holder
+           where (stock_locks.expires_at > now() and stock_locks.holder = excluded.holder)
+             or (stock_locks.expires_at <= now() and not exists (
+               select 1 from sales s where s.tenant_id = $1 and s.record_id = $2 and s.decrement_owner = 'hekla'
+                 and s.decrement_started_at is not null and s.decremented_at is null))
          returning holder`,
         [tenantId, recordId, holder, seconds],
       );

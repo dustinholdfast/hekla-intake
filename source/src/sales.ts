@@ -213,16 +213,18 @@ export type PendingDecrement = {
   id: number; recordId: string; qty: number; platform: Platform; externalOrderId: string; orderCode: string | null;
   cardName: string | null; qtyBefore: number | null; qtyTarget: number | null; started: boolean;
 };
+export type DecrementScope = { tenantId: string; recordId: string; holder: string };
 
 export interface SaleStore {
   /** Inserts new lines and ignores ones already logged. Returns how many were new. */
   insertLines(tenantId: string, lines: SaleLine[]): Promise<number>;
-  /** Marks an order's lines cancelled. Returns the lines whose Qty had already been lowered by Hekla. */
+  /** Marks an order's lines cancelled. Returns Hekla updates already started or finished, for review. */
   markCancelled(tenantId: string, platform: Platform, externalOrderId: string, at: string, state: string): Promise<{ id: number; recordId: string | null; qty: number; cardName: string | null }[]>;
   pendingDecrements(tenantId: string, limit: number): Promise<PendingDecrement[]>;
-  startDecrement(id: number, before: number, target: number): Promise<void>;
-  finishDecrement(id: number, oversold: boolean, review: string | null): Promise<void>;
-  flag(id: number, review: string): Promise<void>;
+  pendingDecrement(scope: DecrementScope, id: number): Promise<PendingDecrement | null>;
+  startDecrement(scope: DecrementScope, id: number, before: number, target: number): Promise<boolean>;
+  finishDecrement(scope: DecrementScope, id: number, oversold: boolean, review: string | null): Promise<boolean>;
+  flag(scope: DecrementScope, id: number, review: string): Promise<boolean>;
   acquireLock(tenantId: string, recordId: string, holder: string, seconds: number): Promise<boolean>;
   releaseLock(tenantId: string, recordId: string, holder: string): Promise<void>;
 }
@@ -240,50 +242,84 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Lowers the shared Qty for every Hekla-owned sale not yet applied, one row at a time under a lease.
- * Safe to run from a webhook and a cron at the same moment: the lease stops two runs touching one row, and the
- * started/target columns let a run that died half-way be finished without lowering the Qty twice.
+ * Discovery rows are only candidates: reload after locking and after the external read. Every database
+ * transition checks the live lease and pending state. Unknown writes and expired in-flight leases require review.
  */
 export async function applyPendingDecrements(store: SaleStore, stock: StockRecord, tenantId: string, opts: { limit?: number; holder?: string; lockWaitMs?: number } = {}): Promise<DecrementResult> {
   const result: DecrementResult = { applied: 0, oversold: 0, skipped: 0, flagged: 0, alerts: [] };
   const holder = opts.holder ?? crypto.randomUUID();
   const pending = await store.pendingDecrements(tenantId, opts.limit ?? 50);
-  for (const row of pending) {
+  for (const candidate of pending) {
+    const scope = { tenantId, recordId: candidate.recordId, holder };
     let locked = false;
     for (let attempt = 0; attempt < 3 && !locked; attempt++) {
-      locked = await store.acquireLock(tenantId, row.recordId, holder, 30);
+      locked = await store.acquireLock(tenantId, candidate.recordId, holder, 60);
       if (!locked && attempt < 2) await sleep(opts.lockWaitMs ?? 300);
     }
     if (!locked) { result.skipped++; continue; } // another run holds it; the next run picks this row up
+    let releaseSafe = true;
     try {
+      let row = await store.pendingDecrement(scope, candidate.id);
+      if (!row) { result.skipped++; continue; }
       const current = await stock.read(row.recordId);
+      // Cancellation, completion, review state or lease ownership may have changed during the read.
+      row = await store.pendingDecrement(scope, candidate.id);
+      if (!row) { result.skipped++; continue; }
       if (current == null) {
-        await store.flag(row.id, "The Airtable row is gone, so its Qty could not be lowered.");
+        if (!await store.flag(scope, row.id, "The Airtable row is gone, so its Qty could not be lowered.")) { result.skipped++; continue; }
         result.flagged++;
         result.alerts.push(alertFor(row, `The Waitlist row ${row.recordId} for this sale no longer exists. Nothing was changed.`, `missing:${row.id}`));
         continue;
       }
+      if (row.started && (row.qtyBefore == null || row.qtyTarget == null)) {
+        if (await store.flag(scope, row.id, "The saved stock update is incomplete. Check the sale and stock before retrying.")) result.flagged++;
+        else result.skipped++;
+        continue;
+      }
       if (row.started && row.qtyBefore != null && row.qtyTarget != null) {
         const retry = resolveRetry(row.qtyBefore, row.qtyTarget, current);
-        if (retry === "done") { await store.finishDecrement(row.id, row.qtyBefore - row.qty < 0, null); result.applied++; continue; }
+        if (retry === "done") {
+          const oversold = row.qtyBefore < row.qty;
+          if (await store.finishDecrement(scope, row.id, oversold, oversold ? `Oversold by ${row.qty - row.qtyBefore}: Qty was ${row.qtyBefore}, this sale took ${row.qty}.` : null)) {
+            result.applied++;
+            if (oversold) {
+              result.oversold++;
+              result.alerts.push(alertFor(row, `This sale took ${row.qty} but Qty was ${row.qtyBefore}. Its completed stock update has been recovered; check fulfilment. Nothing was cancelled.`, `oversold:${row.id}`, true));
+            }
+          } else result.skipped++;
+          continue;
+        }
         if (retry === "conflict") {
-          await store.flag(row.id, `Qty was ${row.qtyBefore}, Hekla meant to set ${row.qtyTarget}, Airtable now shows ${current}. Check by hand.`);
+          if (!await store.flag(scope, row.id, `Qty was ${row.qtyBefore}, Hekla meant to set ${row.qtyTarget}, Airtable now shows ${current}. Check by hand.`)) { result.skipped++; continue; }
           result.flagged++;
           result.alerts.push(alertFor(row, `Hekla was lowering Qty for this sale when the row changed underneath it (was ${row.qtyBefore}, meant ${row.qtyTarget}, now ${current}). Nothing more was changed; please check the row.`, `conflict:${row.id}`));
           continue;
         }
       }
       const plan = planDecrement(current, row.qty);
-      await store.startDecrement(row.id, plan.before, plan.target);
-      await stock.write(row.recordId, plan.target);
+      if (!await store.startDecrement(scope, row.id, plan.before, plan.target)) { result.skipped++; continue; }
+      releaseSafe = false;
+      try { await stock.write(row.recordId, plan.target); }
+      catch {
+        const message = "The stock write outcome is unknown. Check Airtable and this sale before clearing review; Hekla will not retry it automatically.";
+        if (await store.flag(scope, row.id, message)) {
+          releaseSafe = true;
+          result.flagged++;
+          result.alerts.push(alertFor(row, message, `unknown-write:${row.id}`));
+        } else result.skipped++;
+        continue;
+      }
+      releaseSafe = true;
       const review = plan.oversold ? `Oversold by ${plan.shortBy}: Qty was ${plan.before}, this sale took ${row.qty}.` : null;
-      await store.finishDecrement(row.id, plan.oversold, review);
+      if (!await store.finishDecrement(scope, row.id, plan.oversold, review)) { result.skipped++; continue; }
       result.applied++;
       if (plan.oversold) {
         result.oversold++;
         result.alerts.push(alertFor(row, `This sale took ${row.qty} but the shared Qty was only ${plan.before}, so ${plan.shortBy} cop${plan.shortBy === 1 ? "y was" : "ies were"} sold that you may not have. Qty is now 0. Nothing was cancelled; decide whether to cancel or fulfil.`, `oversold:${row.id}`, true));
       }
     } finally {
-      await store.releaseLock(tenantId, row.recordId, holder).catch(() => undefined);
+      // If recording an unknown outcome also failed, leave the lease: expired in-flight work cannot be stolen.
+      if (releaseSafe) await store.releaseLock(tenantId, candidate.recordId, holder).catch(() => undefined);
     }
   }
   return result;

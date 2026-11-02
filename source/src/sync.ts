@@ -62,8 +62,8 @@ export async function ingestCardTraderOrders(env: Env, tenantId: string, orders:
       for (const line of undone) {
         alerts.push({
           key: `cancelled:${line.id}`,
-          subject: `Cancelled after Qty was lowered: ${line.cardName ?? line.recordId} · CardTrader order ${order.code ?? order.id}`,
-          text: `CardTrader order ${order.code ?? order.id} was cancelled after Hekla lowered the shared Qty by ${line.qty} for ${line.cardName ?? "this card"} (row ${line.recordId}).\nHekla does not add stock back on its own. If the cards are back on the shelf, raise Qty in Airtable; starfoil.store and CardTrader follow.`,
+          subject: `Cancelled during or after a stock update: ${line.cardName ?? line.recordId} · CardTrader order ${order.code ?? order.id}`,
+          text: `CardTrader order ${order.code ?? order.id} was cancelled during or after Hekla's stock update for ${line.qty} copies of ${line.cardName ?? "this card"} (row ${line.recordId}).\nCheck the sale and the actual stock before restocking. Hekla does not add stock back automatically.`,
         });
       }
       continue;

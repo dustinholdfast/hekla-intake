@@ -301,7 +301,7 @@ export async function readStock(env: Env, recordId: string): Promise<number | nu
 export async function writeStock(env: Env, recordId: string, qty: number): Promise<void> {
   if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
   const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
-  await airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields: stockFields(qty), typecast: false }) });
+  await airtable(env, url.toString(), { method: "PATCH", body: JSON.stringify({ fields: stockFields(qty), typecast: false }), signal: AbortSignal.timeout(10000) });
 }
 
 /** Optional Waitlist field holding the TCGplayer SKU (the "TCGplayer Id" in its CSV). Read only if the base has it. */

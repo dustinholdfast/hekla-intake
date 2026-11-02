@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   allocate, applyPendingDecrements, cardTraderLines, cardTraderOwner, csvCell, planDecrement, readSalesFilter, resolveRetry, salesCsv,
-  starfoilLines, totalsByPlatform, type PendingDecrement, type Platform, type SaleLine, type SaleRow, type SaleStore, type StockRecord,
+  starfoilLines, totalsByPlatform, type DecrementScope, type PendingDecrement, type Platform, type SaleLine, type SaleRow, type SaleStore, type StockRecord,
 } from "./sales.ts";
 
 const REC = "recAAAAAAAAAAAAAA";
@@ -110,7 +110,7 @@ class MemStore implements SaleStore {
     for (const r of this.rows) {
       if (r.tenantId !== tenantId || r.platform !== platform || r.externalOrderId !== orderId || r.cancelledAt) continue;
       r.cancelledAt = at;
-      if (r.decrementOwner === "hekla" && r.decrementedAt) { r.needsReview = "cancelled after decrement"; out.push({ id: r.id, recordId: r.recordId, qty: r.qty, cardName: r.cardName }); }
+      if (r.decrementOwner === "hekla" && r.startedAt) { r.needsReview = "cancelled during or after decrement"; out.push({ id: r.id, recordId: r.recordId, qty: r.qty, cardName: r.cardName }); }
     }
     return out;
   }
@@ -120,15 +120,41 @@ class MemStore implements SaleStore {
       .sort((a, b) => a.soldAt.localeCompare(b.soldAt) || a.id - b.id).slice(0, limit)
       .map((r) => ({ id: r.id, recordId: r.recordId!, qty: r.qty, platform: r.platform, externalOrderId: r.externalOrderId, orderCode: r.orderCode, cardName: r.cardName, qtyBefore: r.qtyBefore, qtyTarget: r.qtyTarget, started: r.startedAt }));
   }
-  async startDecrement(id: number, before: number, target: number) { const r = this.rows[id - 1]!; r.startedAt = true; r.qtyBefore = before; r.qtyTarget = target; }
-  async finishDecrement(id: number, oversold: boolean, review: string | null) {
-    if (this.failFinishOnce) { this.failFinishOnce = false; throw new Error("worker stopped"); }
-    const r = this.rows[id - 1]!; r.decrementedAt = true; r.oversold = oversold; r.needsReview = review ?? r.needsReview;
+  ownedRow(scope: DecrementScope, id: number) {
+    const row = this.rows.find(r => r.id === id && r.tenantId === scope.tenantId && r.recordId === scope.recordId && r.decrementOwner === "hekla" && !r.decrementedAt);
+    const lock = this.locks.get(`${scope.tenantId}|${scope.recordId}`);
+    return row && lock?.holder === scope.holder && lock.until > this.now() ? row : null;
   }
-  async flag(id: number, review: string) { this.rows[id - 1]!.needsReview = review; }
+  async pendingDecrement(scope: DecrementScope, id: number) {
+    const row = this.ownedRow(scope, id);
+    if (!row || row.cancelledAt || row.needsReview) return null;
+    const pending = await this.pendingDecrementsSnapshot(scope.tenantId, this.rows.length);
+    return pending.find(candidate => candidate.id === id) ?? null;
+  }
+  // Fresh reads must not be routed through a discovery barrier installed by a concurrency test.
+  async pendingDecrementsSnapshot(tenantId: string, limit: number) { return MemStore.prototype.pendingDecrements.call(this, tenantId, limit); }
+  async startDecrement(scope: DecrementScope, id: number, before: number, target: number) {
+    const r = this.ownedRow(scope, id);
+    if (!r || r.cancelledAt || r.needsReview || (r.startedAt && (r.qtyBefore !== before || r.qtyTarget !== target))) return false;
+    if (this.rows.some(other => other.id !== id && other.tenantId === scope.tenantId && other.recordId === scope.recordId && other.decrementOwner === "hekla" && other.startedAt && !other.decrementedAt)) return false;
+    this.locks.get(`${scope.tenantId}|${scope.recordId}`)!.until = this.now() + 60000;
+    r.startedAt = true; r.qtyBefore = before; r.qtyTarget = target; return true;
+  }
+  async finishDecrement(scope: DecrementScope, id: number, oversold: boolean, review: string | null) {
+    const r = this.ownedRow(scope, id);
+    if (!r || !r.startedAt || r.cancelledAt || r.needsReview) return false;
+    if (this.failFinishOnce) { this.failFinishOnce = false; throw new Error("worker stopped"); }
+    r.decrementedAt = true; r.oversold = oversold; r.needsReview = review; return true;
+  }
+  async flag(scope: DecrementScope, id: number, review: string) { const r = this.ownedRow(scope, id); if (!r) return false; r.needsReview = review; return true; }
   async acquireLock(tenantId: string, recordId: string, holder: string, seconds: number) {
     const key = `${tenantId}|${recordId}`; const hit = this.locks.get(key);
     if (hit && hit.until > this.now() && hit.holder !== holder) return false;
+    if (hit && hit.until <= this.now()) {
+      const unfinished = this.rows.filter(r => r.tenantId === tenantId && r.recordId === recordId && r.decrementOwner === "hekla" && r.startedAt && !r.decrementedAt);
+      for (const row of unfinished) row.needsReview ??= "Stock lease expired during an unfinished update. Check Airtable and the sale before clearing review.";
+      if (unfinished.length) return false;
+    }
     this.locks.set(key, { holder, until: this.now() + seconds * 1000 }); return true;
   }
   async releaseLock(tenantId: string, recordId: string, holder: string) { const key = `${tenantId}|${recordId}`; if (this.locks.get(key)?.holder === holder) this.locks.delete(key); }
@@ -144,6 +170,28 @@ class MemStock implements StockRecord {
 
 const T = "00000000-0000-0000-0000-000000000001";
 const opts = { lockWaitMs: 1 };
+
+test("overlapping workers that captured the same sale apply it only once", async () => {
+  const store = new MemStore(); const stock = new MemStock({ [REC]: 10 });
+  await store.insertLines(T, cardTraderLines(ctOrder(), FROM));
+  const list = store.pendingDecrements.bind(store);
+  let snapshots = 0;
+  let release!: () => void;
+  const bothRead = new Promise<void>(resolve => { release = resolve; });
+  store.pendingDecrements = async (tenant, limit) => {
+    const rows = await list(tenant, limit);
+    if (++snapshots === 2) release();
+    await bothRead;
+    return rows;
+  };
+  const results = await Promise.all([
+    applyPendingDecrements(store, stock, T, { ...opts, holder: "webhook" }),
+    applyPendingDecrements(store, stock, T, { ...opts, holder: "cron" }),
+  ]);
+  assert.equal(stock.qty.get(REC), 8);
+  assert.deepEqual(stock.writes, [[REC, 8]]);
+  assert.equal(results.reduce((sum, result) => sum + result.applied, 0), 1);
+});
 
 test("a CardTrader sale lowers the shared Qty once, however often it is delivered", async () => {
   const store = new MemStore(); const stock = new MemStock({ [REC]: 5 });
@@ -218,15 +266,26 @@ test("a run that stopped after writing Airtable is not applied twice", async () 
 test("a run that stopped before writing Airtable is redone", async () => {
   const store = new MemStore(); const stock = new MemStock({ [REC]: 5 });
   await store.insertLines(T, cardTraderLines(ctOrder(), FROM));
-  await store.startDecrement(1, 5, 3); // recorded the plan, then stopped
+  Object.assign(store.rows[0]!, { startedAt: true, qtyBefore: 5, qtyTarget: 3 }); // recorded the plan, then stopped
   const r = await applyPendingDecrements(store, stock, T, opts);
   assert.equal(r.applied, 1); assert.equal(stock.qty.get(REC), 3);
+});
+
+test("recovering an oversold update also restores its review flag and alert", async () => {
+  const store = new MemStore(); const stock = new MemStock({ [REC]: 1 });
+  await store.insertLines(T, cardTraderLines(ctOrder(), FROM));
+  store.failFinishOnce = true;
+  await assert.rejects(applyPendingDecrements(store, stock, T, opts));
+  const result = await applyPendingDecrements(store, stock, T, opts);
+  assert.equal(result.oversold, 1); assert.equal(result.alerts.length, 1);
+  assert.match(store.rows[0]!.needsReview ?? '', /Oversold/);
+  assert.equal(stock.writes.length, 1);
 });
 
 test("a row changed by someone else mid-decrement is flagged for a person, not guessed", async () => {
   const store = new MemStore(); const stock = new MemStock({ [REC]: 4 });
   await store.insertLines(T, cardTraderLines(ctOrder(), FROM));
-  await store.startDecrement(1, 5, 3);
+  Object.assign(store.rows[0]!, { startedAt: true, qtyBefore: 5, qtyTarget: 3 });
   const r = await applyPendingDecrements(store, stock, T, opts);
   assert.equal(r.flagged, 1); assert.equal(stock.writes.length, 0); assert.equal(r.alerts.length, 1);
   assert.equal((await applyPendingDecrements(store, stock, T, opts)).flagged, 0, "flagged rows leave the queue");
