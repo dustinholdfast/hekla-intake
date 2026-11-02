@@ -2,6 +2,7 @@
 import { insertMovements } from "./inventorydb.ts";
 import { db } from "./tenants.ts";
 import type { CreditEntry, PurchaseDraft, PurchaseLine, ReceiptPlan } from "./purchases.ts";
+import { purchaseDatabase, requirePurchaseSafety, PurchaseSafetyError, type PurchaseDatabase, type SqlStatement } from './purchase-safety.ts';
 
 export function isMissingPurchases(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -59,37 +60,24 @@ const LINE_INSERT = `insert into purchase_lines (
   buy_list_id, buy_list_kind, buy_list_status, stock_record_id, on_hand, unknown_cost_qty, cost_basis_cents,
   stock_status, review, status, want_before
 ) values (
-  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
+  $1,coalesce((select id from purchases where tenant_id=$1 and sell_request_id=$3),$2::uuid),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
 )`;
 
-export async function saveAcceptance(env: Env, purchase: PurchaseDraft): Promise<{ id: string; created: boolean }> {
-  const sql = db(env);
-  const inserted = await sql.query(
-    `insert into purchases (tenant_id, sell_request_id, sell_request_ref, payout, payment_type, offer_cents, status)
-     values ($1, $2, $3, $4, $5, $6, 'accepted')
-     on conflict (tenant_id, sell_request_id) do nothing
-     returning id`,
-    [purchase.tenantId, purchase.sellRequestId, purchase.sellRequestRef, purchase.payout, purchase.paymentType, purchase.offerCents],
-  );
-  const existing = inserted[0] ?? (await sql.query(
-    `select id, status from purchases where tenant_id = $1 and sell_request_id = $2`,
-    [purchase.tenantId, purchase.sellRequestId],
-  ))[0];
-  if (!existing) throw new Error("The purchase could not be saved.");
-  const id = String(existing.id);
-  if (!inserted[0]) {
-    if (existing.status !== "accepted") return { id, created: false };
-    await sql.query(
-      `update purchases set sell_request_ref = $3, payout = $4, payment_type = $5, offer_cents = $6, updated_at = now()
-       where id = $1 and tenant_id = $2 and status = 'accepted'`,
-      [id, purchase.tenantId, purchase.sellRequestRef, purchase.payout, purchase.paymentType, purchase.offerCents],
-    );
-    await sql.query(`delete from purchase_lines where purchase_id = $1 and status = 'accepted'`, [id]);
-  }
-  for (const line of purchase.lines) {
-    await sql.query(LINE_INSERT, lineToRow(id, line, purchase.sellRequestId, purchase.tenantId));
-  }
-  return { id, created: Boolean(inserted[0]) };
+export async function saveAcceptance(env: Env, purchase: PurchaseDraft, database = purchaseDatabase(env)): Promise<{ id: string; created: boolean }> {
+  await requirePurchaseSafety(database);
+  const id = crypto.randomUUID();
+  const statements: SqlStatement[] = [
+    { text: 'select hekla_guard_acceptance($1,$2)', params: [purchase.tenantId, purchase.sellRequestId] },
+    { text: `insert into purchases(id,tenant_id,sell_request_id,sell_request_ref,payout,payment_type,offer_cents,status)
+      values($1,$2,$3,$4,$5,$6,$7,'accepted') on conflict(tenant_id,sell_request_id) do update
+      set sell_request_ref=excluded.sell_request_ref,payout=excluded.payout,payment_type=excluded.payment_type,
+        offer_cents=excluded.offer_cents,updated_at=now() returning id,(xmax=0) as inserted`,
+      params: [id,purchase.tenantId,purchase.sellRequestId,purchase.sellRequestRef,purchase.payout,purchase.paymentType,purchase.offerCents] },
+    { text: "delete from purchase_lines where tenant_id=$1 and sell_request_id=$2 and status='accepted'", params: [purchase.tenantId,purchase.sellRequestId] },
+    ...purchase.lines.map(line => ({ text: LINE_INSERT, params: lineToRow(id,line,purchase.sellRequestId,purchase.tenantId) })),
+  ];
+  const result = await database.transaction(statements);
+  return { id: String(result[1]![0]!.id), created: result[1]![0]!.inserted === true };
 }
 
 function asLine(row: Record<string, unknown>): PurchaseLine {
@@ -141,7 +129,7 @@ export async function loadPurchase(env: Env, tenantId: string, sellRequestId: st
   const rows = await sql.query(`select * from purchases where tenant_id = $1 and sell_request_id = $2`, [tenantId, sellRequestId]);
   const purchase = rows[0];
   if (!purchase) return null;
-  const lines = await sql.query(`select * from purchase_lines where purchase_id = $1 order by line_no`, [purchase.id]);
+  const lines = await sql.query(`select * from purchase_lines where purchase_id = $1 and tenant_id = $2 order by line_no`, [purchase.id, tenantId]);
   const status = purchase.status === "received" || purchase.status === "partial" || purchase.status === "cancelled" ? purchase.status : "accepted";
   return {
     id: String(purchase.id),
@@ -201,15 +189,28 @@ export async function saveReceipt(env: Env, plan: ReceiptPlan): Promise<{ moveme
   return { movementsInserted: movements.inserted, creditsInserted };
 }
 
-export async function saveRedemption(env: Env, entry: CreditEntry): Promise<{ created: boolean }> {
-  const rows = await db(env).query(
+export async function saveRedemption(env: Env, entry: CreditEntry, database: PurchaseDatabase = purchaseDatabase(env)): Promise<{ created: boolean; entry: CreditEntry }> {
+  if (entry.entryKind !== 'redemption' || entry.sourceKind !== 'redemption' || !Number.isSafeInteger(entry.amountCents) || entry.amountCents >= 0) {
+    throw new PurchaseSafetyError('Invalid credit redemption.', 400);
+  }
+  await requirePurchaseSafety(database);
+  let rows;
+  try { rows = await database.query(
     `insert into store_credit_entries (tenant_id, customer_ref, amount_cents, entry_kind, source_kind, source_ref, occurred_on, balance_after_cents)
      values ($1, $2, $3, $4, $5, $6, $7, $8)
      on conflict (tenant_id, source_kind, source_ref, entry_kind) do nothing
      returning id`,
-    [entry.tenantId, entry.customerRef, entry.amountCents, entry.entryKind, entry.sourceKind, entry.sourceRef, entry.occurredOn, entry.balanceAfterCents],
-  );
-  return { created: rows.length > 0 };
+    [entry.tenantId, entry.customerRef, entry.amountCents, entry.entryKind, entry.sourceKind, entry.sourceRef, entry.occurredOn, 0],
+  ); } catch (error) {
+    if (error instanceof Error && error.message.includes('insufficient_store_credit')) throw new PurchaseSafetyError('There is not enough unspent store credit for this redemption.');
+    throw error;
+  }
+  const stored = (await database.query(`select id,customer_ref,amount_cents,occurred_on::text,balance_after_cents,created_at from store_credit_entries
+    where tenant_id=$1 and source_kind=$2 and source_ref=$3 and entry_kind=$4`, [entry.tenantId,entry.sourceKind,entry.sourceRef,entry.entryKind]))[0];
+  if (!stored || String(stored.customer_ref)!==entry.customerRef || Number(stored.amount_cents)!==entry.amountCents || String(stored.occurred_on)!==entry.occurredOn) {
+    throw new PurchaseSafetyError('That source ID was already used for different credit redemption details.');
+  }
+  return { created: rows.length>0, entry: {...entry,id:String(stored.id),balanceAfterCents:Number(stored.balance_after_cents),createdAt:new Date(stored.created_at as string).toISOString()} };
 }
 
 export async function customerBalance(env: Env, tenantId: string, customerRef: string): Promise<number> {

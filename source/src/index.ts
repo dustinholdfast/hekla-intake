@@ -36,7 +36,9 @@ import { getState, listSales, setState } from "./salesdb.ts";
 import { onHand, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter, type MovementDraft, type WaitlistInput } from "./inventory.ts";
 import { buildLiveDetail, buildLiveInventory, InventoryReadError } from "./live-inventory.ts";
 import { isMissingLedger, isMissingPhase2Settings, listMovements, readInventorySettings, readThresholds, saveInventorySettings } from "./inventorydb.ts";
-import { applyReceiveWrites, fetchSellRequest, matchLines, planAcceptance, planReceipt, planRedemption, splitCardList, type CatalogLine, type SellRequestView } from "./purchases.ts";
+import { applyReceiveWrites, fetchSellRequest, matchLines, planAcceptance, planReceipt, draftRedemption, splitCardList, type CatalogLine, type SellRequestView } from "./purchases.ts";
+import { purchasesAllowed } from './purchase-access.ts';
+import { PurchaseSafetyError, purchaseDatabase, requirePurchaseSafety } from './purchase-safety.ts';
 import { customerBalance, isMissingPurchases, listCredit, loadPurchase, readLiability, saveAcceptance, saveReceipt, saveRedemption } from "./purchasesdb.ts";
 import { presentSettings, SettingsError, validateInventorySettings } from "./inventory-settings.ts";
 import { loadBuyList } from "./opening.ts";
@@ -117,6 +119,9 @@ app.use("/api/*", async (c, next) => {
   if (!auth.orgId) return c.json({ error: "Choose an organization to continue.", code: "no_org" }, 403);
   const tenant = await tenantForOrg(c.env, auth.orgId);
   if (!tenant) return c.json({ error: "This organization has not been set up for intake yet.", code: "no_tenant" }, 403);
+  if ((c.req.path === '/api/purchases' || c.req.path.startsWith('/api/purchases/')) && !purchasesAllowed(tenant)) {
+    return c.json({ error: 'Purchasing is available only for the shop whose Airtable purchase tables are configured.', code: 'purchases_unavailable' }, 403);
+  }
   c.set("tenant", tenant);
   c.set("tenantEnv", tenantEnv(c.env, tenant));
   c.set("orgRole", auth.orgRole ?? null);
@@ -1160,6 +1165,8 @@ app.post("/api/purchases", async (c) => {
 });
 
 app.post("/api/purchases/receive", async (c) => {
+  // Check before any Airtable write, including when migration 0010 was previously installed.
+  await requirePurchaseSafety(purchaseDatabase(c.env));
   const body = await readJson(c);
   if (!body.ok) return c.json({ error: body.error }, 400);
   const sellRequestId = typeof body.value.sellRequestId === "string" ? body.value.sellRequestId : "";
@@ -1237,11 +1244,10 @@ app.post("/api/credit/redeem", async (c) => {
   const amountCents = Number(body.value.amountCents);
   const occurredOn = typeof body.value.occurredOn === "string" ? body.value.occurredOn : new Date().toISOString().slice(0, 10);
   try {
-    const balance = await customerBalance(c.env, c.var.tenant.id, customerRef);
-    const planned = planRedemption({ tenantId: c.var.tenant.id, customerRef, amountCents, sourceRef, balanceCents: balance, now: new Date().toISOString(), occurredOn });
+    const planned = draftRedemption({ tenantId: c.var.tenant.id, customerRef, amountCents, sourceRef, now: new Date().toISOString(), occurredOn });
     if (!planned.ok) return c.json({ error: planned.error }, 400);
     const saved = await saveRedemption(c.env, planned.entry);
-    return c.json({ entry: planned.entry, created: saved.created });
+    return c.json({ entry: saved.entry, created: saved.created });
   } catch (error) {
     if (isMissingPurchases(error)) return c.json({ error: "The store credit ledger is not in this database yet. Apply migration 0010 before go-live. Nothing was written." }, 503);
     throw error;
@@ -1267,6 +1273,8 @@ app.get("*", async (c) => {
 });
 
 app.onError((error, c) => {
+  if (error instanceof PurchaseSafetyError) return c.json({ error: error.message }, error.status);
+  if (error.message.includes('purchase_no_longer_accepted')) return c.json({ error: 'This purchase is no longer an editable draft.' }, 409);
   if (error instanceof InventoryReadError) return c.json({ error: error.message }, 503);
   if (error instanceof ConnectionError) return c.json({ error: error.message }, error.status === 503 ? 503 : error.status === 409 ? 409 : 400);
   if (error instanceof CardTraderError) return c.json({ error: error.message }, 502);

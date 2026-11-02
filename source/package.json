@@ -10,7 +10,7 @@
     "types": "wrangler types",
     "deploy": "wrangler deploy",
     "check": "npm run typecheck && npm test && npm run test:postgres",
-    "test:postgres": "node --experimental-strip-types --test integration/sales-postgres.test.ts",
+    "test:postgres": "node --experimental-strip-types --test integration/*.test.ts",
     "opening": "node --experimental-strip-types src/opening-cli.ts",
     "schema": "node --experimental-strip-types src/waitlist-schema-cli.ts"
   },

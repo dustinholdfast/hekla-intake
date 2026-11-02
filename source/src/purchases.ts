@@ -780,21 +780,21 @@ export function planReceipt(input: {
   return { ok: true, plan: { purchase, movements, lots, credits, writes } };
 }
 
-export function planRedemption(input: {
+type RedemptionInput = {
   tenantId: string;
   customerRef: string;
   amountCents: number;
   sourceRef: string;
-  balanceCents: number;
   now: string;
   occurredOn: string;
-}): { ok: true; entry: CreditEntry } | { ok: false; error: string } {
+};
+
+/** Validate a request only. The database authorizes spending and supplies the actual balance. */
+export function draftRedemption(input: RedemptionInput): { ok: true; entry: CreditEntry } | { ok: false; error: string } {
   if (!RECORD_ID.test(input.customerRef)) return { ok: false, error: "Store credit is kept against a sell request id, not a name or email." };
-  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) return { ok: false, error: "A redemption is a positive amount of cents." };
+  if (!Number.isSafeInteger(input.amountCents) || input.amountCents <= 0 || input.amountCents > 2147483647) return { ok: false, error: "A redemption is a positive amount of cents within the supported range." };
   if (!input.sourceRef.trim()) return { ok: false, error: "A redemption needs a source id." };
-  if (input.amountCents > input.balanceCents) {
-    return { ok: false, error: `The unspent balance is ${(input.balanceCents / 100).toFixed(2)}. A redemption cannot go below 0.` };
-  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.occurredOn) || !Number.isFinite(Date.parse(input.occurredOn)) || new Date(input.occurredOn).toISOString().slice(0,10) !== input.occurredOn) return { ok: false, error: 'A redemption needs a valid calendar date.' };
   return {
     ok: true,
     entry: {
@@ -806,10 +806,18 @@ export function planRedemption(input: {
       sourceKind: "redemption",
       sourceRef: input.sourceRef.trim(),
       occurredOn: input.occurredOn,
-      balanceAfterCents: input.balanceCents - input.amountCents,
+      balanceAfterCents: 0,
       createdAt: input.now,
     },
   };
+}
+
+/** Preview helper; production spending is authorized atomically in Postgres. */
+export function planRedemption(input: RedemptionInput & { balanceCents: number }): ReturnType<typeof draftRedemption> {
+  const draft = draftRedemption(input);
+  if (!draft.ok) return draft;
+  if (input.amountCents > input.balanceCents) return { ok: false, error: `The unspent balance is ${(input.balanceCents / 100).toFixed(2)}. A redemption cannot go below 0.` };
+  return { ok: true, entry: { ...draft.entry, balanceAfterCents: input.balanceCents-input.amountCents } };
 }
 
 export function outstandingCents(entries: readonly Pick<CreditEntry, "amountCents">[]): number {
