@@ -1,3 +1,4 @@
+import { canonicalMagicFinish } from "./magic-finish.ts";
 import {
   canonicalCondition,
   canonicalFinish,
@@ -47,7 +48,7 @@ const ALLOWED = new Set<string>(CREATE_FIELDS);
 
 type DraftExtras = {
   collectorNumber: string;
-  finish: Finish;
+  finish: string;
   condition: Condition;
   qty: number;
   cardName?: string;
@@ -192,8 +193,13 @@ export function parseDraft(input: IntakeBody): { ok: true; card: DraftCard } | {
     return { ok: false, error: "Collector number looks wrong." };
   }
 
-  const finish = canonicalFinish(input.finish ?? "");
-  if (!finish || !finishesFor(game).includes(finish)) return { ok: false, error: `Finish must be ${finishesFor(game).join(", ")}.` };
+  const finish = game === "Magic: The Gathering" ? canonicalMagicFinish(input.finish ?? "") : canonicalFinish(input.finish ?? "");
+  if (!finish || (game !== "Magic: The Gathering" && !finishesFor(game).includes(finish as Finish))) {
+    const allowed = game === "Magic: The Gathering"
+      ? "Normal, Foil, or a CardTrader treatment such as Borderless, Extended Art, Showcase, or Etched"
+      : finishesFor(game).join(", ");
+    return { ok: false, error: `Finish must be ${allowed}.` };
+  }
 
   const condition = canonicalCondition(input.condition?.trim() ? input.condition : "NM");
   if (!condition) return { ok: false, error: "Condition must be NM, LP, MP, HP, or DMG." };
@@ -307,8 +313,15 @@ export function buildEditFields(input: EditInput, game: Game): { ok: true; field
   if (extra.length) return { ok: false, error: `Only finish, condition, and qty can be edited (got ${extra.join(", ")}).` };
   const fields: FieldMap = {};
   if (input.finish !== undefined) {
-    const finish = typeof input.finish === "string" ? canonicalFinish(input.finish) : null;
-    if (!finish || !finishesFor(game).includes(finish)) return { ok: false, error: `Finish must be ${finishesFor(game).join(", ")}.` };
+    const finish = typeof input.finish === "string"
+      ? (game === "Magic: The Gathering" ? canonicalMagicFinish(input.finish) : canonicalFinish(input.finish))
+      : null;
+    if (!finish || (game !== "Magic: The Gathering" && !finishesFor(game).includes(finish as Finish))) {
+      const allowed = game === "Magic: The Gathering"
+        ? "Normal, Foil, or a CardTrader treatment such as Borderless, Extended Art, Showcase, or Etched"
+        : finishesFor(game).join(", ");
+      return { ok: false, error: `Finish must be ${allowed}.` };
+    }
     fields.Finish = finish;
   }
   if (input.condition !== undefined) {

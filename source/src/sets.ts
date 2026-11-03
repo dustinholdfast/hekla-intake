@@ -34,17 +34,23 @@ export type Game = (typeof GAMES)[number];
 
 /**
  * The default finishes. Every value here and in RIFTBOUND_FINISHES must exist as a choice on the Airtable
- * Finish field, because writes use typecast: false. Holofoil, Reverse Holo and Etched can be added the same way.
+ * Finish field. Lorcana and Riftbound writes keep typecast off. A Magic treatment CardTrader names
+ * (Borderless, Extended Art, …) is added as a Finish choice on the write that first uses it.
  */
 export const FINISHES = ["Normal", "Foil", "Enchanted"] as const;
 /** Riftbound has no Enchanted cards; its third finish is Special (showcase and other non-standard foils). */
 export const RIFTBOUND_FINISHES = ["Normal", "Foil", "Special"] as const;
-export type Finish = (typeof FINISHES)[number] | (typeof RIFTBOUND_FINISHES)[number];
+/**
+ * Magic's list before a card is looked up. The intake form replaces it with that card's CardTrader
+ * treatments (Normal, Foil, Borderless, Extended Art, …). Enchanted is Lorcana's, not Magic's.
+ */
+export const MAGIC_FINISHES = ["Normal", "Foil"] as const;
+export type Finish = (typeof FINISHES)[number] | (typeof RIFTBOUND_FINISHES)[number] | (typeof MAGIC_FINISHES)[number];
 
-/** The choices offered for each game. */
+/** The choices offered for each game before a per-card lookup. */
 export const FINISHES_BY_GAME: Record<Game, readonly Finish[]> = {
   Lorcana: FINISHES,
-  "Magic: The Gathering": FINISHES,
+  "Magic: The Gathering": MAGIC_FINISHES,
   Riftbound: RIFTBOUND_FINISHES,
   "Pokémon": FINISHES,
   "Yu-Gi-Oh!": FINISHES,
@@ -168,10 +174,18 @@ export function sameFinish(a: string | null | undefined, b: string | null | unde
   return left.toLowerCase() === right.toLowerCase();
 }
 
-/** Foil printing. Normal and Regular are not foil. A blank finish is not foil. */
+/**
+ * Foil printing. Normal and Regular are not foil. A blank finish is not foil.
+ * Enchanted and Special stay foil. A Magic treatment is foil only when its name says so
+ * ("Foil", "Borderless Foil", "Borderless | Surge Foil"), so Borderless itself is not.
+ */
 export function isFoilFinish(input: string | null | undefined): boolean {
   const read = readFinish(input);
-  return read != null && read !== "Regular";
+  if (read == null || read === "Regular") return false;
+  if (/\bnonfoil\b/i.test(read)) return false;
+  const lower = read.toLowerCase();
+  if (lower === "foil" || lower === "enchanted" || lower === "special") return true;
+  return /\bfoil\b/i.test(read);
 }
 
 /** Stored Finish values to search. Normal and Regular are both read. Nothing is written. */

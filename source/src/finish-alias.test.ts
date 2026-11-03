@@ -28,6 +28,8 @@ test("Normal is read as Regular and still written as Normal", () => {
   assert.equal(isFoilFinish("Regular"), false);
   assert.equal(isFoilFinish("Foil"), true);
   assert.equal(isFoilFinish("Enchanted"), true);
+  assert.equal(isFoilFinish("Borderless"), false);
+  assert.equal(isFoilFinish("Borderless Foil"), true);
   assert.equal(isFoilFinish(null), false);
   assert.deepEqual(finishQueryValues("Normal"), ["Normal", "Regular"]);
   assert.deepEqual(finishQueryValues("Foil"), ["Foil"]);

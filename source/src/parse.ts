@@ -1,5 +1,6 @@
 import { buildCreateFields, collectorVariants, SET_IDENTIFIER_MAX, setIdentityOf, type DraftCard } from "./fields.ts";
-import { canonicalCondition, canonicalFinish, canonicalSet, finishesFor, type Game } from "./sets.ts";
+import { canonicalMagicFinish } from "./magic-finish.ts";
+import { canonicalCondition, canonicalFinish, canonicalSet, finishesFor, type Finish, type Game } from "./sets.ts";
 
 export type ParsedRow = {
   line: number;
@@ -49,7 +50,7 @@ export function parseBulk(text: string, game: Game = "Lorcana"): ParsedRow[] {
     }
 
     const setToken = (tokens[0] ?? "").trim();
-    const finish = canonicalFinish(tokens[2] ?? "");
+    const finish = game === "Magic: The Gathering" ? canonicalMagicFinish(tokens[2] ?? "") : canonicalFinish(tokens[2] ?? "");
     const condition = canonicalCondition(tokens[3] ?? "");
     const collectorNumber = (tokens[1] ?? "").trim();
     const setNumber = game === "Lorcana" ? canonicalSet(setToken) : null;
@@ -66,8 +67,11 @@ export function parseBulk(text: string, game: Game = "Lorcana"): ParsedRow[] {
       rows.push({ line, raw, error: "Collector number is missing." });
       return;
     }
-    if (!finish || !finishesFor(game).includes(finish)) {
-      rows.push({ line, raw, error: `“${tokens[2]}” is not a ${game} finish. Use ${finishesFor(game).join(", ")}.` });
+    if (!finish || (game !== "Magic: The Gathering" && !finishesFor(game).includes(finish as Finish))) {
+      const hint = game === "Magic: The Gathering"
+        ? "Use Normal, Foil, or the CardTrader treatment (Borderless, Extended Art, Showcase, Etched). Put a finish that contains spaces between commas."
+        : `Use ${finishesFor(game).join(", ")}.`;
+      rows.push({ line, raw, error: `“${tokens[2]}” is not a ${game} finish. ${hint}` });
       return;
     }
     if (!condition) {

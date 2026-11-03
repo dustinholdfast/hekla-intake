@@ -25,9 +25,11 @@ test("preview helpers", () => {
 import { parseDraft } from "./fields.ts";
 import { parseBulk } from "./parse.ts";
 import { finishesFor } from "./sets.ts";
-test("riftbound offers Normal, Foil, Special; other games keep Enchanted", () => {
+test("riftbound offers Normal, Foil, Special; Lorcana keeps Enchanted; Magic does not", () => {
   assert.deepEqual([...finishesFor("Riftbound")], ["Normal", "Foil", "Special"]);
   assert.deepEqual([...finishesFor("Lorcana")], ["Normal", "Foil", "Enchanted"]);
+  assert.deepEqual([...finishesFor("Magic: The Gathering")], ["Normal", "Foil"]);
+  assert.deepEqual([...finishesFor("Pokémon")], ["Normal", "Foil", "Enchanted"]);
   const rift = (finish: string) => parseDraft({ game: "Riftbound", setIdentifier: "VEN", collectorNumber: "SP6", finish, condition: "NM", qty: 1 } as never);
   const special = rift("Special");
   assert.equal(special.ok && special.card.finish, "Special");
