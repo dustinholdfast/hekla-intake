@@ -3,8 +3,9 @@
  * batch, lists them through the seller's own token. Prices are the stored market price, unchanged.
  * Nothing here runs on a schedule. A card's Status becomes Listed only after CardTrader confirms its listing.
  */
+import { chooseMagicFinish, magicFinishOptions, type MagicFinishOption } from "./magic-finish.ts";
 import { riftboundNumberKey } from "./preview.ts";
-import { effectiveGame, type Game } from "./sets.ts";
+import { effectiveGame, isFoilFinish, type Game } from "./sets.ts";
 
 type J = Record<string, any>;
 const API = "https://api.cardtrader.com/api/v2";
@@ -107,10 +108,15 @@ export function buildRow(card: ExportCard, blueprint: Blueprint): ExportRow {
   const condition = CARDTRADER_CONDITION[card.condition ?? ""];
   const allowed: unknown[] = editable.find((p) => p.name === "condition")?.possible_values ?? [];
   if (!condition || !allowed.includes(condition)) return no(`CardTrader does not accept condition ${card.condition ?? "blank"} for this card.`);
-  const wantFoil = card.finish === "Foil" || card.finish === "Special" || card.finish === "Enchanted";
+  const wantFoil = isFoilFinish(card.finish);
   const foilProperty = editable.find((p) => typeof p.name === "string" && p.name.endsWith("_foil"));
+  const magic = effectiveGame(card.game) === "Magic: The Gathering";
   // No foil switch means CardTrader sells this card in one finish only (for Riftbound rares and up, that is foil).
-  if (!foilProperty && !wantFoil) return no("CardTrader lists this card in a single finish, which is foil. Check the Finish on this row.");
+  // A Magic treatment with no switch is the blueprint itself (Borderless, Surge Foil, …), not an implied foil.
+  if (!foilProperty && !wantFoil && !magic) return no("CardTrader lists this card in a single finish, which is foil. Check the Finish on this row.");
+  if (magic && !foilProperty && wantFoil && !/\bfoil\b/i.test(blueprint.version ?? "") && !/\bfoil\b/i.test(card.finish ?? "")) {
+    return no("CardTrader has no foil switch on this printing.");
+  }
   const properties: Record<string, string | boolean> = { condition };
   if (foilProperty) properties[foilProperty.name] = wantFoil;
   const product: Product = { blueprint_id: blueprint.id, price: Math.round(price * 100) / 100, quantity: card.qty, error_mode: "strict", user_data_field: card.id, properties };
@@ -237,6 +243,71 @@ export function companionCodes(game: Game, code: string): string[] {
   return game === "Magic: The Gathering" && code ? [`c${code}`] : [];
 }
 
+export type MagicFinishLookup = {
+  cardName: string | null;
+  options: MagicFinishOption<Blueprint>[];
+  reason?: string;
+};
+
+/** Finishes CardTrader actually sells for one Magic card: the printing's version plus mtg_foil, and sibling treatments. */
+export async function magicFinishesFor(token: string, setIdentifier: string | null, collectorNumber: string | null): Promise<MagicFinishLookup> {
+  const game: Game = "Magic: The Gathering";
+  const config = CARDTRADER_GAMES[game];
+  const code = expansionCode(game, { setIdentifier });
+  if (!code) return { cardName: null, options: [], reason: "Set identifier is required." };
+  const expansion = await expansionId(token, config.gameId, code);
+  if (!expansion) return { cardName: null, options: [], reason: `CardTrader has no Magic set with code ${code}.` };
+  const main = await blueprintsFor(token, expansion);
+  const extras: Blueprint[] = [];
+  for (const extra of companionCodes(game, code)) {
+    const id = await expansionId(token, config.gameId, extra);
+    if (id) extras.push(...await blueprintsFor(token, id));
+  }
+  return magicFinishOptions([...main, ...extras], config.singlesCategoryId, collectorNumber ?? "");
+}
+
+/**
+ * The blueprint a Magic row lists. Other games stay on the single collector-number match.
+ * A blank Magic finish is treated as Normal so an older row still prices.
+ */
+async function resolveBlueprint(token: string, card: { game: string | null; setNumber?: string | null; setIdentifier?: string | null; collectorNumber: string | null; finish?: string | null }): Promise<{ blueprint: Blueprint } | { reason: string }> {
+  if (effectiveGame(card.game) !== "Magic: The Gathering") return findBlueprint(token, card);
+  const found = await magicFinishesFor(token, card.setIdentifier ?? null, card.collectorNumber);
+  if (!found.options.length) return { reason: found.reason ?? "CardTrader has no printing for this card." };
+  const chosen = chooseMagicFinish(found.options, card.collectorNumber ?? "", (card.finish ?? "").trim() || "Normal");
+  if ("reason" in chosen) return chosen;
+  return { blueprint: chosen.blueprint };
+}
+
+/** Confirms a Magic finish against CardTrader and points the row at that printing's collector number. */
+export async function resolveMagicDraft<T extends { game: string; setIdentifier?: string; collectorNumber: string; finish: string }>(
+  token: string | null,
+  card: T,
+): Promise<{ ok: true; card: T } | { ok: false; error: string }> {
+  if (card.game !== "Magic: The Gathering") return { ok: true, card };
+  const plain = card.finish === "Normal" || card.finish === "Foil";
+  if (!token) {
+    return plain
+      ? { ok: true, card }
+      : { ok: false, error: "Connect CardTrader in Settings to use this Magic finish." };
+  }
+  let found: MagicFinishLookup;
+  try {
+    found = await magicFinishesFor(token, card.setIdentifier ?? null, card.collectorNumber);
+  } catch (error) {
+    if (plain) return { ok: true, card };
+    return { ok: false, error: error instanceof CardTraderError ? "CardTrader's finishes are unavailable right now." : "CardTrader's finishes are unavailable right now." };
+  }
+  if (!found.options.length) {
+    return plain
+      ? { ok: true, card }
+      : { ok: false, error: found.reason ?? "CardTrader has no finishes for this card." };
+  }
+  const chosen = chooseMagicFinish(found.options, card.collectorNumber, card.finish);
+  if ("reason" in chosen) return { ok: false, error: chosen.reason };
+  return { ok: true, card: { ...card, finish: chosen.finish, collectorNumber: chosen.collectorNumber || card.collectorNumber } };
+}
+
 /* ---------- market price ---------- */
 export type Offer = { price?: { cents?: number; currency?: string }; properties_hash?: J };
 export type MarketPrice = { price: number; offers: number; currency: string };
@@ -277,7 +348,7 @@ async function marketplaceOffers(token: string, cacheKey: string, blueprintId: n
 
 /** The CardTrader market price for one card, with a source line that always starts with "CardTrader". */
 export async function cardTraderMarket(token: string, cacheKey: string, card: { game: string | null; setNumber?: string | null; setIdentifier?: string | null; collectorNumber: string | null; finish: string | null; condition: string | null }): Promise<{ price: number | null; source: string; card?: MatchedCard }> {
-  const match = await findBlueprint(token, card);
+  const match = await resolveBlueprint(token, card);
   if ("reason" in match) return { price: null, source: `CardTrader: ${match.reason.replace(/^CardTrader has /, "")}`.slice(0, 200) };
   const matched = matchedCard(match.blueprint);
   const priced = await priceBlueprint(token, cacheKey, match.blueprint, card);
@@ -291,16 +362,17 @@ export function matchedCard(blueprint: Blueprint): MatchedCard {
   return { name: blueprint.name, rarity: typeof rarity === "string" && rarity ? rarity : null };
 }
 
-async function priceBlueprint(token: string, cacheKey: string, blueprint: Blueprint, card: { finish: string | null; condition: string | null }): Promise<{ price: number | null; source: string }> {
+async function priceBlueprint(token: string, cacheKey: string, blueprint: Blueprint, card: { game?: string | null; finish: string | null; condition: string | null }): Promise<{ price: number | null; source: string }> {
   const condition = CARDTRADER_CONDITION[card.condition ?? ""];
   if (!condition) return { price: null, source: `CardTrader: no price for condition ${card.condition ?? "blank"}` };
-  const wantFoil = card.finish === "Foil" || card.finish === "Special" || card.finish === "Enchanted";
+  const wantFoil = isFoilFinish(card.finish);
   const hasFoilSwitch = (blueprint.editable_properties ?? []).some((p) => typeof p.name === "string" && p.name.endsWith("_foil"));
   const market = marketPrice(await marketplaceOffers(token, cacheKey, blueprint.id), { condition, foil: hasFoilSwitch ? wantFoil : null });
-  const what = `${condition}${hasFoilSwitch ? (wantFoil ? " foil" : " non-foil") : ""}`;
+  const magic = effectiveGame(card.game) === "Magic: The Gathering";
+  const what = magic && card.finish ? `${condition} ${card.finish}` : `${condition}${hasFoilSwitch ? (wantFoil ? " foil" : " non-foil") : ""}`;
   if (!market) return { price: null, source: `CardTrader: no ${what} offers in English right now` };
   if (market.currency !== "USD") return { price: null, source: `CardTrader: prices are in ${market.currency || "another currency"}, not USD` };
-  const note = !hasFoilSwitch && !wantFoil ? "; single finish on CardTrader, check Finish" : "";
+  const note = !hasFoilSwitch && !wantFoil && !magic ? "; single finish on CardTrader, check Finish" : "";
   return { price: market.price, source: `CardTrader market (${what}, ${market.offers} offer${market.offers === 1 ? "" : "s"}${note})` };
 }
 
@@ -312,7 +384,7 @@ export async function previewExport(token: string, cards: ExportCard[]): Promise
     const no = (reason: string) => { rows.push({ id: card.id, ready: false, name, reason }); };
     if (card.status !== "Waitlist") { no("Only Waitlist cards can be exported."); continue; }
     if (card.cardTraderListingId) { no(`Already listed on CardTrader (listing ${card.cardTraderListingId}).`); continue; }
-    const match = await findBlueprint(token, card);
+    const match = await resolveBlueprint(token, card);
     if ("reason" in match) { no(match.reason); continue; }
     rows.push(buildRow(card, match.blueprint));
   }

@@ -19,6 +19,7 @@ import {
 import { buyPercent, creditCostCents, type InventorySettings } from "./inventory-settings.ts";
 import { parseBulk } from "./parse.ts";
 import { allocate } from "./sales.ts";
+import { airtableWriteTypecast, canonicalMagicFinish } from "./magic-finish.ts";
 import { canonicalFinish, effectiveGame, SETS, setName, type Condition, type Game, type SetNumber } from "./sets.ts";
 
 export const SELL_REQUEST_TABLE_ID = "tbltX89tiY4H2cvuu";
@@ -209,7 +210,7 @@ function lineFromCard(lineNo: number, raw: string, card: DraftCard): CatalogLine
     setIdentity,
     collectorNumber: card.collectorNumber,
     finish: finish.finish,
-    finishStored: canonicalFinish(card.finish),
+    finishStored: card.game === "Magic: The Gathering" ? canonicalMagicFinish(card.finish) : canonicalFinish(card.finish),
     language: language.language,
     condition: card.condition,
     qty: card.qty,
@@ -605,7 +606,7 @@ function draftForLine(line: PurchaseLine): DraftCard {
   const condition: Condition = line.receivedCondition === "NM" || line.receivedCondition === "LP" || line.receivedCondition === "MP" || line.receivedCondition === "HP" || line.receivedCondition === "DMG"
     ? line.receivedCondition
     : "NM";
-  const finish = canonicalFinish(line.finishStored);
+  const finish = line.game === "Magic: The Gathering" ? canonicalMagicFinish(line.finishStored ?? "") : canonicalFinish(line.finishStored ?? "");
   if (!finish) throw new PurchaseError(`Line ${line.lineNo} has no Airtable finish.`);
   const shared = { collectorNumber: line.collectorNumber, finish, condition, qty: line.qty, cardName: line.item, costBasisUsd: line.unitCostCents / 100 };
   if (line.game === "Lorcana") {
@@ -1010,7 +1011,7 @@ export async function applyReceiveWrites(args: { token: string; writes: readonly
         stock.push({ lineKey: write.lineKey, recordId: existingId });
         continue;
       }
-      const made = await airtableCall(`${base}/tblvHPu7dgDHA91bc`, token, "POST", fetchImpl, { records: [{ fields: write.fields }], typecast: false });
+      const made = await airtableCall(`${base}/tblvHPu7dgDHA91bc`, token, "POST", fetchImpl, { records: [{ fields: write.fields }], typecast: airtableWriteTypecast(write.fields) });
       const recordId = made.records?.[0]?.id ?? made.id ?? "";
       if (recordId) stock.push({ lineKey: write.lineKey, recordId });
       created.push(write.lineKey);

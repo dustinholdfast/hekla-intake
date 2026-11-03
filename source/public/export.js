@@ -102,7 +102,7 @@ function renderCardTraderRows() {
       cell(label),
       cell(row.ready ? row.cardTraderName : "—"),
       cell(row.ready ? row.condition : card.condition || "—"),
-      cell(row.ready ? (row.foil ? "Foil" : "Regular") : readFinishLabel(card.finish)),
+      cell(card.finish ? readFinishLabel(card.finish) : (row.ready ? (row.foil ? "Foil" : "Regular") : "—")),
       cell(String(row.ready ? row.quantity : card.qty ?? "—")),
       cell(money(row.ready ? row.price : card.marketPriceUsd)),
       cell(row.note || (row.ready ? "Ready" : row.reason), row.done === "listed" ? "flash" : row.ready && !row.note ? "" : "warn"),

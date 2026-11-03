@@ -35,7 +35,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const code = resolveSet($("set-identifier").value, setLists[state.game]?.sets || []);
     if (code) { $("set-identifier").value = code.toUpperCase(); saveDefaults(); }
     paintCurrentIcon();
+    scheduleMagicFinishes();
   });
+  $("set-identifier").addEventListener("input", scheduleMagicFinishes);
+  $("collector").addEventListener("input", scheduleMagicFinishes);
   $("open-bulk").addEventListener("click", () => {
     $("bulk-error").textContent = "";
     updateBulkHelp();
@@ -198,6 +201,71 @@ function finishesFor(game) {
   return map[game] || state.session?.finishes || ["Normal"];
 }
 
+function currentFinishName() {
+  const selected = $("finish")?.selectedOptions?.[0];
+  return selected?.dataset.finish || $("finish")?.value || "";
+}
+
+let magicFinishTimer = 0;
+let magicFinishGeneration = 0;
+
+function scheduleMagicFinishes() {
+  if ((state.game || "Lorcana") !== "Magic: The Gathering") return;
+  clearTimeout(magicFinishTimer);
+  magicFinishTimer = setTimeout(() => { loadMagicFinishes().catch(() => {}); }, 250);
+}
+
+function numberKey(value) {
+  return String(value || "").trim().toLowerCase().replace(/^0+(?=\d)/, "");
+}
+
+async function loadMagicFinishes() {
+  if ((state.game || "Lorcana") !== "Magic: The Gathering") return;
+  const generation = ++magicFinishGeneration;
+  const set = $("set-identifier").value.trim();
+  const number = $("collector").value.trim();
+  const hint = $("finish-hint");
+  const fallback = () => (finishesFor("Magic: The Gathering") || ["Normal", "Foil"]).map((finish) => ({ finish, label: finish, collectorNumber: number }));
+  if (!set || !number) {
+    applyFinishOptions(fallback(), currentFinishName());
+    if (hint) { hint.hidden = false; hint.textContent = "Enter the set and collector number to load this card's CardTrader finishes."; }
+    return;
+  }
+  if (hint) { hint.hidden = false; hint.textContent = "Checking CardTrader…"; }
+  const { response, data } = await api(`/api/magic-finishes?set=${encodeURIComponent(set)}&number=${encodeURIComponent(number)}`);
+  if (generation !== magicFinishGeneration || (state.game || "") !== "Magic: The Gathering") return;
+  if (!response.ok || !data.ok || !Array.isArray(data.options) || data.options.length === 0) {
+    applyFinishOptions((Array.isArray(data.fallback) && data.fallback.length ? data.fallback : ["Normal", "Foil"]).map((finish) => ({ finish, label: finish, collectorNumber: number })), currentFinishName());
+    if (hint) hint.textContent = data.hint || data.error || "CardTrader finishes are unavailable. Normal and Foil still work.";
+    return;
+  }
+  applyFinishOptions(data.options, currentFinishName());
+  const moved = data.options.some((option) => option.collectorNumber && numberKey(option.collectorNumber) !== numberKey(number));
+  if (hint) {
+    const name = data.cardName ? `CardTrader finishes for ${data.cardName}` : "Finishes from CardTrader";
+    hint.textContent = moved ? `${name}. A treatment with another collector number is saved as that number.` : `${name}.`;
+  }
+}
+
+function applyFinishOptions(options, preferred) {
+  const select = $("finish");
+  const want = preferred || currentFinishName();
+  select.replaceChildren();
+  for (const option of options) {
+    const node = document.createElement("option");
+    node.value = `${option.blueprintId ?? ""}|${option.finish}|${option.collectorNumber ?? ""}`;
+    node.dataset.finish = option.finish;
+    node.dataset.collectorNumber = option.collectorNumber || "";
+    node.dataset.blueprintId = option.blueprintId == null ? "" : String(option.blueprintId);
+    node.textContent = option.label || option.finish;
+    select.append(node);
+  }
+  const match = [...select.options].find((option) => option.dataset.finish === want)
+    || [...select.options].find((option) => option.dataset.finish === "Normal")
+    || select.options[0];
+  if (match) select.value = match.value;
+}
+
 function defaults() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
@@ -227,10 +295,17 @@ function selectGame(game, options = {}) {
   $("set-identifier-field").hidden = lorcana;
   const finishes = finishesFor(state.game);
   const remembered = saved.finishByGame?.[state.game];
-  const preferred = remembered || saved.finish || $("finish").value;
+  const preferred = remembered || saved.finish || currentFinishName();
   fillSelect($("finish"), finishes, (finish) => finish, (finish) => finish);
   if (finishes.includes(preferred)) $("finish").value = preferred;
   else if (finishes.includes("Normal")) $("finish").value = "Normal";
+  const magic = state.game === "Magic: The Gathering";
+  const hint = $("finish-hint");
+  if (hint) {
+    hint.hidden = !magic;
+    if (magic) hint.textContent = "Enter the set and collector number to load this card's CardTrader finishes.";
+  }
+  if (magic) scheduleMagicFinishes();
   if ([...$("set").options].some((option) => option.value === saved.setNumber)) $("set").value = saved.setNumber;
   $("set-identifier").value = savedSetIdentifier(saved, state.game);
   state.setWarned = null;
@@ -495,13 +570,18 @@ function updateBulkHelp() {
     sample.textContent = "8 042 Foil NM 1\n8,156,Normal,NM,2,Elsa - Snow Queen\n13\t15\tFoil\tLP\t1\tTiana";
     return;
   }
+  if (game === "Magic: The Gathering") {
+    help.textContent = "One Magic card per line. First token is the set code, then collector number, finish, condition, optional quantity, and an optional name. Finish is Normal, Foil, or that printing's CardTrader treatment (Borderless, Extended Art, Showcase, Etched). Use commas or tabs when the finish has spaces. Every line uses Magic.";
+    sample.textContent = bulkSample(game);
+    return;
+  }
   const finishes = finishesFor(game).join(", ");
   help.textContent = `One ${game} card per line. First token is the set identifier, then collector number, finish (${finishes}), condition, optional quantity, and an optional name. Use commas or tabs when the set identifier has spaces. Every line uses ${game}.`;
   sample.textContent = bulkSample(game);
 }
 
 function bulkSample(game) {
-  if (game === "Magic: The Gathering") return "MH3 123 Foil NM 1\nMH3,456,Normal,NM,2,Orcish Bowmasters";
+  if (game === "Magic: The Gathering") return "FIN 089 Foil NM 1\nFIN,379,Borderless,NM,1,Ardyn, the Usurper\nFIN,444,Extended Art Foil,NM";
   if (game === "Pokémon") return "SV08 25 Foil NM 1\nSV08,25,Normal,NM,2,Pikachu";
   if (game === "Yu-Gi-Oh!") return "LOB 1 Normal NM 1\nLOB,5,Foil,NM,1,Dark Magician";
   return "OGN 12 Foil NM 1\nOGN,12,Special,NM,1";
@@ -510,7 +590,7 @@ function bulkSample(game) {
 function saveDefaults() {
   const previous = defaults();
   const finishByGame = { ...(previous.finishByGame || {}) };
-  if (state.game && $("finish").value) finishByGame[state.game] = $("finish").value;
+  if (state.game && currentFinishName()) finishByGame[state.game] = currentFinishName();
   const setIdentifierByGame = { ...(previous.setIdentifierByGame || {}) };
   if (state.game && state.game !== "Lorcana") setIdentifierByGame[state.game] = $("set-identifier").value.trim();
   const payload = {
@@ -518,7 +598,7 @@ function saveDefaults() {
     setNumber: $("set").value,
     setIdentifier: $("set-identifier").value,
     setIdentifierByGame,
-    finish: $("finish").value,
+    finish: currentFinishName(),
     condition: $("condition").value,
     qty: Number($("qty").value) || 1,
     finishByGame,
@@ -530,13 +610,24 @@ function saveDefaults() {
   }
 }
 
+function selectedMagicPrinting() {
+  const selected = $("finish")?.selectedOptions?.[0];
+  const finish = selected?.dataset.finish || $("finish")?.value || "";
+  if ((state.game || "Lorcana") !== "Magic: The Gathering" || !selected?.dataset.collectorNumber) return { finish, collectorNumber: "" };
+  const typed = $("collector").value.trim();
+  const printing = selected.dataset.collectorNumber;
+  if (printing && numberKey(printing) !== numberKey(typed)) return { finish, collectorNumber: printing };
+  return { finish, collectorNumber: "" };
+}
+
 function cardPayload(extra) {
   const cost = $("cost").value;
   const priority = $("priority").value;
+  const printing = selectedMagicPrinting();
   const payload = {
     game: state.game || "Lorcana",
-    collectorNumber: $("collector").value.trim(),
-    finish: $("finish").value,
+    collectorNumber: printing.collectorNumber || $("collector").value.trim(),
+    finish: printing.finish,
     condition: $("condition").value,
     qty: Number($("qty").value),
     cardName: $("card-name").value.trim(),
@@ -997,6 +1088,9 @@ function editCell(card, key, label) {
       control.append(option);
     }
     control.value = current || options[0];
+    if (key === "finish" && effectiveGame(card.game) === "Magic: The Gathering") {
+      control.addEventListener("focus", () => { fillMagicEditOptions(card, control).catch(() => {}); }, { once: true });
+    }
   }
   control.className = "inline-edit";
   control.setAttribute("aria-label", `${label} for ${card.name || card.id}`);
@@ -1033,6 +1127,29 @@ function editCell(card, key, label) {
   control.addEventListener("change", save);
   if (key === "qty") control.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); control.blur(); } });
   return td;
+}
+
+async function fillMagicEditOptions(card, control) {
+  const set = card.setIdentifier || "";
+  const number = card.collectorNumber || "";
+  if (!set || !number) return;
+  const { response, data } = await api(`/api/magic-finishes?set=${encodeURIComponent(set)}&number=${encodeURIComponent(number)}`);
+  if (!response.ok || !data.ok || !Array.isArray(data.options) || !data.options.length) return;
+  const current = control.value;
+  const finishes = [];
+  for (const option of data.options) {
+    if (option.collectorNumber && numberKey(option.collectorNumber) !== numberKey(number)) continue;
+    if (!finishes.includes(option.finish)) finishes.push(option.finish);
+  }
+  if (current && !finishes.includes(current)) finishes.unshift(current);
+  control.replaceChildren();
+  for (const value of finishes) {
+    const node = document.createElement("option");
+    node.value = value;
+    node.textContent = value;
+    control.append(node);
+  }
+  control.value = finishes.includes(current) ? current : finishes[0];
 }
 
 function setSaveState(el, kind, text) {

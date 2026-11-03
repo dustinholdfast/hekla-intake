@@ -25,9 +25,10 @@ import {
   rescanPage,
   rescanSlotOffset,
   summary,
+  toQueueCard,
   type QueueCard, createRecordRaw, deleteRecordRaw, getRecordRaw, patchRecordFields, restorableFields } from "./airtable.ts";
 import { authConfigured, clerkFrontendApi, contentSecurityPolicy, isPlatformAdmin } from "./auth.ts";
-import { appInfo, CardTraderError, createProduct, deleteProduct, expansionsFor, exportListings, incrementListing, previewExport, setWebhookUrl, type CtListing } from "./cardtrader.ts";
+import { appInfo, CardTraderError, createProduct, deleteProduct, expansionsFor, exportListings, incrementListing, magicFinishesFor, previewExport, resolveMagicDraft, setWebhookUrl, type CtListing } from "./cardtrader.ts";
 import { cleanToken, ConnectionError, connectionSecret, connectionSettings, connectionsReady, connectionStatus, deleteConnection, saveConnection, verifyCardTrader } from "./connections.ts";
 import { sendEmail, validFrom, validTo } from "./alerts.ts";
 import { newSecret, verifyCardTraderSignature, verifyStarfoil } from "./hmac.ts";
@@ -74,7 +75,8 @@ import { applyCtChanges, applyPending, buildView, expectedQty, filterView, liveP
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
-import { PREVIEW_IMAGE_HOSTS, resolvePreview } from "./preview.ts";
+import { MAGIC_FALLBACK_FINISHES } from "./magic-finish.ts";
+import { PREVIEW_IMAGE_HOSTS, resolvePreview, riftboundNumberKey } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
 import { canonicalGame, CONDITIONS, effectiveGame, FINISHES, FINISHES_BY_GAME, GAMES, isStatus, RARITIES, SETS, type Game } from "./sets.ts";
 import { assetVersion, versionedUrl } from "./assets.ts";
@@ -256,6 +258,28 @@ app.get("/api/sets", async (c) => {
   }
 });
 
+/** Finishes CardTrader sells for one Magic card. Read-only. Lorcana and Riftbound do not use this. */
+app.get("/api/magic-finishes", async (c) => {
+  const set = (c.req.query("set") ?? "").trim();
+  const number = (c.req.query("number") ?? "").trim();
+  const fallback = [...MAGIC_FALLBACK_FINISHES];
+  if (!set || !number) return c.json({ ok: false, options: [], fallback, hint: "Enter a set and collector number to load this card's CardTrader finishes." });
+  const token = await connectionSecret(c.env, c.var.tenant.id, "cardtrader");
+  if (!token) return c.json({ ok: false, options: [], fallback, hint: "Connect CardTrader in Settings to load this card's finishes." });
+  try {
+    const found = await magicFinishesFor(token, set, number);
+    if (!found.options.length) return c.json({ ok: false, options: [], fallback, cardName: found.cardName, hint: found.reason ?? "CardTrader has no finishes for this card." });
+    return c.json({
+      ok: true,
+      cardName: found.cardName,
+      options: found.options.map(({ finish, label, blueprintId, foil, collectorNumber }) => ({ finish, label, blueprintId, foil, collectorNumber })),
+    });
+  } catch (error) {
+    if (error instanceof CardTraderError) return c.json({ ok: false, options: [], fallback, hint: "CardTrader's finishes are unavailable right now. Normal and Foil still work." });
+    throw error;
+  }
+});
+
 app.post("/api/export/cardtrader/preview", async (c) => {
   const body = await readJson(c);
   if (!body.ok) return c.json({ error: body.error }, 400);
@@ -325,6 +349,11 @@ app.post("/api/intake", async (c) => {
   if (!parsedBody.ok) return c.json({ error: parsedBody.error }, 400);
   const draft = parseDraft(parsedBody.body);
   if (!draft.ok) return c.json({ error: draft.error }, 400);
+  if (draft.card.game === "Magic: The Gathering") {
+    const resolvedDraft = await resolveMagicDraft(await connectionSecret(c.env, c.var.tenant.id, "cardtrader"), draft.card);
+    if (!resolvedDraft.ok) return c.json({ error: resolvedDraft.error }, 400);
+    draft.card = resolvedDraft.card;
+  }
 
   const choice = parsedBody.body.onDuplicate ?? "ask";
   if (choice !== "add") {
@@ -373,9 +402,12 @@ app.post("/api/intake/bulk", async (c) => {
   const game = readGame(typeof body.value.game === "string" ? body.value.game : "Lorcana");
   if (!game) return c.json({ error: gameError() }, 400);
 
-  const rows = parseBulk(text, game);
-  if (rows.length === 0) return c.json({ error: "No card lines found." }, 400);
-  if (rows.length > 100) return c.json({ error: "Paste at most 100 cards at a time." }, 400);
+  const parsed = parseBulk(text, game);
+  if (parsed.length === 0) return c.json({ error: "No card lines found." }, 400);
+  if (parsed.length > 100) return c.json({ error: "Paste at most 100 cards at a time." }, 400);
+  const rows = game === "Magic: The Gathering"
+    ? await resolveMagicBulk(await connectionSecret(c.env, c.var.tenant.id, "cardtrader"), parsed)
+    : parsed;
 
   if (mode === "preview") {
     const open = await listOpenPrintings(c.var.tenantEnv, game).catch((error: unknown) => {
@@ -487,6 +519,23 @@ app.post("/api/intake/bulk", async (c) => {
 app.patch("/api/cards/:id", async (c) => {
   const body = await readJson(c);
   if (!body.ok) return c.json({ error: body.error }, 400);
+  if (typeof body.value.finish === "string") {
+    const raw = await getRecordRaw(c.var.tenantEnv, c.req.param("id"));
+    const existing = toQueueCard({ id: raw.id, createdTime: raw.createdTime ?? "", fields: raw.fields });
+    if (effectiveGame(existing.game) === "Magic: The Gathering") {
+      const resolved = await resolveMagicDraft(await connectionSecret(c.env, c.var.tenant.id, "cardtrader"), {
+        game: "Magic: The Gathering",
+        setIdentifier: existing.setIdentifier ?? "",
+        collectorNumber: existing.collectorNumber ?? "",
+        finish: body.value.finish,
+      });
+      if (!resolved.ok) return c.json({ error: resolved.error }, 400);
+      if (riftboundNumberKey(resolved.card.collectorNumber) !== riftboundNumberKey(existing.collectorNumber ?? "")) {
+        return c.json({ error: `${resolved.card.finish} is collector #${resolved.card.collectorNumber}, not #${existing.collectorNumber}. Add that printing as its own row.` }, 400);
+      }
+      body.value.finish = resolved.card.finish;
+    }
+  }
   const card = await editCard(c.var.tenantEnv, c.req.param("id"), body.value);
   audit(c, "edit", [card]);
   backgroundEnrich(c, card.id); // a new finish or condition changes the price and rank
@@ -1516,6 +1565,16 @@ function draftAsCard(card: DraftCard, id: string): QueueCard {
     priority: card.priority ?? null,
     createdTime: "",
   };
+}
+
+async function resolveMagicBulk(token: string | null, rows: ParsedRow[]): Promise<ParsedRow[]> {
+  const out: ParsedRow[] = [];
+  for (const row of rows) {
+    if (!row.card) { out.push(row); continue; }
+    const resolved = await resolveMagicDraft(token, row.card);
+    out.push(resolved.ok ? { ...row, card: resolved.card } : { line: row.line, raw: row.raw, error: resolved.error });
+  }
+  return out;
 }
 
 function previewRows(rows: ParsedRow[], open: QueueCard[]) {

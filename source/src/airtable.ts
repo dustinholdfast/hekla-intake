@@ -9,6 +9,7 @@ import {
   type DraftCard,
   type PrintingRef,
 } from "./fields.ts";
+import { airtableWriteTypecast } from "./magic-finish.ts";
 import { effectiveGame, finishQueryValues, readFinish, sameFinish, setName, type Game, type Status } from "./sets.ts";
 import { scanInventoryStock } from "./stock-scan.ts";
 
@@ -93,7 +94,12 @@ function orEquals(field: string, values: string[]): string { const clauses = [..
 export function finishMatchFormula(finish: string): string { return orEquals("Finish", finishQueryValues(finish)); }
 function setClause(card: PrintingRef): string { if (effectiveGame(card.game) === "Lorcana") return `{Set #}=${formulaString(card.setNumber ?? "")}`; const identifier = (card.setIdentifier ?? "").trim().toLowerCase(); return `LOWER({Set Identifier}&"")=${formulaString(identifier)}`; }
 export async function findDuplicates(env: Env, card: PrintingRef): Promise<QueueCard[]> { const selected = effectiveGame(card.game); if (!selected) return []; const collectorClause = orEquals("Collector Number", collectorVariants(card.collectorNumber)); const formula = `AND(${gameFormula(selected)},${setClause(card)},${finishMatchFormula(card.finish)},OR({Status}='Waitlist',{Status}='Listed'),${collectorClause})`; const { records } = await listRecords(env, formula); return sortQueue(records.map(toQueueCard).filter((row) => matchesPrinting(row, card)), "Waitlist"); }
-async function writeRecords(env: Env, method: "POST" | "PATCH", records: { id?: string; fields: Record<string, string | number> }[]): Promise<QueueCard[]> { const body = await airtable(env, endpoint(env), { method, body: JSON.stringify({ records, typecast: false }) }) as { records?: AirtableRecord[] }; return (body.records ?? []).map(toQueueCard); }
+async function writeRecords(env: Env, method: "POST" | "PATCH", records: { id?: string; fields: Record<string, string | number> }[]): Promise<QueueCard[]> {
+  // A new Magic treatment (Borderless, Extended Art, …) is added as a Finish choice. Existing choices stay.
+  const typecast = records.some((record) => airtableWriteTypecast(record.fields));
+  const body = await airtable(env, endpoint(env), { method, body: JSON.stringify({ records, typecast }) }) as { records?: AirtableRecord[] };
+  return (body.records ?? []).map(toQueueCard);
+}
 export async function createCards(env: Env, cards: DraftCard[]): Promise<QueueCard[]> { const created: QueueCard[] = []; for (let index = 0; index < cards.length; index += 10) { const chunk = cards.slice(index, index + 10).map((card) => ({ fields: buildCreateFields(card) })); created.push(...await writeRecords(env, "POST", chunk)); } return created; }
 export async function mergeQty(env: Env, recordId: string, addQty: number): Promise<QueueCard> { if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400); const url = new URL(endpoint(env)); url.pathname += `/${recordId}`; const existing = await airtable(env, url.toString()) as AirtableRecord; const card = toQueueCard(existing); if (card.status !== "Waitlist" && card.status !== "Listed") throw new AirtableError("Only Waitlist or Listed rows can take a quantity merge.", 400); const nextQty = (card.qty || 0) + addQty; const [updated] = await writeRecords(env, "PATCH", [{ id: recordId, fields: buildMergeFields(nextQty) }]); if (!updated) throw new AirtableError("Airtable did not return the merged row.", 502); return updated; }
 export function matchesPrinting(card: QueueCard, draft: PrintingRef): boolean { if (effectiveGame(card.game) !== draft.game || !sameFinish(card.finish, draft.finish)) return false; if (card.status !== "Waitlist" && card.status !== "Listed") return false; if (setIdentityOf(card) !== setIdentityOf(draft)) return false; const wanted = new Set(collectorVariants(draft.collectorNumber).map((value) => value.toLowerCase())); return collectorVariants(card.collectorNumber ?? "").some((value) => wanted.has(value.toLowerCase())); }
