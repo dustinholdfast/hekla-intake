@@ -295,7 +295,9 @@ export function stockFields(qty: number): Record<string, string | number> {
 }
 export async function readStock(env: Env, recordId: string): Promise<number | null> {
   if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) return null;
-  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`; url.searchParams.append("fields[]", "Qty");
+  // The single-record endpoint takes no fields[] filter (Airtable answers 422 "parameter validation failed"),
+  // so read the whole row.
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
   try {
     const record = await airtable(env, url.toString()) as AirtableRecord;
     return numberField(record.fields?.Qty) ?? 0;
