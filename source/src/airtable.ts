@@ -244,14 +244,17 @@ export async function rescanPage(env: Env, game: Game | null, offset: number | (
  * READ_FIELDS so a base without the field still loads its queue.
  */
 export const CARDTRADER_FIELD = "CardTrader Listing ID";
-export type ExportQueueCard = QueueCard & { cardTraderListingId: string | null };
+/** Deck holds. Optional on read: a base without the column still loads, and a blank cell counts as 0. */
+export const RESERVED_QTY_FIELD = "Reserved Qty";
+export type ExportQueueCard = QueueCard & { cardTraderListingId: string | null; reservedQty: number };
+const reservedQtyOf = (fields: Record<string, unknown>): number => numberField(fields[RESERVED_QTY_FIELD]) ?? 0;
 export async function cardsForExport(env: Env, recordIds: string[]): Promise<ExportQueueCard[]> {
   const ids = [...new Set(recordIds)];
   if (ids.some((id) => !/^rec[A-Za-z0-9]{14}$/.test(id))) throw new AirtableError("That record id is not an Airtable row.", 400);
   if (ids.length === 0) return [];
   const formula = `OR(${ids.map((id) => `RECORD_ID()='${id}'`).join(",")})`;
-  const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD]);
-  const byId = new Map(records.map((r) => [r.id, { ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]) }]));
+  const { records } = await listWithFieldFallback(env, formula, EXPORT_FIELD_ATTEMPTS);
+  const byId = new Map(records.map((r) => [r.id, { ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]), reservedQty: reservedQtyOf(r.fields) }]));
   return ids.flatMap((id) => { const card = byId.get(id); return card ? [card] : []; });
 }
 /**
@@ -312,22 +315,43 @@ export async function writeStock(env: Env, recordId: string, qty: number): Promi
 
 /** Optional Waitlist field holding the TCGplayer SKU (the "TCGplayer Id" in its CSV). Read only if the base has it. */
 export const TCGPLAYER_SKU_FIELD = "TCGplayer SKU";
-export type StockCard = QueueCard & { cardTraderListingId: string | null; tcgplayerSku: string | null };
+export type StockCard = QueueCard & { cardTraderListingId: string | null; tcgplayerSku: string | null; reservedQty?: number };
+
+/**
+ * Optional columns are tried together, then with the SKU dropped before Reserved Qty is dropped.
+ * A base that has deck holds but no TCGplayer SKU must still return Reserved Qty, or held copies get listed.
+ */
+export const STOCK_FIELD_ATTEMPTS: readonly (readonly string[])[] = [
+  [...READ_FIELDS, CARDTRADER_FIELD, TCGPLAYER_SKU_FIELD, RESERVED_QTY_FIELD],
+  [...READ_FIELDS, CARDTRADER_FIELD, RESERVED_QTY_FIELD],
+  [...READ_FIELDS, CARDTRADER_FIELD, TCGPLAYER_SKU_FIELD],
+  [...READ_FIELDS, CARDTRADER_FIELD],
+];
+const EXPORT_FIELD_ATTEMPTS: readonly (readonly string[])[] = [
+  [...READ_FIELDS, CARDTRADER_FIELD, RESERVED_QTY_FIELD],
+  [...READ_FIELDS, CARDTRADER_FIELD],
+];
+
+async function listWithFieldFallback(env: Env, formula: string, attempts: readonly (readonly string[])[]): Promise<{ records: AirtableRecord[]; fields: readonly string[] }> {
+  let last: unknown;
+  for (const fields of attempts) {
+    try {
+      const { records } = await listRecords(env, formula, fields);
+      return { records, fields };
+    } catch (error) {
+      last = error;
+      // Airtable refuses an unknown field name. Drop one optional column and try the next combination.
+      if (!(error instanceof AirtableError) || error.status !== 400 || !/unknown field/i.test(error.message)) throw error;
+    }
+  }
+  throw last;
+}
 
 async function listWithOptional(env: Env, formula: string): Promise<{ records: AirtableRecord[]; hasSku: boolean }> {
-  try {
-    const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD, TCGPLAYER_SKU_FIELD]);
-    return { records, hasSku: true };
-  } catch (error) {
-    // Airtable refuses an unknown field name; a base without the SKU column still works.
-    if (error instanceof AirtableError && error.status === 400 && /unknown field/i.test(error.message)) {
-      const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD]);
-      return { records, hasSku: false };
-    }
-    throw error;
-  }
+  const { records, fields } = await listWithFieldFallback(env, formula, STOCK_FIELD_ATTEMPTS);
+  return { records, hasSku: fields.includes(TCGPLAYER_SKU_FIELD) };
 }
-const toStockCard = (r: AirtableRecord): StockCard => ({ ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]), tcgplayerSku: textField(r.fields[TCGPLAYER_SKU_FIELD]) ?? (typeof r.fields[TCGPLAYER_SKU_FIELD] === "number" ? String(r.fields[TCGPLAYER_SKU_FIELD]) : null) });
+const toStockCard = (r: AirtableRecord): StockCard => ({ ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]), tcgplayerSku: textField(r.fields[TCGPLAYER_SKU_FIELD]) ?? (typeof r.fields[TCGPLAYER_SKU_FIELD] === "number" ? String(r.fields[TCGPLAYER_SKU_FIELD]) : null), reservedQty: reservedQtyOf(r.fields) });
 
 /** Rows by id, with listing id and TCGplayer SKU. At most 100 ids per call. */
 export async function stockCardsByIds(env: Env, recordIds: string[]): Promise<StockCard[]> {

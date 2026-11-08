@@ -79,8 +79,14 @@ function visible(r) {
   const kind = $("f-mismatch").value;
   return kind === "cardtrader" ? r.ctMismatch : kind === "tcgplayer" ? tcgOpen(r) || r.tcg?.source === "suggested" : !isReconciled(r);
 }
+/** Keep in step with src/listable.ts. Blank reserved is 0. Never negative. */
+function listableQty(qty, reserved) {
+  const onHand = Number.isFinite(qty) && qty > 0 ? Math.floor(qty) : 0;
+  const held = Number.isFinite(reserved) && reserved > 0 ? Math.floor(reserved) : 0;
+  return Math.max(0, onHand - held);
+}
 function flags(r) {
-  r.expectedQty = r.status === "Listed" ? Math.max(0, r.airtableQty) : 0;
+  r.expectedQty = r.status === "Listed" ? listableQty(r.airtableQty, r.reservedQty) : 0;
   r.ctMismatch = r.ct != null && r.ct.qty !== r.expectedQty;
   r.tcgMismatch = state.data.tcgAt != null && (r.tcg?.qty ?? 0) !== r.expectedQty;
   return r;
@@ -111,7 +117,9 @@ function render() {
     if (state.canManage) { const box = document.createElement("input"); box.type = "checkbox"; box.checked = state.selected.has(r.recordId); box.addEventListener("change", () => (box.checked ? state.selected.add(r.recordId) : state.selected.delete(r.recordId))); sel.appendChild(box); }
     tr.appendChild(sel);
     cell(tr, r.name, r.recordId); cell(tr, r.game); cell(tr, [r.set, r.number && `#${r.number}`].filter(Boolean).join(" · ")); cell(tr, [r.condition, r.finish].filter(Boolean).join(" · "));
-    cell(tr, r.status); cell(tr, r.status === "Listed" ? r.airtableQty : `${r.airtableQty} (expects 0)`);
+    const held = Number.isFinite(r.reservedQty) && r.reservedQty > 0 ? Math.floor(r.reservedQty) : 0;
+    const qtyText = r.status !== "Listed" ? `${r.airtableQty} (expects 0)` : held ? `${r.airtableQty} (${held} reserved, ${r.expectedQty} listable)` : String(r.airtableQty);
+    cell(tr, r.status); cell(tr, qtyText);
     const ct = cell(tr, r.ct ? r.ct.qty : state.data.ctAt ? "—" : "", r.ct?.listingIds.join(", ")); if (r.ctMismatch) ct.className = "error";
     const tcg = cell(tr, r.tcg ? `${r.tcg.qty}${r.tcgPending ? ` → ${r.tcg.qty + r.tcgPending.delta} pending upload` : ""}` : state.data.tcgAt ? "0 (no match)" : "", r.tcg ? `${r.tcg.productName || ""} ${r.tcg.setName || ""} ${r.tcg.condition || ""} ${money(r.tcg.priceCents)}` : ""); if (tcgOpen(r)) tcg.className = "error";
     cell(tr, r.tcg ? `${SOURCE[r.tcg.source]}${r.tcg.source === "suggested" ? ` ${Math.round(r.tcg.confidence * 100)}% (${r.tcg.confidence >= 0.9 ? "high" : r.tcg.confidence >= 0.75 ? "medium" : "low"})` : ""} · ${r.tcg.tcgplayerId}` : "");
@@ -120,7 +128,7 @@ function render() {
       if (r.ctMismatch) button(actions, `Set CardTrader to ${r.expectedQty}`, () => setCardTrader(r));
       if (r.tcg?.source === "suggested") { button(actions, "Confirm match", () => confirmMatch(r, false)); button(actions, "Confirm + save SKU to Airtable", () => confirmMatch(r, true)); }
       if (r.tcg?.source === "confirmed") button(actions, "Unconfirm", () => unconfirm(r));
-      const targets = r.status !== "Listed" ? new Set() : new Set([r.ct?.qty, r.tcg && r.tcg.source !== "suggested" ? r.tcg.qty : undefined].filter((n) => n != null && n !== r.airtableQty));
+      const targets = r.status !== "Listed" ? new Set() : new Set([r.ct?.qty, r.tcg && r.tcg.source !== "suggested" ? r.tcg.qty : undefined].filter((n) => n != null && n !== r.airtableQty && n !== r.expectedQty));
       for (const n of targets) button(actions, `Set Airtable to ${n}`, () => setAirtable(r, n));
     }
     tbody.appendChild(tr);
@@ -195,7 +203,7 @@ async function unconfirm(r) {
 
 async function setCardTrader(r) {
   const zero = r.expectedQty === 0 ? "\n\nAt 0 CardTrader deletes the listing; it would have to be listed again from the Export screen." : "";
-  if (!confirm(`Set CardTrader for “${r.name}” from ${r.ct.qty} to ${r.expectedQty} (the Airtable quantity)?${zero}`)) return;
+  if (!confirm(`Set CardTrader for “${r.name}” from ${r.ct.qty} to ${r.expectedQty} (Qty minus reserved copies)?${zero}`)) return;
   const data = await post("/api/reconcile/cardtrader/set", { recordId: r.recordId, expectedTarget: r.expectedQty, expectedCurrent: r.ct.qty });
   if (data) { say(`CardTrader now ${data.target} for “${r.name}” (was ${data.before}).`); updateRow(r.recordId, (row) => { row.ct = { ...row.ct, qty: data.ctQty }; }); }
 }

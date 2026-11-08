@@ -72,6 +72,8 @@ function scryfallStore(env: Env): ScryfallStore | null {
   };
 }
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
+import { handleAllocation, productionAllocationDeps } from "./allocations.ts";
+import { withListableQuantity } from "./listable.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
@@ -96,6 +98,13 @@ app.use("*", async (c, next) => {
 app.use("/api/*", async (c, next) => {
   c.header("cache-control", "no-store");
   await next();
+});
+
+// Signed by the deckbuilder (X-Alloc-Signature). Registered before Clerk so it is not a user session.
+app.post("/api/allocations", async (c) => {
+  const body = await rawBody(c);
+  const result = await handleAllocation(c.env, body, c.req.header("x-alloc-timestamp") ?? null, c.req.header("x-alloc-signature") ?? null, productionAllocationDeps(c.env));
+  return c.json(result.body, result.status as 200);
 });
 
 // Public: the sign-in page needs these before anyone has a session. Neither value is secret.
@@ -286,7 +295,7 @@ app.post("/api/export/cardtrader/preview", async (c) => {
   const ids = readRecordIds(body.value.recordIds);
   if (!ids) return c.json({ error: `Send 1 to ${EXPORT_BATCH} record ids.` }, 400);
   const token = await cardTraderToken(c);
-  const rows = await previewExport(token, await cardsForExport(c.var.tenantEnv, ids));
+  const rows = await previewExport(token, withListableQuantity(await cardsForExport(c.var.tenantEnv, ids)));
   return c.json({ canSend: canManageConnections(c), rows: rows.map((row) => (row.ready ? { ...row, product: undefined } : row)) });
 });
 
@@ -297,7 +306,7 @@ app.post("/api/export/cardtrader/send", async (c) => {
   const ids = readRecordIds(body.value.recordIds);
   if (!ids) return c.json({ error: `Send 1 to ${EXPORT_BATCH} record ids.` }, 400);
   const token = await cardTraderToken(c);
-  const rows = await previewExport(token, await cardsForExport(c.var.tenantEnv, ids));
+  const rows = await previewExport(token, withListableQuantity(await cardsForExport(c.var.tenantEnv, ids)));
   const results: { id: string; name: string; listed: boolean; listingId?: number; price?: number; reason?: string; warning?: string }[] = [];
   let stopped: string | null = null;
   for (const row of rows) {

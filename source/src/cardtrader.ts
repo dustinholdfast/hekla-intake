@@ -401,6 +401,18 @@ export async function createProduct(token: string, product: Product, fetcher?: t
   return { productId: resource.id, currency: String(resource.price?.currency ?? ""), cents: Number(resource.price?.cents ?? NaN) };
 }
 
+/**
+ * Lists a card again after its CardTrader product was removed. Same product shape as Export (buildRow),
+ * at the given quantity. Does not require the Waitlist row to still be Waitlist or to have an empty listing id.
+ */
+export async function relistProduct(token: string, card: ExportCard, fetcher?: typeof fetch): Promise<Listing> {
+  const match = await resolveBlueprint(token, card);
+  if ("reason" in match) throw new CardTraderError(match.reason, 422);
+  const row = buildRow(card, match.blueprint);
+  if (!row.ready) throw new CardTraderError(row.reason, 422);
+  return createProduct(token, row.product, fetcher);
+}
+
 export async function deleteProduct(token: string, productId: number, fetcher?: typeof fetch): Promise<void> {
   await call(token, `/products/${productId}`, { method: "DELETE" }, fetcher);
 }

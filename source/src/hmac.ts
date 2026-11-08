@@ -28,6 +28,7 @@ export async function verifyCardTraderSignature(secret: string, body: string, si
 /**
  * starfoil.store → Hekla: X-Hekla-Signature is hex(HMAC-SHA256(`${timestamp}.${body}`)), X-Hekla-Timestamp is
  * Unix seconds. Deliveries older than five minutes are refused so a captured request cannot be replayed later.
+ * POST /api/allocations uses the same construction with X-Alloc-Signature, X-Alloc-Timestamp, and ALLOCATION_HMAC_SECRET.
  */
 export async function starfoilSignature(secret: string, timestamp: string, body: string): Promise<string> {
   return toHex(await hmac(secret, `${timestamp}.${body}`));

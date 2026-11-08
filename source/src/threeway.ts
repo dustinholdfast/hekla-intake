@@ -3,6 +3,7 @@
  * Pure functions only (no I/O), so matching and the quantity math are unit tested.
  */
 import type { CtListing } from "./cardtrader.ts";
+import { listableQty } from "./listable.ts";
 import { csvRow } from "./sales.ts";
 import { effectiveGame, isFoilFinish, type Game } from "./sets.ts";
 import { parseTcgCondition, type TcgRow } from "./tcgcsv.ts";
@@ -11,13 +12,15 @@ import { TCGPLAYER_HEADER } from "./tcgplayer.ts";
 export type ReconRow = {
   id: string; name: string; game: string | null; setName: string | null; setIdentifier: string | null; setNumber: string | null;
   collectorNumber: string | null; finish: string | null; condition: string | null; rarity: string | null; qty: number; status: string | null;
+  /** Deck holds. Blank means 0. Listable stock is qty minus this. */
+  reservedQty?: number | null;
   marketPriceUsd: number | null; cardTraderListingId: string | null; tcgplayerSku: string | null;
 };
 export type MatchSource = "sku" | "confirmed" | "suggested";
 export type TcgMatch = { tcgplayerId: string; source: MatchSource; confidence: number; row: TcgRow | null };
 export type ViewRow = {
   recordId: string; name: string; game: string | null; set: string | null; number: string | null; condition: string | null; finish: string | null;
-  status: string | null; airtableQty: number; expectedQty: number;
+  status: string | null; airtableQty: number; reservedQty: number; expectedQty: number;
   ct: { qty: number; listingIds: number[]; storedListingId: number | null } | null;
   tcg: { qty: number; tcgplayerId: string; source: MatchSource; confidence: number; productName: string | null; setName: string | null; condition: string | null; priceCents: number | null } | null;
   ctMismatch: boolean; tcgMismatch: boolean;
@@ -64,8 +67,10 @@ export function gameOfProductLine(line: string | null): Game | null {
   return null;
 }
 
-/** What each platform should show for a row: Listed rows their Qty, everything else 0. */
-export const expectedQty = (r: Pick<ReconRow, "qty" | "status">) => (r.status === "Listed" ? Math.max(0, r.qty) : 0);
+/** What each platform should list: a Listed row's Qty minus Reserved Qty. Every other status lists 0. */
+export const expectedQty = (r: Pick<ReconRow, "qty" | "status" | "reservedQty">) => (r.status === "Listed" ? listableQty(r.qty, r.reservedQty) : 0);
+
+const reservedCopies = (reserved: number | null | undefined): number => (typeof reserved === "number" && Number.isFinite(reserved) && reserved > 0 ? Math.floor(reserved) : 0);
 
 /* ---------- fuzzy TCGplayer matching ---------- */
 
@@ -157,7 +162,7 @@ export function buildView(rows: ReconRow[], listings: CtListing[] | null, tcgRow
     const tcgMismatch = tcgRows != null && (tcg?.qty ?? 0) !== expected;
     // Rows that are not Listed and show nothing anywhere are history, not reconcile work.
     if (r.status !== "Listed" && !(ct?.qty) && !(tcg?.qty) && !m) continue;
-    out.push({ recordId: r.id, name: r.name, game: effectiveGame(r.game) ?? r.game, set: r.setName ?? r.setIdentifier ?? r.setNumber, number: r.collectorNumber, condition: r.condition, finish: r.finish, status: r.status, airtableQty: r.qty, expectedQty: expected, ct, tcg, ctMismatch, tcgMismatch, tcgPending: null });
+    out.push({ recordId: r.id, name: r.name, game: effectiveGame(r.game) ?? r.game, set: r.setName ?? r.setIdentifier ?? r.setNumber, number: r.collectorNumber, condition: r.condition, finish: r.finish, status: r.status, airtableQty: r.qty, reservedQty: reservedCopies(r.reservedQty), expectedQty: expected, ct, tcg, ctMismatch, tcgMismatch, tcgPending: null });
   }
   const matchedTcg = new Set([...matches.values()].map((m) => m.tcgplayerId));
   const unmatchedCardTrader = (listings ?? []).filter((l) => !usedListings.has(l.id));
@@ -337,7 +342,7 @@ export function planReconcileAll(rows: ViewRow[], listings: CtListing[], prices:
 
 export type BatchItem = { recordId: string; expectedTarget: number; expectedCurrent: number };
 export type BatchResult = { recordId: string; status: "succeeded" | "skipped" | "failed"; reason?: string; before?: number; target?: number; applied: { listingId: number; delta: number }[] };
-type BatchCard = { id: string; qty: number; status: string | null; cardTraderListingId: string | null };
+type BatchCard = { id: string; qty: number; status: string | null; cardTraderListingId: string | null; reservedQty?: number | null };
 
 /**
  * One Reconcile All batch, sequential. Each row is re-checked against a fresh Airtable read and a fresh CardTrader

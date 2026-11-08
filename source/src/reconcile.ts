@@ -3,16 +3,17 @@
  * starfoil.store needs no check of its own: its singles stock is copied from the CardTrader listings.
  *
  * Report mode only reports. Push mode also lowers a CardTrader listing that shows more copies than the
- * shared Qty, but only after the same excess has been seen on two runs in a row, so a sale still being
- * processed is never "fixed" twice. Hekla never raises a CardTrader quantity.
+ * listable quantity (Qty minus Reserved Qty), but only after the same excess has been seen on two runs in a row,
+ * so a sale still being processed is never "fixed" twice. Hekla never raises a CardTrader quantity.
  */
 import type { CtListing } from "./cardtrader.ts";
+import { listableQty } from "./listable.ts";
 
 export type DriftKind = "over_listed" | "under_listed" | "missing_on_cardtrader" | "unknown_record";
 export type Drift = { kind: DriftKind; recordId: string | null; name: string | null; airtableQty: number | null; cardTraderQty: number; listingIds: number[] };
 export type ReconcileReport = { at: string; checkedRows: number; listings: number; drift: Drift[]; pushed: { recordId: string; listingId: number; delta: number }[]; errors: string[] };
 
-type Row = { id: string; name: string; qty: number; status: string | null; cardTraderListingId: string | null };
+type Row = { id: string; name: string; qty: number; status: string | null; cardTraderListingId: string | null; reservedQty?: number | null };
 
 export function diffStock(rows: Row[], listings: CtListing[]): Drift[] {
   const byRecord = new Map<string, CtListing[]>();
@@ -28,7 +29,7 @@ export function diffStock(rows: Row[], listings: CtListing[]): Drift[] {
     const stored = Number(row.cardTraderListingId);
     if (Number.isInteger(stored) && byListing.has(stored) && !mine.some((l) => l.id === stored)) mine.push(byListing.get(stored)!);
     const ct = mine.reduce((n, l) => n + l.quantity, 0);
-    const air = row.status === "Sold" ? 0 : Math.max(0, row.qty);
+    const air = row.status === "Sold" ? 0 : listableQty(row.qty, row.reservedQty);
     const base = { recordId: row.id, name: row.name || null, airtableQty: air, cardTraderQty: ct, listingIds: mine.map((l) => l.id) };
     if (ct > air) drift.push({ kind: "over_listed", ...base });
     else if (ct === 0 && air > 0 && row.status === "Listed") drift.push({ kind: "missing_on_cardtrader", ...base });

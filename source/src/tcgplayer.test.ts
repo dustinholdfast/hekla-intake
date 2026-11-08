@@ -8,6 +8,18 @@ const A = "recAAAAAAAAAAAAAA", B = "recBBBBBBBBBBBBBB";
 const sale = (over: Partial<SaleRow>): SaleRow => ({ id: 1, platform: "cardtrader", externalOrderId: "1", orderCode: null, lineKey: "1", recordId: A, game: "Lorcana", cardName: "Elsa", qty: 1, currency: "USD", grossCents: 100, feeCents: null, netCents: null, soldAt: "2026-10-20T10:00:00.000Z", orderState: "paid", cancelledAt: null, decrementOwner: "starfoil", decrementedAt: null, oversold: false, needsReview: null, ...over });
 const card = (over: Partial<StockCard>): StockCard => ({ id: A, name: "Elsa", cardName: "Elsa", resolvedName: "Elsa - Spirit of Winter", game: "Lorcana", setNumber: "1", setIdentifier: null, setName: "The First Chapter", collectorNumber: "42", finish: "Normal", condition: "NM", qty: 0, status: "Sold", rankScore: null, marketPriceUsd: 12.5, notes: null, priority: null, createdTime: "", autoRank: null, rarity: "Legendary", costBasisUsd: null, cardType: null, recommendation: null, rankReason: null, enrichedAt: null, priceSource: null, cardTraderListingId: null, tcgplayerSku: "123456", ...over });
 
+test("pull list availability is Qty minus Reserved Qty", () => {
+  const open = buildPullList([sale({})], [card({ qty: 4, status: "Listed", reservedQty: 3 })]);
+  assert.equal(open[0]!.sharedQty, 1);
+  assert.equal(open[0]!.soldOut, false);
+  const held = buildPullList([sale({})], [card({ qty: 2, status: "Listed", reservedQty: 2 })]);
+  assert.equal(held[0]!.sharedQty, 0);
+  assert.equal(held[0]!.soldOut, true);
+  const blank = buildPullList([sale({})], [card({ qty: 2, status: "Listed" })]);
+  assert.equal(blank[0]!.sharedQty, 2);
+  assert.equal(blank[0]!.soldOut, false);
+});
+
 test("pull list groups by row across platforms", () => {
   const items = buildPullList([sale({}), sale({ id: 2, platform: "starfoil", qty: 2, soldAt: "2026-10-20T12:00:00.000Z" }), sale({ id: 3, recordId: B, cardName: "Jinx" })], [card({}), card({ id: B, tcgplayerSku: null, status: "Listed", qty: 2, finish: "Foil" })]);
   assert.equal(items.length, 2);

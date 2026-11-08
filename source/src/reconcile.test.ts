@@ -22,6 +22,14 @@ test("diff finds over-listed, under-listed, missing and unknown rows", () => {
   assert.equal(d.find((x) => x.recordId === A)!.cardTraderQty, 4);
 });
 
+test("reserved copies are not counted as listable, so a matching CardTrader quantity is not drift", () => {
+  assert.deepEqual(diffStock([{ id: A, name: "A", qty: 4, reservedQty: 1, status: "Listed", cardTraderListingId: "10" }], [L(10, A, 3)]), []);
+  assert.deepEqual(diffStock([{ id: A, name: "A", qty: 2, status: "Listed", cardTraderListingId: "10" }], [L(10, A, 2)]), [], "blank reserved is 0");
+  const over = diffStock([{ id: A, name: "A", qty: 2, reservedQty: 5, status: "Listed", cardTraderListingId: "10" }], [L(10, A, 1)]);
+  assert.equal(over[0]!.kind, "over_listed");
+  assert.equal(over[0]!.airtableQty, 0);
+});
+
 test("a Sold row counts as 0 even if Qty was left behind", () => {
   const d = diffStock([{ id: A, name: "A", qty: 2, status: "Sold", cardTraderListingId: "10" }], [L(10, A, 1)]);
   assert.equal(d[0]!.kind, "over_listed"); assert.equal(d[0]!.airtableQty, 0);

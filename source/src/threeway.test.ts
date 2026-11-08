@@ -123,6 +123,27 @@ test("buildView: quantities, mismatches and unmatched lists on each side", () =>
   assert.deepEqual(filterView(v.rows, { mismatch: "any", game: "Pokémon", showReconciled: true }), []);
 });
 
+test("held copies are not listable: CardTrader matching Qty minus Reserved Qty is not a mismatch", () => {
+  const rows = [R({ id: A, qty: 4, reservedQty: 1, cardTraderListingId: "10" })];
+  const listings = [L(10, A, 3)];
+  const v = buildView(rows, listings, null, new Map(), { ct: "a", tcg: null });
+  assert.equal(v.rows[0]!.airtableQty, 4);
+  assert.equal(v.rows[0]!.reservedQty, 1);
+  assert.equal(v.rows[0]!.expectedQty, 3);
+  assert.equal(v.rows[0]!.ctMismatch, false);
+  assert.deepEqual(diffStock(rows, listings), []);
+});
+
+test("blank Reserved Qty counts as 0, and reserving more than Qty floors listable stock at 0", () => {
+  const blank = buildView([R({ id: A, qty: 2, reservedQty: null })], [L(1, A, 2)], null, new Map(), { ct: "a", tcg: null });
+  assert.equal(blank.rows[0]!.expectedQty, 2);
+  assert.equal(blank.rows[0]!.ctMismatch, false);
+  const held = buildView([R({ id: A, qty: 2, reservedQty: 9 })], [L(1, A, 1)], null, new Map(), { ct: "a", tcg: null });
+  assert.equal(held.rows[0]!.expectedQty, 0);
+  assert.equal(held.rows[0]!.ctMismatch, true);
+  assert.equal(diffStock([{ id: A, name: "A", qty: 2, reservedQty: 9, status: "Listed", cardTraderListingId: "1" }], [L(1, A, 1)])[0]!.kind, "over_listed");
+});
+
 test("a Sold row still listed on CardTrader shows as a mismatch (expected 0)", () => {
   const v = buildView([R({ id: A, status: "Sold", qty: 0, cardTraderListingId: "10" })], [L(10, A, 1)], null, new Map(), { ct: "a", tcg: null });
   assert.deepEqual([v.rows[0]!.expectedQty, v.rows[0]!.ct!.qty, v.rows[0]!.ctMismatch, v.rows[0]!.tcgMismatch], [0, 1, true, false]);
@@ -275,6 +296,15 @@ test("runCtBatch applies sequentially, skips stale rows, and keeps going after a
   assert.equal(results[3]!.reason, "CardTrader 500");
   assert.deepEqual(calls, ["10:2", "40:1"], "stale rows are never touched");
   assert.equal(logged.length, 5, "every row is logged");
+});
+
+test("runCtBatch re-lists toward Qty minus Reserved Qty", async () => {
+  const cards = new Map([[A, { ...card(A, 4, "10"), reservedQty: 1 }]]);
+  const applied: [number, number][] = [];
+  const results = await runCtBatch([{ recordId: A, expectedTarget: 3, expectedCurrent: 4 }], cards, [L(10, A, 4)], async (id, delta) => { applied.push([id, delta]); }, async () => {});
+  assert.equal(results[0]!.status, "succeeded");
+  assert.equal(results[0]!.target, 3);
+  assert.deepEqual(applied, [[10, -1]]);
 });
 
 test("runCtBatch sees its own earlier changes when two rows share a listing", async () => {

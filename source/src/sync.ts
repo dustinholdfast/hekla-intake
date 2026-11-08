@@ -144,7 +144,7 @@ function overListedAlert(d: Drift, mode: ReconcileMode, report: ReconcileReport)
     key: `overlisted:${d.recordId}:${d.airtableQty}:${d.cardTraderQty}`,
     subject: `CardTrader shows more than you have: ${d.name ?? d.recordId}`,
     text: [
-      `CardTrader lists ${d.cardTraderQty} but the shared Qty is ${d.airtableQty}. A buyer could buy a copy you do not have.`,
+      `CardTrader lists ${d.cardTraderQty} but the listable quantity is ${d.airtableQty} (Qty minus Reserved Qty). A buyer could buy a copy you do not have.`,
       lowered ? `Hekla lowered the CardTrader listing by ${lowered}.` : mode === "push" ? "Hekla will lower the listing if this is still true on the next check (15 minutes)." : "Reconcile is in report mode, so nothing was changed.",
       "", `Waitlist row: ${d.recordId}`, `CardTrader listings: ${d.listingIds.join(", ")}`,
     ].join("\n"),
