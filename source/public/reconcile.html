@@ -49,7 +49,7 @@
 
     <section class="panel">
       <div class="panel-head"><h2>Sources</h2></div>
-      <p class="hint"><b>Airtable</b> is read live every time this page loads. A Listed row should show its Qty on each platform; any other status should show 0. Nothing here changes Airtable unless you press <b>Set Airtable to …</b> and confirm.</p>
+      <p class="hint"><b>Airtable</b> is read live every time this page loads. A Listed row should show its listable quantity on each platform: Qty minus Reserved Qty minus Deck Reserved Qty (blanks count as 0). A Free Qty formula is used when that column exists. Any other status should show 0. Nothing here changes Airtable unless you press <b>Set Airtable to …</b> and confirm.</p>
       <p><b>CardTrader:</b> <span id="ct-at" class="hint"></span> <button id="ct-check" class="ghost tiny" type="button" hidden>Run check now</button></p>
       <p id="ct-cron" class="hint"></p>
       <p><b>TCGplayer:</b> <span id="tcg-at" class="hint"></span></p>

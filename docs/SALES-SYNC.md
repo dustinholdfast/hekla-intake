@@ -26,7 +26,7 @@ Nothing changes in production until the migration is applied and the flags below
 - **"Push the absolute qty to the other platform."**
   - After a CardTrader sale, CardTrader has already lowered its own listing. starfoil.store re-reads CardTrader every 3 minutes, so nothing needs pushing.
   - After a store sale, starfoil-lgs has already pushed to CardTrader.
-  - The reconcile is the safety net. It compares absolute numbers (Airtable Qty vs the sum of CardTrader listing quantities, matched by `user_data_field`). In `push` mode it sets CardTrader down to the Airtable Qty.
+  - The reconcile is the safety net. It compares absolute numbers (listable quantity vs the sum of CardTrader listing quantities, matched by `user_data_field`). Listable quantity is Airtable Qty minus `Reserved Qty` minus `Deck Reserved Qty`, or the `Free Qty` formula when that column has a number. Blanks count as 0. In `push` mode it sets CardTrader down to that listable quantity. `CT_SALES_MODE` still lowers Qty itself and does not read either hold field.
 
 ### The decrement, step by step (`src/sales.ts` → `applyPendingDecrements`)
 

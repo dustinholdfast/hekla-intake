@@ -9,6 +9,7 @@ import {
   type DraftCard,
   type PrintingRef,
 } from "./fields.ts";
+import { holdFieldNames, type HoldFieldNames } from "./listable.ts";
 import { airtableWriteTypecast } from "./magic-finish.ts";
 import { effectiveGame, finishQueryValues, readFinish, sameFinish, setName, type Game, type Status } from "./sets.ts";
 import { scanInventoryStock } from "./stock-scan.ts";
@@ -244,14 +245,16 @@ export async function rescanPage(env: Env, game: Game | null, offset: number | (
  * READ_FIELDS so a base without the field still loads its queue.
  */
 export const CARDTRADER_FIELD = "CardTrader Listing ID";
-export type ExportQueueCard = QueueCard & { cardTraderListingId: string | null };
+export type HoldCounts = { reservedQty: number; deckReservedQty: number; freeQty: number | null };
+export type ExportQueueCard = QueueCard & { cardTraderListingId: string | null } & HoldCounts;
 export async function cardsForExport(env: Env, recordIds: string[]): Promise<ExportQueueCard[]> {
   const ids = [...new Set(recordIds)];
   if (ids.some((id) => !/^rec[A-Za-z0-9]{14}$/.test(id))) throw new AirtableError("That record id is not an Airtable row.", 400);
   if (ids.length === 0) return [];
+  const names = holdFieldNames(env);
   const formula = `OR(${ids.map((id) => `RECORD_ID()='${id}'`).join(",")})`;
-  const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD]);
-  const byId = new Map(records.map((r) => [r.id, { ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]) }]));
+  const { records } = await listWithOptionalFields(env, formula, [...READ_FIELDS, CARDTRADER_FIELD], [names.reservedQty, names.deckReservedQty, names.freeQty]);
+  const byId = new Map(records.map((r) => [r.id, { ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]), ...holdsFrom(r.fields, names) }]));
   return ids.flatMap((id) => { const card = byId.get(id); return card ? [card] : []; });
 }
 /**
@@ -312,43 +315,86 @@ export async function writeStock(env: Env, recordId: string, qty: number): Promi
 
 /** Optional Waitlist field holding the TCGplayer SKU (the "TCGplayer Id" in its CSV). Read only if the base has it. */
 export const TCGPLAYER_SKU_FIELD = "TCGplayer SKU";
-export type StockCard = QueueCard & { cardTraderListingId: string | null; tcgplayerSku: string | null };
+export type StockCard = QueueCard & { cardTraderListingId: string | null; tcgplayerSku: string | null } & Partial<HoldCounts>;
 
-async function listWithOptional(env: Env, formula: string): Promise<{ records: AirtableRecord[]; hasSku: boolean }> {
-  try {
-    const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD, TCGPLAYER_SKU_FIELD]);
-    return { records, hasSku: true };
-  } catch (error) {
-    // Airtable refuses an unknown field name; a base without the SKU column still works.
-    if (error instanceof AirtableError && error.status === 400 && /unknown field/i.test(error.message)) {
-      const { records } = await listRecords(env, formula, [...READ_FIELDS, CARDTRADER_FIELD]);
-      return { records, hasSku: false };
-    }
-    throw error;
-  }
+/** The field Airtable named in an unknown-field error, if the message includes it. */
+export function unknownAirtableField(message: string): string | null {
+  const match = /unknown field name: "([^"]+)"/i.exec(message);
+  return match?.[1] ?? null;
 }
-const toStockCard = (r: AirtableRecord): StockCard => ({ ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]), tcgplayerSku: textField(r.fields[TCGPLAYER_SKU_FIELD]) ?? (typeof r.fields[TCGPLAYER_SKU_FIELD] === "number" ? String(r.fields[TCGPLAYER_SKU_FIELD]) : null) });
+
+/**
+ * Drops the column Airtable refused. When the message does not name one, the last optional column is dropped
+ * so a base without Free Qty, Deck Reserved Qty, or a SKU still returns the columns it does have.
+ * Returns null when nothing optional remains, or the named field is one of the required columns.
+ */
+export function withoutUnknownField(fields: readonly string[], required: readonly string[], message: string): string[] | null {
+  const requiredSet = new Set(required);
+  const named = unknownAirtableField(message);
+  if (named) {
+    if (!fields.includes(named) || requiredSet.has(named)) return null;
+    return fields.filter((field) => field !== named);
+  }
+  const optional = [...fields].reverse().find((field) => !requiredSet.has(field));
+  if (!optional) return null;
+  return fields.filter((field) => field !== optional);
+}
+
+function holdsFrom(fields: Record<string, unknown>, names: HoldFieldNames): HoldCounts {
+  return {
+    reservedQty: numberField(fields[names.reservedQty]) ?? 0,
+    deckReservedQty: numberField(fields[names.deckReservedQty]) ?? 0,
+    freeQty: numberField(fields[names.freeQty]),
+  };
+}
+
+async function listWithOptionalFields(env: Env, formula: string, required: readonly string[], optional: readonly string[]): Promise<{ records: AirtableRecord[]; fields: readonly string[] }> {
+  let fields = [...new Set([...required, ...optional])];
+  let last: unknown;
+  for (let attempt = 0; attempt <= optional.length; attempt++) {
+    try {
+      const { records } = await listRecords(env, formula, fields);
+      return { records, fields };
+    } catch (error) {
+      last = error;
+      if (!(error instanceof AirtableError) || error.status !== 400 || !/unknown field/i.test(error.message)) throw error;
+      const next = withoutUnknownField(fields, required, error.message);
+      if (!next) throw error;
+      fields = next;
+    }
+  }
+  if (last instanceof Error) throw last;
+  throw new AirtableError("Airtable field list failed.", 502);
+}
+
+async function listWithOptional(env: Env, formula: string): Promise<{ records: AirtableRecord[]; hasSku: boolean; names: HoldFieldNames }> {
+  const names = holdFieldNames(env);
+  const required = [...READ_FIELDS, CARDTRADER_FIELD];
+  const { records, fields } = await listWithOptionalFields(env, formula, required, [TCGPLAYER_SKU_FIELD, names.reservedQty, names.deckReservedQty, names.freeQty]);
+  return { records, hasSku: fields.includes(TCGPLAYER_SKU_FIELD), names };
+}
+const toStockCard = (r: AirtableRecord, names: HoldFieldNames): StockCard => ({ ...toQueueCard(r), cardTraderListingId: textField(r.fields[CARDTRADER_FIELD]), tcgplayerSku: textField(r.fields[TCGPLAYER_SKU_FIELD]) ?? (typeof r.fields[TCGPLAYER_SKU_FIELD] === "number" ? String(r.fields[TCGPLAYER_SKU_FIELD]) : null), ...holdsFrom(r.fields, names) });
 
 /** Rows by id, with listing id and TCGplayer SKU. At most 100 ids per call. */
 export async function stockCardsByIds(env: Env, recordIds: string[]): Promise<StockCard[]> {
   const ids = [...new Set(recordIds.filter((id) => /^rec[A-Za-z0-9]{14}$/.test(id)))].slice(0, 100);
   if (ids.length === 0) return [];
-  const { records } = await listWithOptional(env, `OR(${ids.map((id) => `RECORD_ID()='${id}'`).join(",")})`);
-  return records.map(toStockCard);
+  const { records, names } = await listWithOptional(env, `OR(${ids.map((id) => `RECORD_ID()='${id}'`).join(",")})`);
+  return records.map((record) => toStockCard(record, names));
 }
 
 /** Every row that has a CardTrader listing id (any status), for the reconcile. */
 export async function rowsWithListings(env: Env): Promise<StockCard[]> {
-  const { records } = await listWithOptional(env, `{${CARDTRADER_FIELD}}!=''`);
-  return records.map(toStockCard);
+  const { records, names } = await listWithOptional(env, `{${CARDTRADER_FIELD}}!=''`);
+  return records.map((record) => toStockCard(record, names));
 }
 
 /* ---------- three-way reconcile ---------- */
 
 /** Listed rows, Sold rows and anything with a CardTrader listing id, with the optional TCGplayer SKU. */
 export async function reconcileRows(env: Env): Promise<{ rows: StockCard[]; hasSkuColumn: boolean }> {
-  const { records, hasSku } = await listWithOptional(env, `OR({Status}='Listed',{Status}='Sold',{${CARDTRADER_FIELD}}!='')`);
-  return { rows: records.map(toStockCard), hasSkuColumn: hasSku };
+  const { records, hasSku, names } = await listWithOptional(env, `OR({Status}='Listed',{Status}='Sold',{${CARDTRADER_FIELD}}!='')`);
+  return { rows: records.map((record) => toStockCard(record, names)), hasSkuColumn: hasSku };
 }
 
 /**

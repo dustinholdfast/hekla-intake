@@ -50,7 +50,7 @@
     <section class="panel">
       <div class="panel-head"><h2>Sales log</h2><span id="last-poll" class="hint"></span></div>
       <form id="filters" class="queue-tools" autocomplete="off">
-        <select id="f-platform" aria-label="Platform"><option value="">All platforms</option><option value="cardtrader">CardTrader</option><option value="starfoil">starfoil.store</option></select>
+        <select id="f-platform" aria-label="Platform"><option value="">All platforms</option><option value="cardtrader">CardTrader</option><option value="starfoil">starfoil.store</option><option value="allocation">Deck sale</option></select>
         <label class="hint">From <input id="f-from" type="date" /></label>
         <label class="hint">To <input id="f-to" type="date" /></label>
         <select id="f-game" aria-label="Game"><option value="">All games</option></select>
@@ -81,7 +81,7 @@
 
     <section class="panel">
       <div class="panel-head"><h2>Stock check</h2><button id="reconcile" class="ghost tiny" type="button" hidden>Check now</button></div>
-      <p class="hint">Every 15 minutes Hekla compares the shared Qty in Airtable with what CardTrader lists (starfoil.store copies CardTrader). <span id="reconcile-mode"></span></p>
+      <p class="hint">Every 15 minutes Hekla compares listable stock (Qty minus Reserved Qty minus Deck Reserved Qty) with what CardTrader lists (starfoil.store copies CardTrader). <span id="reconcile-mode"></span></p>
       <p id="reconcile-meta" class="hint"></p>
       <div class="table-wrap"><table class="admin-table"><thead><tr><th>Problem</th><th>Card</th><th>Airtable Qty</th><th>CardTrader</th><th>Row</th></tr></thead><tbody id="drift"></tbody></table></div>
     </section>

@@ -13,8 +13,8 @@
 import { CARDTRADER_GAMES } from "./cardtrader.ts";
 import type { Game } from "./sets.ts";
 
-export type Platform = "cardtrader" | "starfoil";
-export const PLATFORMS: readonly Platform[] = ["cardtrader", "starfoil"];
+export type Platform = "cardtrader" | "starfoil" | "allocation";
+export const PLATFORMS: readonly Platform[] = ["cardtrader", "starfoil", "allocation"];
 export type DecrementOwner = "starfoil" | "hekla" | "none";
 
 export type SaleLine = {
@@ -326,7 +326,7 @@ export async function applyPendingDecrements(store: SaleStore, stock: StockRecor
 }
 
 function alertFor(row: PendingDecrement, what: string, key: string, oversold = false): Alert {
-  const where = row.platform === "cardtrader" ? "CardTrader" : "starfoil.store";
+  const where = row.platform === "cardtrader" ? "CardTrader" : row.platform === "allocation" ? "Deck sale" : "starfoil.store";
   return {
     key,
     subject: `${oversold ? "OVERSOLD: " : "Check: "}${row.cardName ?? row.recordId} · ${where} order ${row.orderCode ?? row.externalOrderId}`,

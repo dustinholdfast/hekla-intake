@@ -123,6 +123,34 @@ test("buildView: quantities, mismatches and unmatched lists on each side", () =>
   assert.deepEqual(filterView(v.rows, { mismatch: "any", game: "Pokémon", showReconciled: true }), []);
 });
 
+test("manual and deck holds are not listable: CardTrader matching Qty minus both is not a mismatch", () => {
+  const rows = [R({ id: A, qty: 5, reservedQty: 1, deckReservedQty: 1, cardTraderListingId: "10" })];
+  const listings = [L(10, A, 3)];
+  const v = buildView(rows, listings, null, new Map(), { ct: "a", tcg: null });
+  assert.equal(v.rows[0]!.airtableQty, 5);
+  assert.equal(v.rows[0]!.reservedQty, 1);
+  assert.equal(v.rows[0]!.deckReservedQty, 1);
+  assert.equal(v.rows[0]!.freeQty, null);
+  assert.equal(v.rows[0]!.expectedQty, 3);
+  assert.equal(v.rows[0]!.ctMismatch, false);
+  assert.deepEqual(diffStock(rows, listings), []);
+});
+
+test("Free Qty wins when the formula returned a number, and blanks fall back to both holds", () => {
+  const formula = buildView([R({ id: A, qty: 5, reservedQty: 1, deckReservedQty: 1, freeQty: 2 })], [L(1, A, 2)], null, new Map(), { ct: "a", tcg: null });
+  assert.equal(formula.rows[0]!.expectedQty, 2);
+  assert.equal(formula.rows[0]!.ctMismatch, false);
+  const zero = buildView([R({ id: A, qty: 4, freeQty: 0 })], [L(1, A, 1)], null, new Map(), { ct: "a", tcg: null });
+  assert.equal(zero.rows[0]!.expectedQty, 0);
+  assert.equal(zero.rows[0]!.ctMismatch, true);
+  const blank = buildView([R({ id: A, qty: 2, reservedQty: null, deckReservedQty: null, freeQty: null })], [L(1, A, 2)], null, new Map(), { ct: "a", tcg: null });
+  assert.equal(blank.rows[0]!.expectedQty, 2);
+  assert.equal(blank.rows[0]!.ctMismatch, false);
+  const held = buildView([R({ id: A, qty: 2, reservedQty: 1, deckReservedQty: 9 })], [L(1, A, 1)], null, new Map(), { ct: "a", tcg: null });
+  assert.equal(held.rows[0]!.expectedQty, 0);
+  assert.equal(diffStock([{ id: A, name: "A", qty: 2, reservedQty: 1, deckReservedQty: 9, status: "Listed", cardTraderListingId: "1" }], [L(1, A, 1)])[0]!.kind, "over_listed");
+});
+
 test("a Sold row still listed on CardTrader shows as a mismatch (expected 0)", () => {
   const v = buildView([R({ id: A, status: "Sold", qty: 0, cardTraderListingId: "10" })], [L(10, A, 1)], null, new Map(), { ct: "a", tcg: null });
   assert.deepEqual([v.rows[0]!.expectedQty, v.rows[0]!.ct!.qty, v.rows[0]!.ctMismatch, v.rows[0]!.tcgMismatch], [0, 1, true, false]);
@@ -275,6 +303,15 @@ test("runCtBatch applies sequentially, skips stale rows, and keeps going after a
   assert.equal(results[3]!.reason, "CardTrader 500");
   assert.deepEqual(calls, ["10:2", "40:1"], "stale rows are never touched");
   assert.equal(logged.length, 5, "every row is logged");
+});
+
+test("runCtBatch re-lists toward Qty minus manual and deck holds", async () => {
+  const cards = new Map([[A, { ...card(A, 5, "10"), reservedQty: 1, deckReservedQty: 1 }]]);
+  const applied: [number, number][] = [];
+  const results = await runCtBatch([{ recordId: A, expectedTarget: 3, expectedCurrent: 5 }], cards, [L(10, A, 5)], async (id, delta) => { applied.push([id, delta]); }, async () => {});
+  assert.equal(results[0]!.status, "succeeded");
+  assert.equal(results[0]!.target, 3);
+  assert.deepEqual(applied, [[10, -2]]);
 });
 
 test("runCtBatch sees its own earlier changes when two rows share a listing", async () => {

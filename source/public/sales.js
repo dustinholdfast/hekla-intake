@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const state = { canManage: false };
-const PLATFORM = { cardtrader: "CardTrader", starfoil: "starfoil.store" };
+const PLATFORM = { cardtrader: "CardTrader", starfoil: "starfoil.store", allocation: "Deck sale" };
 const DRIFT = { over_listed: "CardTrader shows more than you have", under_listed: "CardTrader shows fewer", missing_on_cardtrader: "Not on CardTrader", unknown_record: "Listing points at an unknown row" };
 
 document.addEventListener("DOMContentLoaded", () => {

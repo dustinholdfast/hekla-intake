@@ -14,4 +14,14 @@ interface Env {
   CONNECTIONS_KEY?: string;
   /** Deployed version (wrangler.toml [version_metadata]); cache-busts static assets. */
   CF_VERSION_METADATA?: { id: string; tag?: string; timestamp?: string };
+  /** "on" / "true" / "1" opens POST /api/allocations. Unset or anything else answers 503. */
+  ALLOCATIONS_ENABLED?: string;
+  /** wrangler secret. Signs X-Alloc-Signature. Never a [vars] entry. */
+  ALLOCATION_HMAC_SECRET?: string;
+  /** Airtable column for manual holds. Default "Reserved Qty". */
+  RESERVED_QTY_FIELD?: string;
+  /** Airtable column for deck holds. Default "Deck Reserved Qty". */
+  DECK_RESERVED_QTY_FIELD?: string;
+  /** Airtable formula for copies that can be listed. Default "Free Qty". Used when the column returns a number. */
+  FREE_QTY_FIELD?: string;
 }

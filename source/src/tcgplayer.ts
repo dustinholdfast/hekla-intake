@@ -9,6 +9,7 @@
  * also SETS your price to that value. Rows without a SKU cannot be imported and are listed separately.
  */
 import type { StockCard } from "./airtable.ts";
+import { listableQty } from "./listable.ts";
 import { csvRow, type SaleRow } from "./sales.ts";
 import { isFoilFinish } from "./sets.ts";
 
@@ -45,7 +46,7 @@ export function buildPullList(sales: SaleRow[], cards: StockCard[]): PullItem[] 
       recordId: s.recordId, name: card?.resolvedName || card?.name || s.cardName || "(unnamed)", game: card?.game ?? s.game,
       set: card ? card.setName ?? card.setIdentifier ?? card.setNumber : null, number: card?.collectorNumber ?? null, rarity: card?.rarity ?? null,
       condition: card?.condition ?? null, finish: card?.finish ?? null, qtySold: 0, platforms: [], lastSoldAt: s.soldAt,
-      sharedQty: card ? (card.status === "Sold" ? 0 : card.qty) : null, soldOut: card ? card.status === "Sold" || card.qty <= 0 : false,
+      sharedQty: card ? (card.status === "Sold" ? 0 : listableQty(card)) : null, soldOut: card ? card.status === "Sold" || listableQty(card) <= 0 : false,
       tcgplayerSku: card?.tcgplayerSku ?? null, priceUsd: card?.marketPriceUsd ?? null,
     };
     g.qtySold += s.qty;
