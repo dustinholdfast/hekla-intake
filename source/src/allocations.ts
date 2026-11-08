@@ -190,7 +190,7 @@ async function changeCardTrader(input: AllocationRequest, tenantId: string, deps
   }
   const card = await deps.loadCard(tenantId, input.waitlist_record_id);
   if (!card) return { status: 404, body: { ok: false, error: "record_not_found" }, persist: false };
-  const free = listableQty(card.qty, card.reservedQty);
+  const free = listableQty(card);
   if (free < 1) {
     return done(200, { ok: true, applied: true, ct_listing_id: null, ct_qty_before: null, ct_qty_after: null, note: "no_free_qty" });
   }

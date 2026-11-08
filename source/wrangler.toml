@@ -50,3 +50,7 @@ TCGPLAYER_DAILY_EMAIL = "off"
 # ALLOCATIONS_ENABLED: false (default) | on. POST /api/allocations answers 503 until this is on.
 # The signing secret is not a var: wrangler secret put ALLOCATION_HMAC_SECRET
 ALLOCATIONS_ENABLED = "false"
+# Waitlist columns for listable stock. Blank cells count as 0. Free Qty is optional; when it is absent Hekla computes Qty - the two holds.
+RESERVED_QTY_FIELD = "Reserved Qty"
+DECK_RESERVED_QTY_FIELD = "Deck Reserved Qty"
+FREE_QTY_FIELD = "Free Qty"

@@ -193,11 +193,21 @@ test("release raises an existing listing and recreates a removed one at Qty minu
   assert.equal(again.body.note, "relisted");
   assert.equal(again.body.ct_listing_id, 77);
   assert.equal(again.body.ct_qty_before, 0);
-  assert.equal(again.body.ct_qty_after, 3, "free = 4 on hand minus 1 reserved");
+  assert.equal(again.body.ct_qty_after, 3, "free = 4 on hand minus 1 manual hold");
   assert.deepEqual(gone.calls.relist, [3]);
   assert.equal(gone.calls.increment.length, 0);
 
-  const held = world({ listings: [], card: stock({ qty: 2, reservedQty: 2 }) });
+  const both = world({ listings: [], card: stock({ qty: 5, reservedQty: 1, deckReservedQty: 2 }) });
+  const split = await post(payload({ op: "release", idempotency_key: "rel-both", qty: 1 }), both.deps);
+  assert.equal(split.body.ct_qty_after, 2);
+  assert.deepEqual(both.calls.relist, [2]);
+
+  const formula = world({ listings: [], card: stock({ qty: 5, reservedQty: 1, deckReservedQty: 1, freeQty: 1 }) });
+  const fromFormula = await post(payload({ op: "release", idempotency_key: "rel-free", qty: 1 }), formula.deps);
+  assert.equal(fromFormula.body.ct_qty_after, 1);
+  assert.deepEqual(formula.calls.relist, [1]);
+
+  const held = world({ listings: [], card: stock({ qty: 4, freeQty: 0 }) });
   const none = await post(payload({ op: "release", idempotency_key: "rel-0", qty: 1 }), held.deps);
   assert.equal(none.body.note, "no_free_qty");
   assert.equal(held.calls.relist.length, 0);

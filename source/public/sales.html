@@ -81,7 +81,7 @@
 
     <section class="panel">
       <div class="panel-head"><h2>Stock check</h2><button id="reconcile" class="ghost tiny" type="button" hidden>Check now</button></div>
-      <p class="hint">Every 15 minutes Hekla compares listable stock (Qty minus Reserved Qty) with what CardTrader lists (starfoil.store copies CardTrader). <span id="reconcile-mode"></span></p>
+      <p class="hint">Every 15 minutes Hekla compares listable stock (Qty minus Reserved Qty minus Deck Reserved Qty) with what CardTrader lists (starfoil.store copies CardTrader). <span id="reconcile-mode"></span></p>
       <p id="reconcile-meta" class="hint"></p>
       <div class="table-wrap"><table class="admin-table"><thead><tr><th>Problem</th><th>Card</th><th>Airtable Qty</th><th>CardTrader</th><th>Row</th></tr></thead><tbody id="drift"></tbody></table></div>
     </section>

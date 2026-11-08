@@ -3,7 +3,7 @@
 `/reconcile` lists every Waitlist card with three numbers side by side: the Airtable **Qty**, what CardTrader lists, and
 what TCGplayer lists. Org members can view it. Only org admins (`org:admin`) can run a check, upload, confirm or change anything.
 
-**Expected quantity.** A `Listed` row should show its listable quantity on each platform: Airtable Qty minus Reserved Qty. A blank Reserved Qty counts as 0, and the result never goes below 0. Any other status (Sold, Skip, ...) should show 0. Held copies stay in Qty; they are not listed again and they are not reported as drift when CardTrader already shows the listable quantity.
+**Expected quantity.** A `Listed` row should show its listable quantity on each platform: Airtable Qty minus `Reserved Qty` (manual holds) minus `Deck Reserved Qty` (deck holds). A blank of either counts as 0, and the result never goes below 0. When the Waitlist has a `Free Qty` formula, that number is used; a missing or blank formula is computed the same way. The three column names default to those and can be changed with `RESERVED_QTY_FIELD`, `DECK_RESERVED_QTY_FIELD`, and `FREE_QTY_FIELD`. Any other status (Sold, Skip, ...) should show 0. Held copies stay in Qty; they are not listed again and they are not reported as drift when CardTrader already shows the listable quantity.
 `Sold` rows and rows with a CardTrader listing id are read too, so a sold card that is still listed shows up. A non-Listed
 row that has nothing listed anywhere is left out.
 
