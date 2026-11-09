@@ -477,11 +477,13 @@ test("two releases on the same row never both re-create a listing", async () => 
   const box = world({ listings: [], card: stock({ qty: 4, reservedQty: 0 }), gate: new Promise<void>((resolve) => { open = resolve; }) });
   const first = post(payload({ op: "release", idempotency_key: "rel-x", allocation_id: "alloc-x" }), box.deps);
   await new Promise((resolve) => setImmediate(resolve));
-  const second = await post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
+  const pending = post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+  open();
+  const [one, second] = await Promise.all([first, pending]);
+  assert.equal(one.status, 200);
   assert.equal(second.status, 503);
   assert.equal(second.body.error, "row_busy");
-  open();
-  assert.equal((await first).status, 200);
   box.state.gate = null;
   const later = await post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
   assert.equal(later.status, 200);
