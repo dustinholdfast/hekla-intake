@@ -14,11 +14,15 @@
  * duplicate in flight waits briefly, then gets a retryable 503. One request at a time holds a Waitlist row's
  * listings (allocation_row_locks). Migration 0013 adds both.
  *
+ * A write whose answer was never recorded blocks its row (row_busy) until it is settled by proof: by its key's retry,
+ * after STALE_SECONDS by the next allocation or reconcile on the row, or at once by the admin clear. Settling never
+ * sends a CardTrader write.
+ *
  * The endpoint stays dark until ALLOCATIONS_ENABLED is on. Repeating an idempotency key returns the stored
  * result and does not call CardTrader again.
  */
 import type { CtListing } from "./cardtrader.ts";
-import { deleteProduct, exportListings, incrementListing, relistProduct, sellerOrders } from "./cardtrader.ts";
+import { deleteProduct, exportListings, incrementListing, relistProduct, sellerOrdersPage } from "./cardtrader.ts";
 import { purchasesAllowed } from "./purchase-access.ts";
 import { verifyStarfoil } from "./hmac.ts";
 import { listableQty } from "./listable.ts";
@@ -102,6 +106,10 @@ export interface AllocationStore {
   rowUnresolved(tenantId: string, recordId: string, exceptKey: string): Promise<boolean>;
   /** A CardTrader or starfoil sale of this row in Hekla's sales log, sold or logged at or after `sinceIso`. */
   saleLogged(tenantId: string, recordId: string, sinceIso: string): Promise<boolean>;
+  /** The pending keys on this row (other than exceptKey) with an unanswered write, and whether a request still holds each. */
+  unresolvedOnRow(tenantId: string, recordId: string, exceptKey: string): Promise<{ key: string; plan: CtPlan; leaseLive: boolean }[]>;
+  /** Takes over a pending key whose lease ran out, whatever request it was for. null when a request still holds it or it is done. */
+  takeOver(tenantId: string, key: string, token: string, leaseSeconds: number): Promise<{ row: ClaimRow; plan: CtPlan | null } | null>;
 }
 
 export type AllocationDeps = {
@@ -519,6 +527,13 @@ export async function handleAllocation(
     }
     let plan = claim.plan;
     // Another key on this row sent a write whose answer is unknown. Its retry must see the row untouched by us.
+    // A write left unanswered past STALE_SECONDS (its job lost, or the deckbuilder mode moved off) is settled here
+    // through the same proof a retry uses, never by sending it again.
+    if (!plan && (await deps.store.rowUnresolved(tenantId, record, key))) {
+      await resolveStaleRow(tenantId, record, deps, { exceptKey: key }).catch((error) => {
+        console.error(JSON.stringify({ event: "allocation_stale_check_failed", record, error: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
+      });
+    }
     if (!plan && (await deps.store.rowUnresolved(tenantId, record, key))) {
       await deps.store.abandon(tenantId, key, token);
       return { status: 503, body: { ok: false, error: "row_busy", note: "Another allocation on this row is waiting to be verified." } };
@@ -553,6 +568,105 @@ export async function handleAllocation(
   }
 }
 
+/** An unanswered write older than this, whose key no request holds, is settled by proof instead of waiting on its retry. */
+export const STALE_SECONDS = 15 * 60;
+
+/** runPlan stops here instead of sending: settling a stale key never writes to CardTrader. */
+class NoSend extends Error { constructor() { super("stale resolution never sends"); } }
+
+export type StaleOutcome =
+  /** Proof held: the unanswered writes are marked landed. finished: the key's answer was stored (all steps done). */
+  | { key: string; outcome: "landed"; finished: boolean; status?: number; body?: AllocationResponse }
+  /** No proof: the key's answer is stored as the same 409 its own retry would get. Nothing was sent. */
+  | { key: string; outcome: "unverifiable"; status: number; body: AllocationResponse }
+  /** A request still holds the key, or the write is not yet STALE_SECONDS old (expiry only). */
+  | { key: string; outcome: "in_progress" | "too_recent" };
+
+const oldestAttempt = (plan: CtPlan): number => Math.min(...plan.steps.filter((step) => step.attemptedAt && !step.done).map((step) => Date.parse(step.attemptedAt!)));
+
+/**
+ * Settles the unanswered writes on one Waitlist row. The caller must hold the row lease. For each pending key with a
+ * write whose answer was never recorded (and no live claim): with `force` off, only once the write is STALE_SECONDS
+ * old. The key is taken over and its plan is run against a fresh export with a guard that refuses every write, so
+ * the only thing that can happen is the retry proof:
+ * - proof holds (end state, no sale since the attempt): the write is marked landed. If every step is then done the
+ *   key's answer is stored; otherwise the key goes back to pending with no unanswered write, and only a retry of that
+ *   key can send its remaining steps.
+ * - no proof: the key's answer is stored as 409 ct_retry_unverifiable (what its retry would store) for a manual check.
+ * CardTrader is only read. A failed read leaves the key as it was and throws.
+ */
+export async function resolveStaleRow(
+  tenantId: string, recordId: string, deps: AllocationDeps,
+  opts: { exceptKey?: string; force?: boolean } = {},
+): Promise<StaleOutcome[]> {
+  const nowMs = deps.now?.() ?? Date.now();
+  const pending = await deps.store.unresolvedOnRow(tenantId, recordId, opts.exceptKey ?? "");
+  const out: StaleOutcome[] = [];
+  let all: CtListing[] | null = null;
+  for (const item of pending) {
+    if (item.leaseLive) { out.push({ key: item.key, outcome: "in_progress" }); continue; }
+    if (!opts.force && nowMs - oldestAttempt(item.plan) < STALE_SECONDS * 1000) { out.push({ key: item.key, outcome: "too_recent" }); continue; }
+    const token = crypto.randomUUID();
+    const taken = await deps.store.takeOver(tenantId, item.key, token, CLAIM_SECONDS);
+    if (!taken || !taken.plan || !unresolved(taken.plan)) {
+      if (taken) await deps.store.abandon(tenantId, item.key, token);
+      out.push({ key: item.key, outcome: "in_progress" });
+      continue;
+    }
+    const input: AllocationRequest = {
+      op: taken.row.op as AllocationOp, idempotency_key: item.key, allocation_id: taken.row.allocationId, deck_id: taken.row.deckId,
+      waitlist_record_id: taken.row.recordId, qty: taken.row.qty, game: "riftbound",
+      ...(taken.row.orderId ? { order_id: taken.row.orderId } : {}), ...(taken.row.lineKey ? { line_key: taken.row.lineKey } : {}),
+    };
+    try {
+      all ??= await deps.listings(tenantId);
+      const result = await runPlan(input, tenantId, taken.plan, all, null, deps,
+        (next) => deps.store.savePlan(tenantId, item.key, token, next), async () => { throw new NoSend(); });
+      if (!(await deps.store.finish(tenantId, item.key, token, result.status, result.body))) throw new Error("allocation claim lost while settling a stale write");
+      const settled: StaleOutcome = result.body.error === "ct_retry_unverifiable"
+        ? { key: item.key, outcome: "unverifiable", status: result.status, body: result.body }
+        : { key: item.key, outcome: "landed", finished: true, status: result.status, body: result.body };
+      console.log(JSON.stringify({ event: "allocation_stale_settled", key: item.key, record: recordId, outcome: settled.outcome, status: result.status, error: result.body.error ?? null, forced: Boolean(opts.force) }));
+      out.push(settled);
+    } catch (error) {
+      await deps.store.abandon(tenantId, item.key, token).catch(() => undefined);
+      if (!(error instanceof NoSend)) throw error;
+      // The unanswered writes were proven and saved as done; the steps never sent wait for the key's own retry.
+      console.log(JSON.stringify({ event: "allocation_stale_settled", key: item.key, record: recordId, outcome: "landed", finished: false, forced: Boolean(opts.force) }));
+      out.push({ key: item.key, outcome: "landed", finished: false });
+    }
+  }
+  return out;
+}
+
+/**
+ * Admin clear for one row (POST /api/admin/allocations/clear). Runs the stale settlement now instead of after
+ * STALE_SECONDS. Never sends anything to CardTrader. 200 when every unanswered write was proven landed (or there was
+ * none); 409 when one could not be proven (stored as ct_retry_unverifiable for a manual check) or a request still
+ * holds the key or row; 502 when CardTrader or the sales log could not be read.
+ */
+export async function clearAllocationRow(deps: AllocationDeps, recordId: string, by: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) return { status: 400, body: { ok: false, error: "waitlist_record_id must be an Airtable record id." } };
+  const tenant = await deps.tenant();
+  if (!tenant) return { status: 503, body: { ok: false, error: "allocations_tenant_missing" } };
+  const holder = `admin-clear:${crypto.randomUUID()}`;
+  if (!(await deps.store.lockRow(tenant.id, recordId, holder, LOCK_SECONDS))) return { status: 409, body: { ok: false, error: "row_busy", note: "An allocation or reconcile is changing this row now. Try again in a minute." } };
+  try {
+    let results: StaleOutcome[];
+    try { results = await resolveStaleRow(tenant.id, recordId, deps, { force: true }); }
+    catch (error) {
+      return { status: 502, body: { ok: false, error: "cannot_verify", note: (error instanceof Error ? error.message : String(error)).slice(0, 200) } };
+    }
+    console.log(JSON.stringify({ event: "allocation_admin_clear", record: recordId, by, results: results.map((r) => ({ key: r.key, outcome: r.outcome })) }));
+    const still = await deps.store.rowUnresolved(tenant.id, recordId, "");
+    if (results.some((r) => r.outcome === "unverifiable")) return { status: 409, body: { ok: false, error: "ct_retry_unverifiable", note: "Could not prove an earlier CardTrader write landed. It was not sent again; check CardTrader by hand.", results, row_clear: !still } };
+    if (still) return { status: 409, body: { ok: false, error: "allocation_in_progress", note: "A request still holds an allocation on this row. Try again in a few minutes.", results } };
+    return { status: 200, body: { ok: true, results, note: results.length ? "landed" : "nothing_unresolved" } };
+  } finally {
+    await deps.store.unlockRow(tenant.id, recordId, holder).catch(() => undefined);
+  }
+}
+
 export type RowLease = { renew(): Promise<boolean>; release(): Promise<void> };
 
 const missingLockTable = (error: unknown) => {
@@ -566,10 +680,17 @@ const missingLockTable = (error: unknown) => {
  * allocation's write there is still unverified. Before migration 0013 the tables are missing and no allocation can
  * run, so the lease is a no-op rather than breaking reconcile.
  */
-export async function takeRowLease(store: AllocationStore, tenantId: string, recordId: string, holder: string): Promise<RowLease | string> {
+export async function takeRowLease(store: AllocationStore, tenantId: string, recordId: string, holder: string, settle?: () => Promise<unknown>): Promise<RowLease | string> {
+  const waiting = "an allocation on this row is waiting to be verified";
   try {
-    if (await store.rowUnresolved(tenantId, recordId, "")) return "an allocation on this row is waiting to be verified";
+    const unanswered = await store.rowUnresolved(tenantId, recordId, "");
+    if (unanswered && !settle) return waiting;
     if (!(await store.lockRow(tenantId, recordId, holder, LOCK_SECONDS))) return "an allocation is changing this row";
+    if (unanswered) {
+      // Settle a stale unanswered write (proof only, nothing sent) while holding the row, then look again.
+      await settle!().catch((error) => console.error(JSON.stringify({ event: "allocation_stale_check_failed", record: recordId, error: error instanceof Error ? error.message.slice(0, 200) : String(error) })));
+      if (await store.rowUnresolved(tenantId, recordId, "")) { await store.unlockRow(tenantId, recordId, holder).catch(() => undefined); return waiting; }
+    }
   } catch (error) {
     if (missingLockTable(error)) return { renew: async () => true, release: async () => undefined };
     throw error;
@@ -580,27 +701,45 @@ export async function takeRowLease(store: AllocationStore, tenantId: string, rec
   };
 }
 
-type OrderJson = { paid_at?: unknown; created_at?: unknown; order_items?: { product_id?: unknown; user_data_field?: unknown; created_at?: unknown }[] };
+type OrderJson = { order_as?: unknown; paid_at?: unknown; created_at?: unknown; order_items?: { product_id?: unknown; user_data_field?: unknown; created_at?: unknown }[] };
+
+/** How many pages of 100 orders a retry proof reads before it gives up and calls the sale check unknown. */
+export const ORDER_PAGES = 5;
+
+const orderTime = (order: OrderJson): number => {
+  const own = Date.parse(String(order.paid_at ?? order.created_at ?? ""));
+  if (Number.isFinite(own)) return own;
+  const items = (order.order_items ?? []).map((item) => Date.parse(String(item.created_at ?? ""))).filter(Number.isFinite);
+  return items.length ? Math.min(...items) : NaN;
+};
 
 /**
- * Whether CardTrader's newest seller orders show a sale of this row or listing at or after `sinceIso`. An item
- * with no date counts. When even the oldest order returned is newer than `sinceIso`, older ones were cut off, so
- * the answer is true (cannot tell).
+ * Whether CardTrader's seller orders, newest first, show a sale of this row or listing at or after `sinceIso`.
+ * Reads pages until one reaches back past `sinceIso` (an order at or before it) or comes back empty (the end of the
+ * list). Coverage is decided by the oldest order seen, never by how many came back, so a page CardTrader caps short
+ * does not read as "no sale". An item with no date counts as a sale. After `maxPages` without reaching `sinceIso`
+ * the answer is true (cannot tell), which the retry turns into a 409 for a manual check.
  */
-export function saleSince(orders: OrderJson[], recordId: string, listingIds: number[], sinceIso: string): boolean {
+export async function saleSinceOnCardTrader(page: (n: number) => Promise<OrderJson[]>, recordId: string, listingIds: number[], sinceIso: string, maxPages = ORDER_PAGES): Promise<boolean> {
   const since = Date.parse(sinceIso);
   const ids = new Set(listingIds);
-  let oldest = Infinity;
-  for (const order of orders) {
-    const orderAt = Date.parse(String(order.paid_at ?? order.created_at ?? ""));
-    if (Number.isFinite(orderAt)) oldest = Math.min(oldest, orderAt);
-    for (const item of order.order_items ?? []) {
-      if (!ids.has(Number(item.product_id)) && item.user_data_field !== recordId) continue;
-      const at = Date.parse(String(item.created_at ?? order.paid_at ?? order.created_at ?? ""));
-      if (!Number.isFinite(at) || at >= since) return true;
+  for (let n = 1; n <= maxPages; n++) {
+    const orders = await page(n);
+    if (orders.length === 0) return false;
+    let oldest = Infinity;
+    for (const order of orders) {
+      const at = orderTime(order);
+      if (Number.isFinite(at)) oldest = Math.min(oldest, at);
+      if (order.order_as !== undefined && order.order_as !== "seller") continue;
+      for (const item of order.order_items ?? []) {
+        if (!ids.has(Number(item.product_id)) && item.user_data_field !== recordId) continue;
+        const itemAt = Date.parse(String(item.created_at ?? order.paid_at ?? order.created_at ?? ""));
+        if (!Number.isFinite(itemAt) || itemAt >= since) return true;
+      }
     }
+    if (oldest < since) return false;
   }
-  return orders.length >= 100 && oldest > since;
+  return true;
 }
 
 export class AllocationError extends Error {
@@ -653,7 +792,8 @@ export function productionAllocationDeps(env: Env): AllocationDeps {
       return incrementListing(await sellerToken(env, tenantId), productId, delta);
     },
     async salesEvidence(tenantId, recordId, listingIds, sinceIso) {
-      return saleSince(await sellerOrders(await sellerToken(env, tenantId), 100), recordId, listingIds, sinceIso)
+      const token = await sellerToken(env, tenantId);
+      return (await saleSinceOnCardTrader((n) => sellerOrdersPage(token, n, 100) as Promise<OrderJson[]>, recordId, listingIds, sinceIso))
         || store.saleLogged(tenantId, recordId, sinceIso);
     },
     async remove(tenantId, productId) {

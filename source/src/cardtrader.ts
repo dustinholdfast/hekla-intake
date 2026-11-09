@@ -421,9 +421,14 @@ export async function deleteProduct(token: string, productId: number, fetcher?: 
 
 /** The newest seller orders, newest first. One request. */
 export async function sellerOrders(token: string, limit = 50, fetcher?: typeof fetch): Promise<J[]> {
-  const body = await call(token, `/orders?order_as=seller&limit=${Math.min(100, Math.max(1, limit))}&sort=date.desc`, {}, fetcher) as unknown;
+  return (await sellerOrdersPage(token, 1, limit, fetcher)).filter((o) => o?.order_as === "seller");
+}
+
+/** One page (from 1) of seller orders, newest first, unfiltered. An empty page is the end of the list. */
+export async function sellerOrdersPage(token: string, page: number, limit = 100, fetcher?: typeof fetch): Promise<J[]> {
+  const body = await call(token, `/orders?order_as=seller&limit=${Math.min(100, Math.max(1, limit))}&page=${Math.max(1, Math.floor(page))}&sort=date.desc`, {}, fetcher) as unknown;
   const list = Array.isArray(body) ? body : Array.isArray((body as J)?.array) ? (body as J).array : [];
-  return (list as J[]).filter((o) => o?.order_as === "seller");
+  return list as J[];
 }
 
 export type CtListing = { id: number; blueprintId: number; quantity: number; recordId: string | null; priceCents: number | null };

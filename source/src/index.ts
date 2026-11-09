@@ -72,7 +72,7 @@ function scryfallStore(env: Env): ScryfallStore | null {
   };
 }
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
-import { handleAllocation, productionAllocationDeps, takeRowLease, type RowLease } from "./allocations.ts";
+import { clearAllocationRow, handleAllocation, productionAllocationDeps, resolveStaleRow, takeRowLease, type RowLease } from "./allocations.ts";
 import { neonAllocationStore } from "./allocationsdb.ts";
 import { withListableQuantity } from "./listable.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
@@ -147,6 +147,16 @@ app.use("/api/admin/*", async (c, next) => {
 
 app.get("/api/admin/tenants", async (c) => {
   return c.json({ tenants: await listTenantPlans(c.env) });
+});
+
+// Settles a Waitlist row blocked by an allocation write whose answer was never recorded (row_busy). Re-checks the
+// retry proof against CardTrader now: landed releases the row; anything it cannot prove is a 409 for a manual
+// check. It never sends a CardTrader write. Works with ALLOCATIONS_ENABLED off, so a row is never stuck.
+app.post("/api/admin/allocations/clear", async (c) => {
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const result = await clearAllocationRow(productionAllocationDeps(c.env), String(body.value.waitlist_record_id ?? ""), c.var.userId);
+  return c.json(result.body, result.status as 200);
 });
 
 app.post("/api/admin/tenants/:id/plan", async (c) => {
@@ -1007,7 +1017,8 @@ app.post("/api/reconcile/cardtrader/set", async (c) => {
   if (!card) return c.json({ error: "That Waitlist row was not found." }, 404);
   const token = await cardTraderToken(c);
   // The allocation row lease, taken before the export is read, so the read-modify-write cannot interleave with an allocation.
-  const lease = await takeRowLease(neonAllocationStore(c.env), c.var.tenant.id, recordId, `reconcile:${crypto.randomUUID()}`);
+  const lease = await takeRowLease(neonAllocationStore(c.env), c.var.tenant.id, recordId, `reconcile:${crypto.randomUUID()}`,
+    () => resolveStaleRow(c.var.tenant.id, recordId, productionAllocationDeps(c.env)));
   if (typeof lease === "string") return c.json({ error: `Not changed: ${lease}. Try again in a minute.`, code: "row_busy" }, 409);
   try {
     const listings = await exportListings(token);
@@ -1064,12 +1075,14 @@ app.post("/api/reconcile/all/cardtrader", async (c) => {
   const token = await cardTraderToken(c);
   // Take every row's allocation lease before the export is read; a row an allocation holds is skipped.
   const store = neonAllocationStore(c.env);
+  const allocationDeps = productionAllocationDeps(c.env);
   const leases = new Map<string, RowLease>();
   const busy: { recordId: string; status: "skipped"; reason: string; applied: [] }[] = [];
   try {
     for (const item of items) {
       if (leases.has(item.recordId)) continue;
-      const lease = await takeRowLease(store, c.var.tenant.id, item.recordId, `reconcile:${batchId}:${crypto.randomUUID()}`);
+      const lease = await takeRowLease(store, c.var.tenant.id, item.recordId, `reconcile:${batchId}:${crypto.randomUUID()}`,
+        () => resolveStaleRow(c.var.tenant.id, item.recordId, allocationDeps));
       if (typeof lease === "string") busy.push({ recordId: item.recordId, status: "skipped", reason: lease, applied: [] });
       else leases.set(item.recordId, lease);
     }

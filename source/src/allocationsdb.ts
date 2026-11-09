@@ -153,6 +153,30 @@ export function allocationStoreWithQuery(query: AllocationQuery): AllocationStor
       );
       return rows.length > 0;
     },
+    async unresolvedOnRow(tenantId, recordId, exceptKey) {
+      const rows = await sql.query(
+        `select r.idempotency_key, r.plan, (r.claimed_until is not null and r.claimed_until > now()) as lease_live
+         from allocation_results r
+         where r.tenant_id = $1 and r.waitlist_record_id = $2 and r.idempotency_key <> $3 and r.state = 'pending'
+           and exists (select 1 from jsonb_array_elements(coalesce(r.plan->'steps', '[]'::jsonb)) s where s ? 'attemptedAt' and not s ? 'done')
+         order by r.created_at`,
+        [tenantId, recordId, exceptKey],
+      );
+      return rows.map((row) => ({ key: String(row.idempotency_key), plan: asJson<CtPlan>(row.plan), leaseLive: row.lease_live === true }));
+    },
+    async takeOver(tenantId, key, token, leaseSeconds) {
+      const [row] = await sql.query(
+        `update allocation_results set claim_token = $3, claimed_until = now() + make_interval(secs => $4)
+         where tenant_id = $1 and idempotency_key = $2 and state = 'pending' and (claimed_until is null or claimed_until <= now())
+         returning allocation_id, deck_id, op, waitlist_record_id, qty, order_id, line_key, plan`,
+        [tenantId, key, token, leaseSeconds],
+      );
+      if (!row) return null;
+      return {
+        row: { allocationId: String(row.allocation_id), deckId: String(row.deck_id), op: String(row.op), recordId: String(row.waitlist_record_id), qty: Number(row.qty), orderId: text(row.order_id), lineKey: text(row.line_key) },
+        plan: row.plan == null ? null : asJson<CtPlan>(row.plan),
+      };
+    },
     async unlockRow(tenantId, recordId, holder) {
       await sql.query("delete from allocation_row_locks where tenant_id = $1 and record_id = $2 and holder = $3", [tenantId, recordId, holder]);
     },

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { allocationSaleLine, allocationsEnabled, takeRowLease, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type Claim, type ClaimRow, type CtPlan } from "./allocations.ts";
+import { allocationSaleLine, allocationsEnabled, clearAllocationRow, resolveStaleRow, saleSinceOnCardTrader, STALE_SECONDS, takeRowLease, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type Claim, type ClaimRow, type CtPlan } from "./allocations.ts";
 import type { CtListing } from "./cardtrader.ts";
 import type { StockCard } from "./airtable.ts";
 import worker from "./index.ts";
@@ -63,6 +63,20 @@ function memoryStore(clock = { skew: 0 }): AllocationStore & { rows: Map<string,
     async rowUnresolved(tenantId, recordId, exceptKey) {
       return [...rows.entries()].some(([id, row]) => id.startsWith(`${tenantId}:`) && id !== `${tenantId}:${exceptKey}` && row.recordId === recordId
         && row.state === "pending" && Boolean(row.plan?.steps.some((step) => step.attemptedAt && !step.done)));
+    },
+    async unresolvedOnRow(tenantId, recordId, exceptKey) {
+      return [...rows.entries()]
+        .filter(([id, row]) => id.startsWith(`${tenantId}:`) && id !== `${tenantId}:${exceptKey}` && row.recordId === recordId
+          && row.state === "pending" && Boolean(row.plan?.steps.some((step) => step.attemptedAt && !step.done)))
+        .map(([id, row]) => ({ key: id.slice(tenantId.length + 1), plan: structuredClone(row.plan!), leaseLive: row.until > Date.now() }));
+    },
+    async takeOver(tenantId, key, token, lease) {
+      const have = rows.get(`${tenantId}:${key}`);
+      if (!have || have.state !== "pending" || have.until > Date.now()) return null;
+      have.token = token;
+      have.until = Date.now() + lease * 1000;
+      const { allocationId, deckId, op, recordId, qty, orderId, lineKey } = have;
+      return { row: { allocationId, deckId, op, recordId, qty, orderId, lineKey }, plan: have.plan ? structuredClone(have.plan) : null };
     },
     async saleLogged(_tenantId, recordId, sinceIso) {
       return logged.some((sale) => sale.recordId === recordId && sale.at >= sinceIso);
@@ -787,4 +801,170 @@ test("a reconcile set-to-target takes the allocation row lease, and waits on an 
   const noop = await takeRowLease(missing, TENANT, REC, "reconcile:4");
   assert.equal(typeof noop, "object");
   await assert.rejects(takeRowLease(Object.assign(Object.create(store), { rowUnresolved: async () => { throw new Error("connection reset"); } }), TENANT, REC, "r"));
+});
+
+const later = (box: ReturnType<typeof world>, ms: number) => { box.deps.now = () => Date.now() + ms; };
+const STALE_MS = STALE_SECONDS * 1000 + 1000;
+const ctWrites = (box: ReturnType<typeof world>) => box.calls.increment.length + box.calls.remove.length + box.calls.relist.length;
+
+test("expiry: a stale unanswered write that landed is settled by proof, and the row takes new allocations", async () => {
+  // Reserve 1 of 4 lands (4 -> 3) and times out. The deckbuilder never retries the key (mode back to off, job lost).
+  const box = world({ landThenFail: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "t-stale-a" }), box.deps)).status, 502);
+  const blocked = await post(payload({ idempotency_key: "t-stale-b", allocation_id: "alloc-2" }), box.deps);
+  assert.equal(blocked.body.error, "row_busy", "before the expiry the row still waits");
+
+  later(box, STALE_MS);
+  const next = await post(payload({ idempotency_key: "t-stale-b", allocation_id: "alloc-2" }), box.deps);
+  assert.equal(next.status, 200);
+  assert.deepEqual(box.calls.increment, [[50, -1], [50, -1]], "key a was not sent again; key b made its own change");
+  assert.equal(box.state.listings[0]!.quantity, 2);
+  const a = store.rows.get(`${TENANT}:t-stale-a`)!;
+  assert.equal(a.state, "done");
+  assert.equal(a.httpStatus, 200);
+  assert.equal(a.body!.ct_delta, -1);
+  // The deckbuilder's late retry of key a gets the stored answer and writes nothing.
+  const retry = await post(payload({ idempotency_key: "t-stale-a" }), box.deps);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.applied, false);
+  assert.equal(box.calls.increment.length, 2);
+});
+
+test("expiry: a stale unanswered write with no proof is stored as a 409 for review and never re-sent", async () => {
+  const box = world({ failNoLand: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "t-stale-u" }), box.deps)).status, 502);
+  later(box, STALE_MS);
+  const next = await post(payload({ idempotency_key: "t-stale-v", allocation_id: "alloc-2" }), box.deps);
+  assert.equal(next.status, 200);
+  const stale = store.rows.get(`${TENANT}:t-stale-u`)!;
+  assert.equal(stale.state, "done");
+  assert.equal(stale.httpStatus, 409);
+  assert.equal(stale.body!.error, "ct_retry_unverifiable");
+  assert.deepEqual(box.calls.increment, [[50, -1], [50, -1]], "only the first try of key u and key v's own change");
+  const retry = await post(payload({ idempotency_key: "t-stale-u" }), box.deps);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  assert.equal(box.calls.increment.length, 2);
+});
+
+test("expiry: reconcile set-to-target settles a stale write instead of waiting on it forever", async () => {
+  const box = world({ landThenFail: 1 });
+  assert.equal((await post(payload({ idempotency_key: "t-stale-r" }), box.deps)).status, 502);
+  const settle = () => resolveStaleRow(TENANT, REC, box.deps);
+  assert.match(String(await takeRowLease(box.deps.store, TENANT, REC, "reconcile:s1", settle)), /waiting to be verified/, "not yet stale");
+  later(box, STALE_MS);
+  const lease = await takeRowLease(box.deps.store, TENANT, REC, "reconcile:s2", settle);
+  assert.equal(typeof lease, "object");
+  await (lease as { release(): Promise<void> }).release();
+  assert.equal(ctWrites(box), 1);
+});
+
+test("admin clear: an unanswered write proven landed is marked landed and the row is released, with no CardTrader write", async () => {
+  const box = world({ landThenFail: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "t-clear-ok" }), box.deps)).status, 502);
+  const res = await clearAllocationRow(box.deps, REC, "user_admin");
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.deepEqual((res.body.results as { outcome: string }[]).map((r) => r.outcome), ["landed"]);
+  assert.equal(await store.rowUnresolved(TENANT, REC, ""), false);
+  assert.equal(ctWrites(box), 1, "the clear only read CardTrader");
+  assert.equal((await post(payload({ idempotency_key: "t-clear-next", allocation_id: "alloc-2" }), box.deps)).status, 200);
+
+  // A row with nothing unanswered is a no-op success.
+  const idle = await clearAllocationRow(box.deps, REC, "user_admin");
+  assert.equal(idle.status, 200);
+  assert.equal(idle.body.note, "nothing_unresolved");
+  assert.equal((await clearAllocationRow(box.deps, "not-a-record", "user_admin")).status, 400);
+});
+
+test("admin clear: an unanswered write it cannot prove is a 409 for manual review, and nothing is sent", async () => {
+  // The write never landed, and a buyer took one copy (4 -> 3): quantity alone would say "landed".
+  const box = world({ failNoLand: 1 });
+  assert.equal((await post(payload({ idempotency_key: "t-clear-no" }), box.deps)).status, 502);
+  box.state.listings[0]!.quantity = 3;
+  box.state.orders.push({ productId: 50, recordId: REC, at: new Date().toISOString() });
+  const res = await clearAllocationRow(box.deps, REC, "user_admin");
+  assert.equal(res.status, 409);
+  assert.equal(res.body.error, "ct_retry_unverifiable");
+  assert.deepEqual(box.calls.increment, [[50, -1]], "no CardTrader write from the clear");
+  assert.deepEqual([box.calls.remove, box.calls.relist], [[], []]);
+  assert.equal(box.state.listings[0]!.quantity, 3);
+  const retry = await post(payload({ idempotency_key: "t-clear-no" }), box.deps);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  assert.equal(box.calls.increment.length, 1, "the key's own retry does not send it either");
+});
+
+test("admin clear: a failed read leaves the row blocked, and a busy row or live key is refused", async () => {
+  const box = world({ failNoLand: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "t-clear-down" }), box.deps)).status, 502);
+  box.state.listings[0]!.quantity = 3;
+  box.state.ordersDown = true;
+  const down = await clearAllocationRow(box.deps, REC, "user_admin");
+  assert.equal(down.status, 502);
+  assert.equal(await store.rowUnresolved(TENANT, REC, ""), true);
+  assert.equal(store.rows.get(`${TENANT}:t-clear-down`)!.state, "pending");
+
+  assert.equal(await store.lockRow(TENANT, REC, "someone", 120), true);
+  assert.equal((await clearAllocationRow(box.deps, REC, "user_admin")).body.error, "row_busy");
+  await store.unlockRow(TENANT, REC, "someone");
+
+  // A request still holds the key: not touched.
+  store.rows.get(`${TENANT}:t-clear-down`)!.until = Date.now() + 60_000;
+  box.state.ordersDown = false;
+  const live = await clearAllocationRow(box.deps, REC, "user_admin");
+  assert.equal(live.status, 409);
+  assert.equal(live.body.error, "allocation_in_progress");
+  assert.equal(box.calls.increment.length, 1);
+});
+
+test("admin clear: steps never sent are left for the key's own retry", async () => {
+  // Reserve 3 across two listings: the first delete lands and times out; the second was never sent.
+  const box = world({ listings: [listing(50, 2), listing(51, 1)], landThenFail: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const raw = payload({ idempotency_key: "t-clear-part", qty: 3 });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  const res = await clearAllocationRow(box.deps, REC, "user_admin");
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.results, [{ key: "t-clear-part", outcome: "landed", finished: false }]);
+  assert.deepEqual(box.calls.remove, [50], "the second delete was not sent by the clear");
+  assert.equal(store.rows.get(`${TENANT}:t-clear-part`)!.state, "pending");
+  assert.equal(await store.rowUnresolved(TENANT, REC, ""), false);
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.status, 200);
+  assert.deepEqual(box.calls.remove, [50, 51]);
+  assert.equal(retry.body.ct_delta, -3);
+});
+
+test("the admin clear route is behind sign-in", async () => {
+  const res = await worker.fetch(new Request("https://hekla.test/api/admin/allocations/clear", { method: "POST", body: JSON.stringify({ waitlist_record_id: REC }), headers: { "content-type": "application/json" } }), { ALLOCATIONS_ENABLED: "on" });
+  assert.notEqual(res.status, 200);
+  assert.ok(res.status === 401 || res.status === 403 || res.status === 503);
+});
+
+test("the retry sale check decides coverage by the oldest order returned, not by how many came back", async () => {
+  const since = "2026-11-09T12:00:00.000Z";
+  const order = (at: string, item: Record<string, unknown> = { product_id: 9 }) => ({ order_as: "seller", paid_at: at, order_items: [{ ...item, created_at: at }] });
+  const newer = Array.from({ length: 50 }, (_, i) => order(new Date(Date.parse(since) + (i + 1) * 60_000).toISOString()));
+  const older = [order("2026-11-09T11:00:00.000Z")];
+  const pages = (list: unknown[][]) => { const asked: number[] = []; return { asked, page: async (n: number) => { asked.push(n); return (list[n - 1] ?? []) as never[]; } }; };
+
+  // CardTrader capped the page at 50, all newer than the attempt: read on until an older order shows up.
+  const a = pages([newer, older]);
+  assert.equal(await saleSinceOnCardTrader(a.page, REC, [50], since), false);
+  assert.deepEqual(a.asked, [1, 2]);
+  // A sale of this listing on the second page is found.
+  const b = pages([newer, [order("2026-11-09T12:00:30.000Z", { product_id: 50 }), ...older]]);
+  assert.equal(await saleSinceOnCardTrader(b.page, REC, [50], since), true);
+  // Matched by record id too.
+  assert.equal(await saleSinceOnCardTrader(pages([[order("2026-11-09T12:30:00.000Z", { user_data_field: REC })]]).page, REC, [], since), true);
+  // Never reaches back past the attempt within the page budget: cannot tell, so true (409 upstream).
+  assert.equal(await saleSinceOnCardTrader(pages([newer, newer, newer]).page, REC, [50], since, 3), true);
+  // A short page followed by an empty one is the end of the list: covered.
+  assert.equal(await saleSinceOnCardTrader(pages([newer.slice(0, 7), []]).page, REC, [50], since), false);
+  assert.equal(await saleSinceOnCardTrader(pages([[]]).page, REC, [50], since), false);
+  // An undated matching item counts as a sale.
+  assert.equal(await saleSinceOnCardTrader(pages([[{ order_as: "seller", order_items: [{ product_id: 50 }] }, ...older]]).page, REC, [50], since), true);
 });

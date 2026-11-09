@@ -111,6 +111,33 @@ test("a pending key with a sent-but-unanswered step marks its row unresolved", a
   assert.equal(await store.rowUnresolved(T, row, ""), false);
 });
 
+test("stale settlement: unanswered keys on a row are listed with their lease, and only an expired one is taken over", async () => {
+  const store = alloc();
+  const row = "recSTALEAAAAAAAAA";
+  const step = { kind: "set" as const, listingId: 60, from: 2, to: 1, attemptedAt: "2026-11-09T12:00:00.000Z" };
+  assert.equal((await store.claim(T, "key-s", { ...req({ allocationId: "s", lineKey: "ln" }), recordId: row, orderId: "o-1" }, "tok-s", 60)).kind, "claimed");
+  await store.savePlan(T, "key-s", "tok-s", { steps: [step], status: 200, body: { ok: true } });
+  let list = await store.unresolvedOnRow(T, row, "");
+  assert.equal(list.length, 1);
+  assert.equal(list[0]!.key, "key-s");
+  assert.equal(list[0]!.leaseLive, true);
+  assert.deepEqual(list[0]!.plan.steps, [step]);
+  assert.deepEqual(await store.unresolvedOnRow(T, row, "key-s"), []);
+  assert.equal(await store.takeOver(T, "key-s", "tok-admin", 60), null, "a live claim is not taken");
+
+  await store.abandon(T, "key-s", "tok-s");
+  list = await store.unresolvedOnRow(T, row, "");
+  assert.equal(list[0]!.leaseLive, false);
+  const taken = await store.takeOver(T, "key-s", "tok-admin", 60);
+  assert.ok(taken);
+  assert.deepEqual(taken.row, { allocationId: "s", deckId: "d", op: "reserve", recordId: row, qty: 1, orderId: "o-1", lineKey: "ln" });
+  assert.deepEqual(taken.plan?.steps, [step]);
+  assert.equal(await store.takeOver(T, "key-s", "tok-other", 60), null, "the new holder now has it");
+  assert.equal(await store.finish(T, "key-s", "tok-admin", 409, { ok: false, error: "ct_retry_unverifiable" }), true);
+  assert.deepEqual(await store.unresolvedOnRow(T, row, ""), []);
+  assert.equal(await store.takeOver(T, "key-s", "tok-late", 60), null, "a finished key is never taken over");
+});
+
 test("a sale in the sales log since a time counts as retry evidence; an allocation line does not", async () => {
   const store = alloc();
   const row = "recEVIDAAAAAAAAAA";
