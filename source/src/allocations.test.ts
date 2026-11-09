@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { allocationSaleLine, allocationsEnabled, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type StoredAllocation } from "./allocations.ts";
+import { allocationSaleLine, allocationsEnabled, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type Claim, type ClaimRow, type CtPlan } from "./allocations.ts";
 import type { CtListing } from "./cardtrader.ts";
 import type { StockCard } from "./airtable.ts";
 import worker from "./index.ts";
@@ -11,19 +11,58 @@ const REC = "recAAAAAAAAAAAAAA";
 const SECRET = "test-allocation-secret";
 const NOW = 1_800_000_000_000;
 
-function memoryStore(): AllocationStore {
-  const rows = new Map<string, StoredAllocation>();
+type MemRow = ClaimRow & { state: "pending" | "done"; token: string | null; until: number; plan: CtPlan | null; httpStatus: number | null; body: AllocationResponse | null };
+const sameClaim = (a: ClaimRow, b: ClaimRow) => a.allocationId === b.allocationId && a.deckId === b.deckId && a.op === b.op && a.recordId === b.recordId && a.qty === b.qty && a.orderId === b.orderId && a.lineKey === b.lineKey;
+
+/** The same claim, plan, finish, and lock rules as allocationsdb.ts, in memory. */
+function memoryStore(): AllocationStore & { rows: Map<string, MemRow> } {
+  const rows = new Map<string, MemRow>();
+  const locks = new Map<string, { holder: string; until: number }>();
   return {
-    async get(tenantId, key) { return rows.get(`${tenantId}:${key}`) ?? null; },
-    async put(tenantId, key, row) {
+    rows,
+    async claim(tenantId, key, row, token, lease): Promise<Claim> {
       const id = `${tenantId}:${key}`;
-      if (rows.has(id)) return "exists";
-      rows.set(id, row);
-      return "stored";
+      const now = Date.now();
+      const have = rows.get(id);
+      if (!have) {
+        rows.set(id, { ...row, state: "pending", token, until: now + lease * 1000, plan: null, httpStatus: null, body: null });
+        return { kind: "claimed", plan: null };
+      }
+      if (!sameClaim(have, row)) return { kind: "mismatch" };
+      if (have.state === "done") return { kind: "done", stored: { ...have, httpStatus: have.httpStatus!, body: have.body! } };
+      if (have.until > now) return { kind: "busy" };
+      have.token = token;
+      have.until = now + lease * 1000;
+      return { kind: "claimed", plan: have.plan ? structuredClone(have.plan) : null };
+    },
+    async savePlan(tenantId, key, token, plan) {
+      const have = rows.get(`${tenantId}:${key}`);
+      if (!have || have.token !== token || have.state !== "pending") throw new Error("Allocation claim was lost before the plan was saved.");
+      have.plan = structuredClone(plan);
+    },
+    async finish(tenantId, key, token, httpStatus, body) {
+      const have = rows.get(`${tenantId}:${key}`);
+      if (!have || have.token !== token || have.state !== "pending") return;
+      Object.assign(have, { state: "done", httpStatus, body: structuredClone(body), token: null, until: 0 });
+    },
+    async abandon(tenantId, key, token) {
+      const have = rows.get(`${tenantId}:${key}`);
+      if (have && have.token === token && have.state === "pending") Object.assign(have, { token: null, until: 0 });
     },
     async reservePrice(tenantId, allocationId) {
-      const hits = [...rows.entries()].filter(([id, row]) => id.startsWith(`${tenantId}:`) && row.allocationId === allocationId && row.op === "reserve" && typeof row.body.ct_price_cents === "number");
-      return hits.length ? hits[hits.length - 1]![1].body.ct_price_cents ?? null : null;
+      const hits = [...rows.entries()].filter(([id, row]) => id.startsWith(`${tenantId}:`) && row.allocationId === allocationId && row.op === "reserve" && row.state === "done" && typeof row.body?.ct_price_cents === "number");
+      return hits.length ? hits[hits.length - 1]![1].body!.ct_price_cents ?? null : null;
+    },
+    async lockRow(tenantId, recordId, holder, seconds) {
+      const id = `${tenantId}:${recordId}`;
+      const have = locks.get(id);
+      if (have && have.until > Date.now() && have.holder !== holder) return false;
+      locks.set(id, { holder, until: Date.now() + seconds * 1000 });
+      return true;
+    },
+    async unlockRow(tenantId, recordId, holder) {
+      const id = `${tenantId}:${recordId}`;
+      if (locks.get(id)?.holder === holder) locks.delete(id);
     },
   };
 }
@@ -43,30 +82,47 @@ const listing = (id: number, quantity: number, recordId: string | null = REC): C
 
 const notFound = () => Object.assign(new Error("CardTrader said: not found"), { status: 404 });
 
-type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean; missing: number[]; refuseRelist: boolean };
+/** CardTrader in memory: increment, delete, and create change `listings`. `landThenFail` applies a write, then throws a 504. */
+type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean; missing: number[]; refuseRelist: boolean; landThenFail: number; gate: Promise<void> | null };
 function world(over: Partial<World> = {}) {
-  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, missing: [], refuseRelist: false, ...over };
+  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, missing: [], refuseRelist: false, landThenFail: 0, gate: null, ...over };
+  let nextId = 77;
+  const timeout = () => {
+    if (state.landThenFail > 0) { state.landThenFail--; throw Object.assign(new Error("CardTrader said: gateway timeout"), { status: 504 }); }
+  };
   const calls = { listings: 0, increment: [] as [number, number][], remove: [] as number[], relist: [] as number[], relistPrice: [] as (number | null)[], sales: 0 };
   const deps: AllocationDeps = {
     async tenant() { return { id: TENANT }; },
     store: memoryStore(),
-    async listings() { calls.listings++; return state.listings; },
+    async listings() { calls.listings++; return state.listings.map((l) => ({ ...l })); },
     async increment(_tenant, id, delta) {
       calls.increment.push([id, delta]);
+      if (state.gate) await state.gate;
       if (state.failIncrement) throw new Error("CardTrader said: down");
       if (state.missing.includes(id)) throw notFound();
+      const hit = state.listings.find((l) => l.id === id);
+      if (hit) hit.quantity += delta;
+      timeout();
     },
     async remove(_tenant, id) {
       calls.remove.push(id);
+      if (state.gate) await state.gate;
       if (state.missing.includes(id)) throw notFound();
+      state.listings = state.listings.filter((l) => l.id !== id);
+      timeout();
     },
     async loadCard() { return state.card; },
-    async relist(_tenant, _card, quantity, price) {
+    async relist(_tenant, card, quantity, price) {
       calls.relist.push(quantity);
       calls.relistPrice.push(price);
+      if (state.gate) await state.gate;
       if (state.refuseRelist) throw Object.assign(new Error("No market price yet."), { status: 422 });
-      return { productId: 77 };
+      const productId = nextId++;
+      state.listings.push({ id: productId, blueprintId: 1, quantity, recordId: card.id, priceCents: price });
+      timeout();
+      return { productId };
     },
+    sleep: () => new Promise((resolve) => setImmediate(resolve)),
     async insertSale() { calls.sales++; },
   };
   return { state, calls, deps };
@@ -168,7 +224,7 @@ test("reserve with less on CardTrader than requested lowers to 0 and a repeat do
   const raw = payload({ qty: 4, idempotency_key: "short" });
   const first = await post(raw, deps);
   assert.equal(first.status, 409);
-  assert.deepEqual(first.body, { ok: false, applied: true, error: "insufficient_ct_qty", ct_listing_id: null, ct_qty_before: 3, ct_qty_after: 0, ct_price_cents: 125 });
+  assert.deepEqual(first.body, { ok: false, applied: true, error: "insufficient_ct_qty", ct_listing_id: null, ct_qty_before: 3, ct_qty_after: 0, ct_delta: -3, ct_price_cents: 125 });
   assert.deepEqual(calls.remove, [50, 51]);
   assert.deepEqual(calls.increment, []);
   const again = await post(raw, deps);
@@ -248,33 +304,34 @@ test("the same idempotency key with a different request does not apply again", a
   assert.equal(calls.increment.length, 1);
 });
 
-test("release raises an existing listing and recreates a removed one at Qty minus Reserved Qty", async () => {
-  const raised = world();
-  const up = await post(payload({ op: "release", qty: 2 }), raised.deps);
+test("release puts back only the released copies, capped by free stock less what is already listed", async () => {
+  // free = 6 on hand - 1 manual hold = 5; 3 are listed, so 2 more can go up even though 3 were released.
+  const raised = world({ listings: [listing(50, 3)], card: stock({ qty: 6, reservedQty: 1 }) });
+  const up = await post(payload({ op: "release", qty: 3 }), raised.deps);
   assert.equal(up.status, 200);
   assert.deepEqual(raised.calls.increment, [[50, 2]]);
-  assert.equal(up.body.ct_qty_before, 4);
-  assert.equal(up.body.ct_qty_after, 6);
+  assert.equal(up.body.ct_qty_before, 3);
+  assert.equal(up.body.ct_qty_after, 5);
+  assert.equal(up.body.ct_delta, 2);
   assert.equal(raised.calls.relist.length, 0);
 
   const gone = world({ listings: [] });
   const again = await post(payload({ op: "release", idempotency_key: "rel-1", qty: 1 }), gone.deps);
-  assert.deepEqual(gone.calls.increment, []);
   assert.equal(again.status, 200);
   assert.equal(again.body.note, "relisted");
   assert.equal(again.body.ct_listing_id, 77);
   assert.equal(again.body.ct_qty_before, 0);
-  assert.equal(again.body.ct_qty_after, 3, "free = 4 on hand minus 1 manual hold");
-  assert.deepEqual(gone.calls.relist, [3]);
+  assert.equal(again.body.ct_qty_after, 1, "the released copy, not all 3 free copies");
+  assert.deepEqual(gone.calls.relist, [1]);
   assert.equal(gone.calls.increment.length, 0);
 
-  const both = world({ listings: [], card: stock({ qty: 5, reservedQty: 1, deckReservedQty: 2 }) });
-  const split = await post(payload({ op: "release", idempotency_key: "rel-both", qty: 1 }), both.deps);
-  assert.equal(split.body.ct_qty_after, 2);
-  assert.deepEqual(both.calls.relist, [2]);
+  const both = world({ listings: [], card: stock({ qty: 5, reservedQty: 1, deckReservedQty: 3 }) });
+  const capped = await post(payload({ op: "release", idempotency_key: "rel-both", qty: 2 }), both.deps);
+  assert.equal(capped.body.ct_qty_after, 1, "free = 5 - 1 - 3");
+  assert.deepEqual(both.calls.relist, [1]);
 
   const formula = world({ listings: [], card: stock({ qty: 5, reservedQty: 1, deckReservedQty: 1, freeQty: 1 }) });
-  const fromFormula = await post(payload({ op: "release", idempotency_key: "rel-free", qty: 1 }), formula.deps);
+  const fromFormula = await post(payload({ op: "release", idempotency_key: "rel-free", qty: 2 }), formula.deps);
   assert.equal(fromFormula.body.ct_qty_after, 1);
   assert.deepEqual(formula.calls.relist, [1]);
 
@@ -304,7 +361,8 @@ test("release re-creates the listing when CardTrader says the one in the export 
   assert.equal(res.status, 200);
   assert.equal(res.body.note, "relisted");
   assert.deepEqual(box.calls.increment, [[50, 1]]);
-  assert.deepEqual(box.calls.relist, [3]);
+  assert.deepEqual(box.calls.relist, [1], "only the released copy");
+  assert.equal(res.body.ct_listing_id, 77);
 });
 
 test("a relist CardTrader refuses is a stored conflict", async () => {
@@ -337,7 +395,108 @@ test("release does not store a missing Waitlist row, so a later retry can still 
   box.state.card = stock({ qty: 2, reservedQty: 0 });
   const retry = await post(payload({ op: "release", idempotency_key: "rel-missing" }), box.deps);
   assert.equal(retry.status, 200);
-  assert.deepEqual(box.calls.relist, [2]);
+  assert.deepEqual(box.calls.relist, [1]);
+});
+
+test("a CardTrader timeout after the change landed is not applied twice on retry", async () => {
+  // Reserve 1 of 4: the increment lands, then CardTrader times out.
+  const lowered = world({ landThenFail: 1 });
+  const raw = payload({ idempotency_key: "t-res" });
+  const first = await post(raw, lowered.deps);
+  assert.equal(first.status, 502);
+  assert.equal(lowered.state.listings[0]!.quantity, 3);
+  const retry = await post(raw, lowered.deps);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.ct_qty_after, 3);
+  assert.deepEqual(lowered.calls.increment, [[50, -1]], "the retry read the export and did not lower again");
+  assert.equal(lowered.state.listings[0]!.quantity, 3);
+  assert.equal(lowered.calls.listings, 2);
+
+  // Release after a delete: the relist lands, then times out. The retry finds the new listing and does not list again.
+  const relisted = world({ listings: [], landThenFail: 1 });
+  const rel = payload({ op: "release", idempotency_key: "t-rel", qty: 1 });
+  assert.equal((await post(rel, relisted.deps)).status, 502);
+  const again = await post(rel, relisted.deps);
+  assert.equal(again.status, 200);
+  assert.equal(again.body.ct_listing_id, 77);
+  assert.deepEqual(relisted.calls.relist, [1]);
+  assert.equal(relisted.state.listings.length, 1);
+
+  // Raise an existing listing: lands, times out, retry is a no-op.
+  const raised = world({ listings: [listing(50, 1)], card: stock({ qty: 4, reservedQty: 0 }), landThenFail: 1 });
+  const up = payload({ op: "release", idempotency_key: "t-up", qty: 2 });
+  assert.equal((await post(up, raised.deps)).status, 502);
+  assert.equal((await post(up, raised.deps)).status, 200);
+  assert.deepEqual(raised.calls.increment, [[50, 2]]);
+  assert.equal(raised.state.listings[0]!.quantity, 3);
+});
+
+test("a retry flags a listing someone else changed instead of writing over it", async () => {
+  const box = world({ landThenFail: 1 });
+  const raw = payload({ idempotency_key: "t-moved", qty: 2 });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  box.state.listings[0]!.quantity = 1; // Hekla pulled one more by hand: neither 4 nor 2.
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.status, 409);
+  assert.equal(retry.body.error, "ct_changed_during_retry");
+  assert.equal(retry.body.ct_delta, 0);
+  assert.equal(box.calls.increment.length, 1);
+});
+
+test("concurrent duplicates of one key make one CardTrader change and share one answer", async () => {
+  let open!: () => void;
+  const box = world({ gate: new Promise<void>((resolve) => { open = resolve; }) });
+  const raw = payload({ idempotency_key: "dup-1" });
+  const a = post(raw, box.deps);
+  const b = post(raw, box.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  open();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(box.calls.increment.length, 1);
+  assert.deepEqual(box.calls.increment, [[50, -1]]);
+  assert.equal(ra.status, 200);
+  assert.equal(rb.status, 200);
+  assert.equal(ra.body.ct_qty_after, 3);
+  assert.equal(rb.body.ct_qty_after, 3);
+  assert.equal([ra.body.applied, rb.body.applied].filter(Boolean).length, 1, "one applied, one replayed");
+});
+
+test("a duplicate still in flight after the wait is a retryable 503, not a second write", async () => {
+  const box = world({ gate: new Promise<void>(() => undefined) });
+  const raw = payload({ idempotency_key: "dup-stuck" });
+  void post(raw, box.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = await post(raw, box.deps);
+  assert.equal(second.status, 503);
+  assert.equal(second.body.error, "allocation_in_progress");
+  assert.equal(box.calls.increment.length, 1);
+});
+
+test("two releases on the same row never both re-create a listing", async () => {
+  let open!: () => void;
+  const box = world({ listings: [], card: stock({ qty: 4, reservedQty: 0 }), gate: new Promise<void>((resolve) => { open = resolve; }) });
+  const first = post(payload({ op: "release", idempotency_key: "rel-x", allocation_id: "alloc-x" }), box.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = await post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
+  assert.equal(second.status, 503);
+  assert.equal(second.body.error, "row_busy");
+  open();
+  assert.equal((await first).status, 200);
+  box.state.gate = null;
+  const later = await post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
+  assert.equal(later.status, 200);
+  assert.deepEqual(box.calls.relist, [1], "the second release raised the listing the first one created");
+  assert.deepEqual(box.calls.increment, [[77, 1]]);
+  assert.equal(box.state.listings.filter((l) => l.recordId === REC).length, 1);
+});
+
+test("a key reused with a different order_id or line_key is a conflict", async () => {
+  const { deps } = world();
+  const first = await post(payload({ op: "finalize_sold", idempotency_key: "sold-x", order_id: "deck-1", line_key: "a" }), deps);
+  assert.equal(first.status, 200);
+  const other = await post(payload({ op: "finalize_sold", idempotency_key: "sold-x", order_id: "deck-1", line_key: "b" }), deps);
+  assert.equal(other.status, 409);
+  assert.equal(other.body.error, "idempotency_conflict");
 });
 
 test("a CardTrader failure is not stored, so the same key can succeed on retry", async () => {
