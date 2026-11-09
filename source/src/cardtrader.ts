@@ -439,9 +439,12 @@ export async function exportListings(token: string, fetcher?: typeof fetch): Pro
 }
 
 /** Changes a listing's quantity by delta. At 0 or below CardTrader deletes the listing. */
-export async function incrementListing(token: string, productId: number, delta: number, fetcher?: typeof fetch): Promise<void> {
-  if (!Number.isInteger(delta) || delta === 0) return;
-  await call(token, `/products/${productId}/increment`, { method: "POST", body: JSON.stringify({ delta_quantity: delta }) }, fetcher);
+/** Returns the quantity CardTrader reports after the change (resource.quantity), or null when it is missing. */
+export async function incrementListing(token: string, productId: number, delta: number, fetcher?: typeof fetch): Promise<number | null> {
+  if (!Number.isInteger(delta) || delta === 0) return null;
+  const body = await call(token, `/products/${productId}/increment`, { method: "POST", body: JSON.stringify({ delta_quantity: delta }) }, fetcher);
+  const quantity = (body.resource as J | undefined)?.quantity;
+  return typeof quantity === "number" ? quantity : null;
 }
 
 export type AppInfo = { id: number | null; name: string | null; userId: string | null; sharedSecret: string | null; webhookUrl: string | null };

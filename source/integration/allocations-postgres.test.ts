@@ -57,7 +57,7 @@ test("an abandoned claim keeps its plan for the next try, and an expired lease c
   const next = await store.claim(T, "key-p", req(), "tok-b", 60);
   assert.equal(next.kind, "claimed");
   if (next.kind === "claimed") assert.deepEqual(next.plan, plan);
-  await store.finish(T, "key-p", "tok-a", 500, { ok: false });
+  assert.equal(await store.finish(T, "key-p", "tok-a", 500, { ok: false }), false, "a stale token's finish reports it was not saved");
   assert.equal((await store.claim(T, "key-p", req(), "tok-c", 60)).kind, "busy", "a stale token cannot finish");
 
   assert.equal((await store.claim(T, "key-lease", req(), "tok-d", 0)).kind, "claimed");
@@ -74,6 +74,55 @@ test("one request at a time holds a Waitlist row", async () => {
   await store.unlockRow(T, REC, holder);
   assert.equal(await store.lockRow(T, REC, "h3", 0), true);
   assert.equal(await store.lockRow(T, REC, "h4", 60), true, "an expired lease is taken over");
+});
+
+test("leases are renewed only by their holder and only while they are live", async () => {
+  const store = alloc();
+  assert.equal((await store.claim(T, "key-r", req(), "tok-r", 60)).kind, "claimed");
+  assert.equal(await store.renew(T, "key-r", "tok-r", 60), true);
+  assert.equal(await store.renew(T, "key-r", "tok-x", 60), false);
+  assert.equal((await store.claim(T, "key-r0", req(), "tok-r0", 0)).kind, "claimed");
+  assert.equal(await store.renew(T, "key-r0", "tok-r0", 60), false, "an expired claim is not revived");
+  assert.equal(await store.finish(T, "key-r", "tok-r", 200, { ok: true }), true);
+  assert.equal(await store.renew(T, "key-r", "tok-r", 60), false, "a finished key has no lease");
+
+  const row = "recRENEWAAAAAAAAA";
+  assert.equal(await store.lockRow(T, row, "h1", 60), true);
+  assert.equal(await store.renewRow(T, row, "h1", 60), true);
+  assert.equal(await store.renewRow(T, row, "h2", 60), false);
+  await store.unlockRow(T, row, "h1");
+  assert.equal(await store.renewRow(T, row, "h1", 60), false, "a released lease is not re-created");
+  assert.equal(await store.lockRow(T, row, "h3", 0), true);
+  assert.equal(await store.renewRow(T, row, "h3", 60), false, "an expired lease is not revived");
+});
+
+test("a pending key with a sent-but-unanswered step marks its row unresolved", async () => {
+  const store = alloc();
+  const row = "recUNRESAAAAAAAAA";
+  assert.equal((await store.claim(T, "key-u", req({ allocationId: "u" }), "tok-u", 60)).kind, "claimed");
+  const step = { kind: "set" as const, listingId: 50, from: 4, to: 3 };
+  await pg.query("update allocation_results set waitlist_record_id = $1 where idempotency_key = 'key-u'", [row]);
+  await store.savePlan(T, "key-u", "tok-u", { steps: [step], status: 200, body: { ok: true } });
+  assert.equal(await store.rowUnresolved(T, row, ""), false, "a planned step not yet sent");
+  await store.savePlan(T, "key-u", "tok-u", { steps: [{ ...step, attemptedAt: "2026-11-09T12:00:00.000Z" }], status: 200, body: { ok: true } });
+  assert.equal(await store.rowUnresolved(T, row, ""), true);
+  assert.equal(await store.rowUnresolved(T, row, "key-u"), false, "its own retry is not blocked");
+  await store.savePlan(T, "key-u", "tok-u", { steps: [{ ...step, attemptedAt: "2026-11-09T12:00:00.000Z", done: { quantity: 3 } }], status: 200, body: { ok: true } });
+  assert.equal(await store.rowUnresolved(T, row, ""), false);
+});
+
+test("a sale in the sales log since a time counts as retry evidence; an allocation line does not", async () => {
+  const store = alloc();
+  const row = "recEVIDAAAAAAAAAA";
+  const insert = (platform: string, order: string, soldAt: string) => pg.query(
+    `insert into sales (tenant_id, platform, external_order_id, line_key, record_id, qty, currency, gross_cents, sold_at, raw)
+     values ($1, $2, $3, 'l', $4, 1, 'USD', 100, $5, '{}')`, [T, platform, order, row, soldAt]);
+  await insert("allocation", "deck-1", "2030-01-01T00:00:00Z");
+  assert.equal(await store.saleLogged(T, row, "2029-01-01T00:00:00Z"), false);
+  await insert("cardtrader", "ct-1", "2030-01-01T00:00:00Z");
+  assert.equal(await store.saleLogged(T, row, "2029-01-01T00:00:00Z"), true);
+  assert.equal(await store.saleLogged(T, row, "2031-01-01T00:00:00Z"), false);
+  await pg.query("delete from sales where record_id = $1", [row]);
 });
 
 test("the last reserve price for an allocation is read back for a relist", async () => {

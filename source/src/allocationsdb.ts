@@ -82,11 +82,22 @@ export function allocationStoreWithQuery(query: AllocationQuery): AllocationStor
       if (rows.length === 0) throw new Error("Allocation claim was lost before the plan was saved.");
     },
     async finish(tenantId, key, token, httpStatus, body) {
-      await sql.query(
+      const rows = await sql.query(
         `update allocation_results set state = 'done', http_status = $4, result = $5::jsonb, claim_token = null, claimed_until = null
-         where tenant_id = $1 and idempotency_key = $2 and claim_token = $3 and state = 'pending'`,
+         where tenant_id = $1 and idempotency_key = $2 and claim_token = $3 and state = 'pending'
+         returning idempotency_key`,
         [tenantId, key, token, httpStatus, JSON.stringify(body)],
       );
+      return rows.length === 1;
+    },
+    async renew(tenantId, key, token, leaseSeconds) {
+      const rows = await sql.query(
+        `update allocation_results set claimed_until = now() + make_interval(secs => $4)
+         where tenant_id = $1 and idempotency_key = $2 and claim_token = $3 and state = 'pending' and claimed_until > now()
+         returning idempotency_key`,
+        [tenantId, key, token, leaseSeconds],
+      );
+      return rows.length === 1;
     },
     async abandon(tenantId, key, token) {
       await sql.query(
@@ -115,6 +126,32 @@ export function allocationStoreWithQuery(query: AllocationQuery): AllocationStor
         [tenantId, recordId, holder, seconds],
       );
       return rows[0]?.holder === holder;
+    },
+    async renewRow(tenantId, recordId, holder, seconds) {
+      const rows = await sql.query(
+        `update allocation_row_locks set expires_at = now() + make_interval(secs => $4)
+         where tenant_id = $1 and record_id = $2 and holder = $3 and expires_at > now() returning holder`,
+        [tenantId, recordId, holder, seconds],
+      );
+      return rows.length === 1;
+    },
+    async rowUnresolved(tenantId, recordId, exceptKey) {
+      const rows = await sql.query(
+        `select 1 from allocation_results r
+         where r.tenant_id = $1 and r.waitlist_record_id = $2 and r.idempotency_key <> $3 and r.state = 'pending'
+           and exists (select 1 from jsonb_array_elements(coalesce(r.plan->'steps', '[]'::jsonb)) s where s ? 'attemptedAt' and not s ? 'done')
+         limit 1`,
+        [tenantId, recordId, exceptKey],
+      );
+      return rows.length > 0;
+    },
+    async saleLogged(tenantId, recordId, sinceIso) {
+      const rows = await sql.query(
+        `select 1 from sales where tenant_id = $1 and record_id = $2 and platform <> 'allocation'
+           and (sold_at >= $3::timestamptz or created_at >= $3::timestamptz) limit 1`,
+        [tenantId, recordId, sinceIso],
+      );
+      return rows.length > 0;
     },
     async unlockRow(tenantId, recordId, holder) {
       await sql.query("delete from allocation_row_locks where tenant_id = $1 and record_id = $2 and holder = $3", [tenantId, recordId, holder]);

@@ -4,6 +4,9 @@
 -- state 'pending': a request owns the key until claimed_until. plan is what it means to do on CardTrader, saved
 -- before the first write, so a retry after a timeout reconciles against the export instead of writing twice.
 -- state 'done': http_status and result are the stored answer.
+-- Each plan step carries attemptedAt (saved before its CardTrader write) and done (saved from CardTrader's answer).
+-- A step with attemptedAt and no done is "unresolved": its retry needs proof it landed, and no other key may plan
+-- against that row until it is resolved (see allocations.ts). This index makes that row check cheap.
 
 alter table allocation_results add column if not exists state text not null default 'done';
 alter table allocation_results add column if not exists claim_token text;
@@ -26,3 +29,6 @@ create table if not exists allocation_row_locks (
   expires_at  timestamptz not null,
   primary key (tenant_id, record_id)
 );
+
+create index if not exists allocation_results_pending_row_idx
+  on allocation_results (tenant_id, waitlist_record_id) where state = 'pending';

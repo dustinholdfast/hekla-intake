@@ -319,3 +319,16 @@ test("runCtBatch sees its own earlier changes when two rows share a listing", as
   const results = await runCtBatch([{ recordId: A, expectedTarget: 1, expectedCurrent: 3 }, { recordId: B, expectedTarget: 1, expectedCurrent: 3 }], cards, [L(10, null, 3)], async () => {}, async () => {});
   assert.deepEqual(results.map((r) => r.status), ["succeeded", "skipped"]);
 });
+
+test("runCtBatch stops a row when its allocation lease cannot be renewed", async () => {
+  const card = { id: "recAAAAAAAAAAAAAA", qty: 4, reservedQty: 0, deckReservedQty: 0, status: "Listed", cardTraderListingId: "10" } as unknown as Parameters<typeof runCtBatch>[1] extends Map<string, infer C> ? C : never;
+  const writes: number[] = [];
+  const results = await runCtBatch(
+    [{ recordId: "recAAAAAAAAAAAAAA", expectedTarget: 4, expectedCurrent: 2 }],
+    new Map([["recAAAAAAAAAAAAAA", card]]),
+    [{ id: 10, blueprintId: 1, quantity: 2, recordId: "recAAAAAAAAAAAAAA", priceCents: 100 }],
+    async (id) => { writes.push(id); }, async () => undefined, async () => false);
+  assert.equal(results[0]!.status, "failed");
+  assert.match(results[0]!.reason ?? "", /lease lost/);
+  assert.deepEqual(writes, []);
+});

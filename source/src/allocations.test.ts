@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { allocationSaleLine, allocationsEnabled, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type Claim, type ClaimRow, type CtPlan } from "./allocations.ts";
+import { allocationSaleLine, allocationsEnabled, takeRowLease, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type Claim, type ClaimRow, type CtPlan } from "./allocations.ts";
 import type { CtListing } from "./cardtrader.ts";
 import type { StockCard } from "./airtable.ts";
 import worker from "./index.ts";
@@ -15,11 +15,13 @@ type MemRow = ClaimRow & { state: "pending" | "done"; token: string | null; unti
 const sameClaim = (a: ClaimRow, b: ClaimRow) => a.allocationId === b.allocationId && a.deckId === b.deckId && a.op === b.op && a.recordId === b.recordId && a.qty === b.qty && a.orderId === b.orderId && a.lineKey === b.lineKey;
 
 /** The same claim, plan, finish, and lock rules as allocationsdb.ts, in memory. */
-function memoryStore(): AllocationStore & { rows: Map<string, MemRow> } {
+function memoryStore(clock = { skew: 0 }): AllocationStore & { rows: Map<string, MemRow>; clock: { skew: number }; logged: { recordId: string; at: string }[] } {
   const rows = new Map<string, MemRow>();
   const locks = new Map<string, { holder: string; until: number }>();
+  const logged: { recordId: string; at: string }[] = [];
+  const Date = { now: () => globalThis.Date.now() + clock.skew };
   return {
-    rows,
+    rows, clock, logged,
     async claim(tenantId, key, row, token, lease): Promise<Claim> {
       const id = `${tenantId}:${key}`;
       const now = Date.now();
@@ -42,8 +44,28 @@ function memoryStore(): AllocationStore & { rows: Map<string, MemRow> } {
     },
     async finish(tenantId, key, token, httpStatus, body) {
       const have = rows.get(`${tenantId}:${key}`);
-      if (!have || have.token !== token || have.state !== "pending") return;
+      if (!have || have.token !== token || have.state !== "pending") return false;
       Object.assign(have, { state: "done", httpStatus, body: structuredClone(body), token: null, until: 0 });
+      return true;
+    },
+    async renew(tenantId, key, token, lease) {
+      const have = rows.get(`${tenantId}:${key}`);
+      if (!have || have.token !== token || have.state !== "pending" || have.until <= Date.now()) return false;
+      have.until = Date.now() + lease * 1000;
+      return true;
+    },
+    async renewRow(tenantId, recordId, holder, seconds) {
+      const have = locks.get(`${tenantId}:${recordId}`);
+      if (!have || have.holder !== holder || have.until <= Date.now()) return false;
+      have.until = Date.now() + seconds * 1000;
+      return true;
+    },
+    async rowUnresolved(tenantId, recordId, exceptKey) {
+      return [...rows.entries()].some(([id, row]) => id.startsWith(`${tenantId}:`) && id !== `${tenantId}:${exceptKey}` && row.recordId === recordId
+        && row.state === "pending" && Boolean(row.plan?.steps.some((step) => step.attemptedAt && !step.done)));
+    },
+    async saleLogged(_tenantId, recordId, sinceIso) {
+      return logged.some((sale) => sale.recordId === recordId && sale.at >= sinceIso);
     },
     async abandon(tenantId, key, token) {
       const have = rows.get(`${tenantId}:${key}`);
@@ -83,26 +105,30 @@ const listing = (id: number, quantity: number, recordId: string | null = REC): C
 const notFound = () => Object.assign(new Error("CardTrader said: not found"), { status: 404 });
 
 /** CardTrader in memory: increment, delete, and create change `listings`. `landThenFail` applies a write, then throws a 504. */
-type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean; missing: number[]; refuseRelist: boolean; landThenFail: number; gate: Promise<void> | null };
+/** `orders` are CardTrader seller orders the evidence check reads; `ordersDown` makes that read fail. */
+type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean; failNoLand: number; missing: number[]; refuseRelist: boolean; landThenFail: number; gate: Promise<void> | null; orders: { productId: number | null; recordId: string | null; at: string }[]; ordersDown: boolean };
 function world(over: Partial<World> = {}) {
-  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, missing: [], refuseRelist: false, landThenFail: 0, gate: null, ...over };
+  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, failNoLand: 0, missing: [], refuseRelist: false, landThenFail: 0, gate: null, orders: [], ordersDown: false, ...over };
   let nextId = 77;
   const timeout = () => {
     if (state.landThenFail > 0) { state.landThenFail--; throw Object.assign(new Error("CardTrader said: gateway timeout"), { status: 504 }); }
   };
-  const calls = { listings: 0, increment: [] as [number, number][], remove: [] as number[], relist: [] as number[], relistPrice: [] as (number | null)[], sales: 0 };
+  const calls = { listings: 0, increment: [] as [number, number][], remove: [] as number[], relist: [] as number[], relistPrice: [] as (number | null)[], sales: 0, evidence: 0 };
+  const store = memoryStore();
   const deps: AllocationDeps = {
     async tenant() { return { id: TENANT }; },
-    store: memoryStore(),
+    store,
     async listings() { calls.listings++; return state.listings.map((l) => ({ ...l })); },
     async increment(_tenant, id, delta) {
       calls.increment.push([id, delta]);
       if (state.gate) await state.gate;
-      if (state.failIncrement) throw new Error("CardTrader said: down");
+      if (state.failIncrement) throw Object.assign(new Error("CardTrader said: bad request"), { status: 400 });
+      if (state.failNoLand > 0) { state.failNoLand--; throw Object.assign(new Error("CardTrader said: gateway timeout"), { status: 504 }); }
       if (state.missing.includes(id)) throw notFound();
       const hit = state.listings.find((l) => l.id === id);
       if (hit) hit.quantity += delta;
       timeout();
+      return hit?.quantity ?? null;
     },
     async remove(_tenant, id) {
       calls.remove.push(id);
@@ -124,6 +150,12 @@ function world(over: Partial<World> = {}) {
     },
     sleep: () => new Promise((resolve) => setImmediate(resolve)),
     async insertSale() { calls.sales++; },
+    async salesEvidence(tenantId, recordId, ids, since) {
+      calls.evidence++;
+      if (state.ordersDown) throw new Error("CardTrader said: down");
+      return state.orders.some((o) => (o.recordId === recordId || (o.productId != null && ids.includes(o.productId))) && o.at >= since)
+        || store.saleLogged(tenantId, recordId, since);
+    },
   };
   return { state, calls, deps };
 }
@@ -438,8 +470,149 @@ test("a retry flags a listing someone else changed instead of writing over it", 
   box.state.listings[0]!.quantity = 1; // Hekla pulled one more by hand: neither 4 nor 2.
   const retry = await post(raw, box.deps);
   assert.equal(retry.status, 409);
-  assert.equal(retry.body.error, "ct_changed_during_retry");
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
   assert.equal(retry.body.ct_delta, 0);
+  assert.equal(box.calls.increment.length, 1);
+});
+
+test("a step that was never sent still checks its start state on retry", async () => {
+  // Two deletes; the first lands and times out. Before the retry someone sets listing 51 to 5 by hand.
+  const box = world({ listings: [listing(50, 2), listing(51, 1)], landThenFail: 1 });
+  const raw = payload({ idempotency_key: "t-two", qty: 3 });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  box.state.listings.find((l) => l.id === 51)!.quantity = 5;
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.status, 409);
+  assert.equal(retry.body.error, "ct_changed_during_retry");
+  assert.equal(retry.body.ct_delta, -2, "the first delete is proven (gone, no sale since) and counted once");
+  assert.deepEqual(box.calls.remove, [50]);
+});
+
+test("a write with no answer is not sent again when the listing still looks untouched", async () => {
+  // CardTrader timed out; the export still shows 4. The write may have landed and been undone by a sale, or the
+  // export may lag. Neither can be told apart from "never landed", so the retry stops for a manual check.
+  const box = world({ failNoLand: 1 });
+  const raw = payload({ idempotency_key: "t-unknown" });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.status, 409);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  assert.equal(box.calls.increment.length, 1);
+  assert.equal(box.state.listings[0]!.quantity, 4);
+});
+
+test("a sale during the retry window: reserve that never landed is not taken as landed", async () => {
+  // Reserve 1 of 4 times out without landing; a CardTrader buyer takes one (4 -> 3). Quantity alone says "landed".
+  const box = world({ failNoLand: 1 });
+  const raw = payload({ idempotency_key: "t-sale-res" });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  box.state.listings[0]!.quantity = 3;
+  box.state.orders.push({ productId: 50, recordId: REC, at: new Date().toISOString() });
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.status, 409);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  assert.equal(box.calls.increment.length, 1);
+
+  // Same with the sale only in Hekla's sales log (a starfoil sale that cross-delisted one).
+  const logged = world({ failNoLand: 1 });
+  const raw2 = payload({ idempotency_key: "t-sale-log" });
+  assert.equal((await post(raw2, logged.deps)).status, 502);
+  logged.state.listings[0]!.quantity = 3;
+  (logged.deps.store as ReturnType<typeof memoryStore>).logged.push({ recordId: REC, at: new Date().toISOString() });
+  assert.equal((await post(raw2, logged.deps)).body.error, "ct_retry_unverifiable");
+
+  // When the orders cannot be read, the retry fails and writes nothing.
+  const down = world({ failNoLand: 1 });
+  const raw3 = payload({ idempotency_key: "t-sale-down" });
+  assert.equal((await post(raw3, down.deps)).status, 502);
+  down.state.listings[0]!.quantity = 3;
+  down.state.ordersDown = true;
+  assert.equal((await post(raw3, down.deps)).status, 502);
+  assert.equal(down.calls.increment.length, 1);
+
+  // An older sale does not count: with no sale since the attempt, a listing at its end state is proof enough.
+  const quiet = world({ landThenFail: 1, orders: [{ productId: 50, recordId: REC, at: "2020-01-01T00:00:00.000Z" }] });
+  const raw4 = payload({ idempotency_key: "t-quiet" });
+  assert.equal((await post(raw4, quiet.deps)).status, 502);
+  assert.equal((await post(raw4, quiet.deps)).status, 200);
+  assert.equal(quiet.calls.increment.length, 1);
+});
+
+test("a sale during the retry window: release that landed is not raised twice", async () => {
+  // Release 1 onto listing 50 (2 -> 3) lands, then times out; a buyer takes one (3 -> 2), back at the start state.
+  const box = world({ listings: [listing(50, 2)], card: stock({ qty: 4, reservedQty: 0 }), landThenFail: 1 });
+  const raw = payload({ op: "release", idempotency_key: "t-sale-rel", qty: 1 });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  assert.equal(box.state.listings[0]!.quantity, 3);
+  box.state.listings[0]!.quantity = 2;
+  box.state.orders.push({ productId: 50, recordId: REC, at: new Date().toISOString() });
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.status, 409);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  assert.deepEqual(box.calls.increment, [[50, 1]], "the released copy was not listed a second time");
+  assert.equal(box.state.listings[0]!.quantity, 2);
+});
+
+const tick = async (n = 1) => { for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve)); };
+
+test("a key lease that runs out mid-call stops the next CardTrader write", async () => {
+  // Reserve 3 across two listings: two deletes. The first hangs past the 120s claim lease.
+  let open!: () => void;
+  const box = world({ listings: [listing(50, 2), listing(51, 1)], gate: new Promise<void>((resolve) => { open = resolve; }) });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const raw = payload({ idempotency_key: "t-lease", qty: 3 });
+  const first = post(raw, box.deps);
+  while (box.calls.remove.length < 1) await tick();
+  store.clock.skew += 121_000;
+  open();
+  const res = await first;
+  assert.equal(res.status, 503);
+  assert.equal(res.body.error, "lease_lost");
+  assert.deepEqual(box.calls.remove, [50], "the second delete was not sent after the lease ran out");
+});
+
+test("a row lease taken by someone else mid-call stops the next CardTrader write", async () => {
+  let open!: () => void;
+  const box = world({ listings: [listing(50, 2), listing(51, 1)], gate: new Promise<void>((resolve) => { open = resolve; }) });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const first = post(payload({ idempotency_key: "t-row-a", qty: 3 }), box.deps);
+  while (box.calls.remove.length < 1) await tick();
+  // The row lease expires; another job takes the row (the key claim is still renewed in time).
+  assert.equal(await store.renew(TENANT, "t-row-a", [...store.rows.values()][0]!.token!, 600), true);
+  store.clock.skew += 121_000;
+  assert.equal(await store.lockRow(TENANT, REC, "someone-else", 120), true);
+  open();
+  const res = await first;
+  assert.equal(res.body.error, "lease_lost");
+  assert.deepEqual(box.calls.remove, [50]);
+});
+
+test("the answer is not reported as saved when the claim was lost before finish", async () => {
+  const box = world();
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const finish = store.finish.bind(store);
+  store.finish = async (tenantId, key, _token, status, body) => {
+    store.rows.get(`${TENANT}:${key}`)!.token = "someone-else";
+    return finish(tenantId, key, "not-mine", status, body);
+  };
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  try {
+    const res = await post(payload({ idempotency_key: "t-finish" }), box.deps);
+    assert.equal(res.status, 500);
+    assert.equal(res.body.error, "claim_lost");
+  } finally { console.error = original; }
+  assert.ok(errors.some((line) => line.includes("allocation_finish_lost")));
+  assert.equal(store.rows.get(`${TENANT}:t-finish`)!.state, "pending");
+});
+
+test("a fresh allocation waits while another key on the row has an unverified write", async () => {
+  const box = world({ failNoLand: 1 });
+  assert.equal((await post(payload({ idempotency_key: "t-unres-a" }), box.deps)).status, 502);
+  const other = await post(payload({ idempotency_key: "t-unres-b", allocation_id: "alloc-2" }), box.deps);
+  assert.equal(other.status, 503);
+  assert.equal(other.body.error, "row_busy");
   assert.equal(box.calls.increment.length, 1);
 });
 
@@ -476,9 +649,11 @@ test("two releases on the same row never both re-create a listing", async () => 
   let open!: () => void;
   const box = world({ listings: [], card: stock({ qty: 4, reservedQty: 0 }), gate: new Promise<void>((resolve) => { open = resolve; }) });
   const first = post(payload({ op: "release", idempotency_key: "rel-x", allocation_id: "alloc-x" }), box.deps);
-  await new Promise((resolve) => setImmediate(resolve));
-  const pending = post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
-  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+  while (box.calls.relist.length < 1) await new Promise((resolve) => setImmediate(resolve));
+  let settled = false;
+  const pending = post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps).finally(() => { settled = true; });
+  // Without the row lock the second would block at the gate; give it a bounded number of ticks, then open.
+  for (let i = 0; i < 500 && !settled; i++) await new Promise((resolve) => setImmediate(resolve));
   open();
   const [one, second] = await Promise.all([first, pending]);
   assert.equal(one.status, 200);
@@ -585,4 +760,31 @@ test("the worker route is signed and closed by default, and it does not require 
   }), { ALLOCATIONS_ENABLED: "on", ALLOCATION_HMAC_SECRET: SECRET });
   assert.equal(authed.status, 503);
   assert.equal((await authed.json() as AllocationResponse).error, "allocations_unavailable");
+});
+
+test("a reconcile set-to-target takes the allocation row lease, and waits on an unverified allocation", async () => {
+  const box = world();
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const lease = await takeRowLease(store, TENANT, REC, "reconcile:1");
+  assert.equal(typeof lease, "object");
+  // While reconcile holds the row, an allocation on it is row_busy and makes no CardTrader write.
+  const res = await post(payload({ idempotency_key: "t-recon" }), box.deps);
+  assert.equal(res.body.error, "row_busy");
+  assert.equal(box.calls.increment.length, 0);
+  assert.equal(typeof (await takeRowLease(store, TENANT, REC, "reconcile:2")), "string", "a second reconcile is refused too");
+  assert.equal(await (lease as { renew(): Promise<boolean> }).renew(), true);
+  await (lease as { release(): Promise<void> }).release();
+
+  // An allocation write with no answer blocks reconcile from moving the row until it is verified.
+  const unknown = world({ failNoLand: 1 });
+  assert.equal((await post(payload({ idempotency_key: "t-recon-u" }), unknown.deps)).status, 502);
+  assert.match(String(await takeRowLease(unknown.deps.store, TENANT, REC, "reconcile:3")), /waiting to be verified/);
+
+  // Before migration 0013 there is no lease table: reconcile keeps working.
+  const missing = Object.assign(Object.create(store), {
+    rowUnresolved: async () => { throw new Error('relation "allocation_results" does not exist'); },
+  }) as typeof store;
+  const noop = await takeRowLease(missing, TENANT, REC, "reconcile:4");
+  assert.equal(typeof noop, "object");
+  await assert.rejects(takeRowLease(Object.assign(Object.create(store), { rowUnresolved: async () => { throw new Error("connection reset"); } }), TENANT, REC, "r"));
 });
