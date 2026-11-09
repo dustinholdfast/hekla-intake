@@ -36,14 +36,25 @@ test("a stored allocation result is returned for the same key and blocks a diffe
   assert.equal(await store.get(T, "missing"), null);
 });
 
+test("the last reserve price for an allocation is read back for a relist", async () => {
+  const store = alloc();
+  assert.equal(await store.reservePrice(T, "price-a"), null);
+  await store.put(T, "res-p1", { httpStatus: 200, body: { ok: true, applied: true, ct_price_cents: 125 }, allocationId: "price-a", deckId: "d", op: "reserve", recordId: REC, qty: 1 });
+  await store.put(T, "rel-p1", { httpStatus: 200, body: { ok: true, applied: true, ct_price_cents: 999 }, allocationId: "price-a", deckId: "d", op: "release", recordId: REC, qty: 1 });
+  await store.put(T, "res-p2", { httpStatus: 200, body: { ok: true, applied: true, note: "not_listed" }, allocationId: "price-b", deckId: "d", op: "reserve", recordId: REC, qty: 1 });
+  assert.equal(await store.reservePrice(T, "price-a"), 125, "only reserve rows count");
+  assert.equal(await store.reservePrice(T, "price-b"), null);
+});
+
 test("a deck sale is logged once and is not a Hekla Qty decrement", async () => {
   const store = sales();
   const line = allocationSaleLine({
     op: "finalize_sold", idempotency_key: "sold-1", allocation_id: "alloc-1", deck_id: "deck-1",
-    waitlist_record_id: REC, qty: 2, game: "riftbound",
+    waitlist_record_id: REC, qty: 2, game: "riftbound", order_id: "deck-1", line_key: "sold-1",
   }, { name: "Oasis Raider", resolvedName: null, marketPriceUsd: 0.5 }, "2026-11-08T00:00:00.000Z");
   assert.equal(await store.insertLines(T, [line]), 1);
   assert.equal(await store.insertLines(T, [line]), 0);
+  assert.equal(await store.insertLines(T, [{ ...line, raw: { retry: true } }]), 0, "the same order_id and line_key is one sale");
   assert.deepEqual(await store.pendingDecrements(T, 10), []);
   const rows = (await pg.query<Record<string, unknown>>("select platform, line_key, decrement_owner, gross_cents from sales")).rows;
   assert.equal(rows.length, 1);

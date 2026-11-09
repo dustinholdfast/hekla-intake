@@ -1,4 +1,4 @@
-/** Neon storage for POST /api/allocations idempotency. One row per tenant and key. */
+/** Neon storage for POST /api/allocations idempotency. One row per tenant and key. Also the last reserve price for a relist. */
 import type { AllocationResponse, AllocationStore, StoredAllocation } from "./allocations.ts";
 import { db } from "./tenants.ts";
 
@@ -48,6 +48,17 @@ export function allocationStoreWithQuery(query: AllocationQuery): AllocationStor
         [tenantId, key, row.allocationId, row.deckId, row.op, row.recordId, row.qty, row.httpStatus, JSON.stringify(row.body)],
       );
       return inserted.length > 0 ? "stored" : "exists";
+    },
+    async reservePrice(tenantId, allocationId) {
+      const rows = await sql.query(
+        `select result->>'ct_price_cents' as cents
+         from allocation_results
+         where tenant_id = $1 and allocation_id = $2 and op = 'reserve' and (result->>'ct_price_cents') is not null
+         order by created_at desc limit 1`,
+        [tenantId, allocationId],
+      );
+      const cents = rows[0] ? Number(rows[0].cents) : NaN;
+      return Number.isInteger(cents) && cents > 0 ? cents : null;
     },
   };
 }

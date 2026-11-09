@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { allocationSaleLine, allocationsEnabled, handleAllocation, parseAllocation, type AllocationDeps, type AllocationResponse, type AllocationStore, type StoredAllocation } from "./allocations.ts";
+import { allocationSaleLine, allocationsEnabled, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type StoredAllocation } from "./allocations.ts";
 import type { CtListing } from "./cardtrader.ts";
 import type { StockCard } from "./airtable.ts";
 import worker from "./index.ts";
@@ -21,6 +21,10 @@ function memoryStore(): AllocationStore {
       rows.set(id, row);
       return "stored";
     },
+    async reservePrice(tenantId, allocationId) {
+      const hits = [...rows.entries()].filter(([id, row]) => id.startsWith(`${tenantId}:`) && row.allocationId === allocationId && row.op === "reserve" && typeof row.body.ct_price_cents === "number");
+      return hits.length ? hits[hits.length - 1]![1].body.ct_price_cents ?? null : null;
+    },
   };
 }
 
@@ -37,10 +41,12 @@ function stock(over: Partial<StockCard> = {}): StockCard {
 
 const listing = (id: number, quantity: number, recordId: string | null = REC): CtListing => ({ id, blueprintId: 1, quantity, recordId, priceCents: 125 });
 
-type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean };
+const notFound = () => Object.assign(new Error("CardTrader said: not found"), { status: 404 });
+
+type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean; missing: number[]; refuseRelist: boolean };
 function world(over: Partial<World> = {}) {
-  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, ...over };
-  const calls = { listings: 0, increment: [] as [number, number][], relist: [] as number[], sales: 0 };
+  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, missing: [], refuseRelist: false, ...over };
+  const calls = { listings: 0, increment: [] as [number, number][], remove: [] as number[], relist: [] as number[], relistPrice: [] as (number | null)[], sales: 0 };
   const deps: AllocationDeps = {
     async tenant() { return { id: TENANT }; },
     store: memoryStore(),
@@ -48,9 +54,19 @@ function world(over: Partial<World> = {}) {
     async increment(_tenant, id, delta) {
       calls.increment.push([id, delta]);
       if (state.failIncrement) throw new Error("CardTrader said: down");
+      if (state.missing.includes(id)) throw notFound();
+    },
+    async remove(_tenant, id) {
+      calls.remove.push(id);
+      if (state.missing.includes(id)) throw notFound();
     },
     async loadCard() { return state.card; },
-    async relist(_tenant, _card, quantity) { calls.relist.push(quantity); return { productId: 77 }; },
+    async relist(_tenant, _card, quantity, price) {
+      calls.relist.push(quantity);
+      calls.relistPrice.push(price);
+      if (state.refuseRelist) throw Object.assign(new Error("No market price yet."), { status: 422 });
+      return { productId: 77 };
+    },
     async insertSale() { calls.sales++; },
   };
   return { state, calls, deps };
@@ -110,7 +126,7 @@ test("a closed endpoint does not call CardTrader even with a valid signature", a
   assert.equal(calls.listings, 0);
 });
 
-test("reserve lowers the listing, removes it at 0, and a repeat does not call CardTrader", async () => {
+test("reserve lowers the listing, deletes it instead of leaving 0, and a repeat does not call CardTrader", async () => {
   const { calls, deps } = world();
   const raw = payload({ qty: 1 });
   const first = await post(raw, deps);
@@ -132,13 +148,16 @@ test("reserve lowers the listing, removes it at 0, and a repeat does not call Ca
   const removed = await post(payload({ idempotency_key: "key-zero", qty: 2 }), gone.deps);
   assert.equal(removed.body.ct_listing_id, null);
   assert.equal(removed.body.ct_qty_after, 0);
-  assert.deepEqual(gone.calls.increment, [[50, -2]]);
+  assert.equal(removed.body.ct_price_cents, 125);
+  assert.deepEqual(gone.calls.increment, [], "never lowered to 0");
+  assert.deepEqual(gone.calls.remove, [50]);
 });
 
 test("reserve lowers the largest listing first when a row has more than one", async () => {
   const { calls, deps } = world({ listings: [listing(1, 1), listing(2, 3)] });
   const res = await post(payload({ qty: 3 }), deps);
-  assert.deepEqual(calls.increment, [[2, -3]]);
+  assert.deepEqual(calls.remove, [2]);
+  assert.deepEqual(calls.increment, []);
   assert.equal(res.body.ct_listing_id, 1);
   assert.equal(res.body.ct_qty_before, 4);
   assert.equal(res.body.ct_qty_after, 1);
@@ -149,24 +168,75 @@ test("reserve with less on CardTrader than requested lowers to 0 and a repeat do
   const raw = payload({ qty: 4, idempotency_key: "short" });
   const first = await post(raw, deps);
   assert.equal(first.status, 409);
-  assert.deepEqual(first.body, { ok: false, applied: true, error: "insufficient_ct_qty", ct_listing_id: null, ct_qty_before: 3, ct_qty_after: 0 });
-  assert.deepEqual(calls.increment, [[50, -2], [51, -1]]);
+  assert.deepEqual(first.body, { ok: false, applied: true, error: "insufficient_ct_qty", ct_listing_id: null, ct_qty_before: 3, ct_qty_after: 0, ct_price_cents: 125 });
+  assert.deepEqual(calls.remove, [50, 51]);
+  assert.deepEqual(calls.increment, []);
   const again = await post(raw, deps);
   assert.equal(again.status, 409);
   assert.equal(again.body.applied, false);
   assert.equal(again.body.error, "insufficient_ct_qty");
   assert.equal(again.body.ct_qty_before, 3);
   assert.equal(calls.listings, 1);
-  assert.equal(calls.increment.length, 2);
+  assert.equal(calls.remove.length, 2);
 });
 
 test("a row that is not on CardTrader is a no-op success", async () => {
-  const { calls, deps } = world({ listings: [listing(9, 4, "recBBBBBBBBBBBBBB")] });
+  const { calls, deps } = world({ listings: [listing(9, 4, "recBBBBBBBBBBBBBB")], card: stock({ cardTraderListingId: null, status: "Waitlist" }) });
   const res = await post(payload(), deps);
   assert.equal(res.status, 200);
   assert.equal(res.body.ct_listing_id, null);
   assert.equal(res.body.note, "not_listed");
   assert.equal(calls.increment.length, 0);
+});
+
+test("reserve flags a conflict when the row's CardTrader listing is gone or at 0, and a repeat does not retry", async () => {
+  const deleted = world({ listings: [listing(9, 4, "recBBBBBBBBBBBBBB")] });
+  const raw = payload({ idempotency_key: "gone-1" });
+  const first = await post(raw, deleted.deps);
+  assert.equal(first.status, 409);
+  assert.equal(first.body.error, "ct_listing_missing");
+  assert.equal(deleted.calls.increment.length + deleted.calls.remove.length, 0);
+  const again = await post(raw, deleted.deps);
+  assert.equal(again.status, 409);
+  assert.equal(again.body.applied, false);
+  assert.equal(deleted.calls.listings, 1, "the stored conflict is replayed, CardTrader is not read again");
+
+  const zero = world({ listings: [listing(50, 0)] });
+  const atZero = await post(payload({ idempotency_key: "zero-1" }), zero.deps);
+  assert.equal(atZero.status, 409);
+  assert.equal(atZero.body.error, "ct_listing_missing");
+});
+
+test("a 404 while lowering a listing is a stored conflict, not a CardTrader failure", async () => {
+  const box = world({ missing: [50] });
+  const raw = payload({ idempotency_key: "race-1" });
+  const res = await post(raw, box.deps);
+  assert.equal(res.status, 409);
+  assert.equal(res.body.error, "ct_listing_missing");
+  assert.equal(res.body.ct_qty_before, 4);
+  assert.equal(res.body.ct_qty_after, 4);
+  const again = await post(raw, box.deps);
+  assert.equal(again.body.applied, false);
+  assert.equal(box.calls.increment.length, 1);
+});
+
+test("a row with several listings is matched by user_data_field or the saved listing id, never by name, and stale ones are skipped", async () => {
+  // Rakelstake: 463637803 and 463637918 are live, 463889655 is stale at 0 but still marked Listed.
+  const other = "recBBBBBBBBBBBBBB";
+  const listings = [listing(463637803, 1), listing(463637918, 2), listing(463889655, 0), listing(463000001, 5, other)];
+  const box = world({ listings, card: stock({ cardTraderListingId: "463889655" }) });
+  const res = await post(payload({ qty: 3, idempotency_key: "rakel-1" }), box.deps);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ct_qty_before, 3);
+  assert.equal(res.body.ct_qty_after, 0);
+  assert.deepEqual(box.calls.remove, [463637918, 463637803]);
+  assert.equal(box.calls.increment.length, 0);
+
+  const tagged = rowListings(listings, REC, "463637918").map((l) => l.id);
+  assert.deepEqual(tagged, [463637803, 463637918, 463889655]);
+  const untagged = [listing(70, 2, null), listing(71, 2, null)];
+  assert.deepEqual(rowListings(untagged, REC, "71").map((l) => l.id), [71], "an untagged listing counts only when its id is saved on the row");
+  assert.deepEqual(rowListings([listing(463000001, 5, other)], REC, "463000001"), [], "a listing tagged for another row is never taken");
 });
 
 test("the same idempotency key with a different request does not apply again", async () => {
@@ -189,6 +259,7 @@ test("release raises an existing listing and recreates a removed one at Qty minu
 
   const gone = world({ listings: [] });
   const again = await post(payload({ op: "release", idempotency_key: "rel-1", qty: 1 }), gone.deps);
+  assert.deepEqual(gone.calls.increment, []);
   assert.equal(again.status, 200);
   assert.equal(again.body.note, "relisted");
   assert.equal(again.body.ct_listing_id, 77);
@@ -211,6 +282,51 @@ test("release raises an existing listing and recreates a removed one at Qty minu
   const none = await post(payload({ op: "release", idempotency_key: "rel-0", qty: 1 }), held.deps);
   assert.equal(none.body.note, "no_free_qty");
   assert.equal(held.calls.relist.length, 0);
+});
+
+test("release after a delete re-creates the listing at the price the reserve took down", async () => {
+  const box = world({ listings: [listing(50, 1)], card: stock({ qty: 1, reservedQty: 0, marketPriceUsd: null, priceSource: null }) });
+  const reserved = await post(payload({ idempotency_key: "res-a", allocation_id: "alloc-a" }), box.deps);
+  assert.equal(reserved.status, 200);
+  assert.deepEqual(box.calls.remove, [50]);
+  box.state.listings = [];
+  const released = await post(payload({ op: "release", idempotency_key: "rel-a", allocation_id: "alloc-a" }), box.deps);
+  assert.equal(released.status, 200);
+  assert.equal(released.body.note, "relisted");
+  assert.deepEqual(box.calls.relist, [1]);
+  assert.deepEqual(box.calls.relistPrice, [125]);
+  assert.equal(box.calls.increment.length, 0, "never incremented on a deleted listing");
+});
+
+test("release re-creates the listing when CardTrader says the one in the export was deleted", async () => {
+  const box = world({ listings: [listing(50, 2)], missing: [50], card: stock({ qty: 4, reservedQty: 1 }) });
+  const res = await post(payload({ op: "release", idempotency_key: "rel-404" }), box.deps);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.note, "relisted");
+  assert.deepEqual(box.calls.increment, [[50, 1]]);
+  assert.deepEqual(box.calls.relist, [3]);
+});
+
+test("a relist CardTrader refuses is a stored conflict", async () => {
+  const box = world({ listings: [], refuseRelist: true });
+  const raw = payload({ op: "release", idempotency_key: "rel-refused" });
+  const res = await post(raw, box.deps);
+  assert.equal(res.status, 409);
+  assert.equal(res.body.error, "ct_relist_failed");
+  const again = await post(raw, box.deps);
+  assert.equal(again.body.applied, false);
+  assert.equal(box.calls.relist.length, 1);
+});
+
+test("the relist price is the Waitlist CardTrader market price, else the last listing price", () => {
+  const card = stock();
+  assert.deepEqual(relistPrice(card, 300), { marketPriceUsd: 1.25, priceSource: card.priceSource });
+  assert.deepEqual(relistPrice(stock({ priceSource: "TCGplayer market" }), 300), { marketPriceUsd: 3, priceSource: "CardTrader market (last listing)" });
+  assert.deepEqual(relistPrice(stock({ marketPriceUsd: null }), 300), { marketPriceUsd: 3, priceSource: "CardTrader market (last listing)" });
+  assert.deepEqual(relistPrice(stock({ marketPriceUsd: null, priceSource: null }), null), { marketPriceUsd: null, priceSource: null });
+  const row = asExportCard(stock(), 2);
+  assert.equal(row.id, REC, "the export row id becomes user_data_field");
+  assert.equal(row.qty, 2);
 });
 
 test("release does not store a missing Waitlist row, so a later retry can still relist", async () => {
@@ -236,12 +352,13 @@ test("a CardTrader failure is not stored, so the same key can succeed on retry",
   assert.equal(box.calls.increment.length, 2);
 });
 
-test("finalize_built records without CardTrader; finalize_sold logs once and does not change CardTrader", async () => {
-  const built = world();
+test("finalize deletes a listing left at 0 and never changes a live quantity; finalize_sold logs once", async () => {
+  const built = world({ listings: [listing(50, 0), listing(51, 2), listing(52, 0, "recBBBBBBBBBBBBBB")] });
   const kept = await post(payload({ op: "finalize_built", idempotency_key: "built-1" }), built.deps);
   assert.equal(kept.status, 200);
-  assert.equal(kept.body.note, "recorded");
-  assert.equal(built.calls.listings, 0);
+  assert.equal(kept.body.note, "recorded;deleted_empty_listings:50");
+  assert.deepEqual(built.calls.remove, [50]);
+  assert.equal(built.calls.increment.length, 0);
   assert.equal(built.calls.sales, 0);
   const repeat = await post(payload({ op: "finalize_built", idempotency_key: "built-1" }), built.deps);
   assert.equal(repeat.body.applied, false);
@@ -249,14 +366,14 @@ test("finalize_built records without CardTrader; finalize_sold logs once and doe
   const sold = world();
   let line: ReturnType<typeof allocationSaleLine> | null = null;
   sold.deps.insertSale = async (_tenant, next) => { sold.calls.sales++; line = next; };
-  const raw = payload({ op: "finalize_sold", idempotency_key: "sold-1", qty: 2 });
+  const raw = payload({ op: "finalize_sold", idempotency_key: "sold-1", qty: 2, order_id: "deck-1", line_key: "alloc-1" });
   const first = await post(raw, sold.deps);
   assert.equal(first.body.note, "sale_logged");
-  assert.equal(sold.calls.listings, 0);
   assert.equal(sold.calls.increment.length, 0);
+  assert.equal(sold.calls.remove.length, 0);
   assert.equal(sold.calls.sales, 1);
   assert.equal(line!.platform, "allocation");
-  assert.equal(line!.lineKey, "sold-1");
+  assert.equal(line!.lineKey, "alloc-1");
   assert.equal(line!.decrementOwner, "none");
   assert.equal(line!.qty, 2);
   assert.equal(line!.grossCents, 250);
@@ -264,6 +381,17 @@ test("finalize_built records without CardTrader; finalize_sold logs once and doe
   const again = await post(raw, sold.deps);
   assert.equal(again.body.applied, false);
   assert.equal(sold.calls.sales, 1, "a repeat makes no second sales insert");
+
+  const unkeyed = await post(payload({ op: "finalize_sold", idempotency_key: "sold-2" }), sold.deps);
+  assert.equal(unkeyed.status, 400);
+  assert.equal(unkeyed.body.error, "finalize_sold needs order_id and line_key.");
+  assert.equal(sold.calls.sales, 1);
+
+  const broken = world();
+  broken.deps.listings = async () => { throw new Error("CardTrader said: down"); };
+  const cleanupDown = await post(payload({ op: "finalize_built", idempotency_key: "built-down" }), broken.deps);
+  assert.equal(cleanupDown.status, 200, "a failed cleanup never fails the finalize");
+  assert.equal(cleanupDown.body.note, "recorded;empty_listing_cleanup_failed");
 });
 
 test("a deck sale line is not a CardTrader decrement", () => {
