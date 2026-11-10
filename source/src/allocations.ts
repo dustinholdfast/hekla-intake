@@ -15,8 +15,11 @@
  * listings (allocation_row_locks). Migration 0013 adds both.
  *
  * A write whose answer was never recorded blocks its row (row_busy) until it is settled by proof: by its key's retry,
- * after STALE_SECONDS by the next allocation or reconcile on the row, or at once by the admin clear. Settling never
- * sends a CardTrader write.
+ * after STALE_SECONDS by the next allocation or reconcile on the row or by the scheduled sweep, or at once by the
+ * admin clear. Settling never sends a CardTrader write.
+ *
+ * Every ct_retry_unverifiable that is stored (retry, expiry, admin clear, sweep) raises an owner alert (deps.alert):
+ * a listing may now be too high or too low and nothing fixes it on its own (RECONCILE_MODE is off).
  *
  * The endpoint stays dark until ALLOCATIONS_ENABLED is on. Repeating an idempotency key returns the stored
  * result and does not call CardTrader again.
@@ -32,6 +35,7 @@ import { recordCardTraderListing, stockCardsByIds, type StockCard } from "./airt
 import { connectionSecret } from "./connections.ts";
 import { listTenants, tenantById, tenantEnv } from "./tenants.ts";
 import { neonAllocationStore } from "./allocationsdb.ts";
+import { allocationAlerter } from "./alerts.ts";
 
 export type AllocationOp = "reserve" | "release" | "finalize_built" | "finalize_sold";
 
@@ -60,6 +64,33 @@ export type AllocationResponse = {
   /** The net CardTrader quantity change this request made (negative for a reserve). Set on conflicts too. */
   ct_delta?: number;
   note?: string;
+  /** ct_retry_unverifiable only: the write that could not be proven. */
+  unverified?: Unverified;
+};
+
+/**
+ * The write a ct_retry_unverifiable could not prove. listing_id is null for a relist that never showed up.
+ * expected is where the write meant to leave the listing, observed is what CardTrader shows now (null: gone).
+ */
+export type Unverified = { listing_id: number | null; from: number; expected: number; observed: number | null; attempted_at: string | null };
+
+/** Where a stored ct_retry_unverifiable came from. */
+export type AlertSource = "retry" | "expiry" | "admin_clear" | "sweep";
+
+/** What the owner is told about a ct_retry_unverifiable. direction is the allocation op (reserve lowers, release raises). */
+export type UnverifiableAlert = {
+  tenantId: string;
+  key: string;
+  recordId: string;
+  allocationId: string;
+  deckId: string;
+  direction: "reserve" | "release";
+  listingId: number | null;
+  from: number | null;
+  expected: number | null;
+  observed: number | null;
+  source: AlertSource;
+  note: string;
 };
 
 /** The request a key was first used for. A repeat must match it, order_id and line_key included. */
@@ -110,6 +141,11 @@ export interface AllocationStore {
   unresolvedOnRow(tenantId: string, recordId: string, exceptKey: string): Promise<{ key: string; plan: CtPlan; leaseLive: boolean }[]>;
   /** Takes over a pending key whose lease ran out, whatever request it was for. null when a request still holds it or it is done. */
   takeOver(tenantId: string, key: string, token: string, leaseSeconds: number): Promise<{ row: ClaimRow; plan: CtPlan | null } | null>;
+  /**
+   * Waitlist rows with a pending key no request holds whose unanswered write was attempted at or before
+   * `attemptedBeforeIso`, oldest first, at most `limit`.
+   */
+  staleRows(tenantId: string, attemptedBeforeIso: string, limit: number): Promise<string[]>;
 }
 
 export type AllocationDeps = {
@@ -128,6 +164,8 @@ export type AllocationDeps = {
    * log) at or after `sinceIso`? Must answer true when it cannot tell.
    */
   salesEvidence: (tenantId: string, recordId: string, listingIds: number[], sinceIso: string) => Promise<boolean>;
+  /** Tells the owner about a stored ct_retry_unverifiable. A failure is logged and never changes the stored answer. */
+  alert: (alert: UnverifiableAlert) => Promise<void>;
   now?: () => number;
   /** Waits between checks on a duplicate in flight. Tests replace it. */
   sleep?: (ms: number) => Promise<void>;
@@ -328,7 +366,7 @@ async function runPlan(
   const body: AllocationResponse = { ...plan.body };
   let delta = 0;
   const now = () => new Date(deps.now?.() ?? Date.now()).toISOString();
-  const conflict = (error: string, note: string) => ({ status: 409, body: { ...body, ok: false, applied: true, error, ct_delta: delta, ct_qty_after: typeof body.ct_qty_before === "number" ? body.ct_qty_before + delta : null, note } });
+  const conflict = (error: string, note: string, unverified?: Unverified) => ({ status: 409, body: { ...body, ok: false, applied: true, error, ct_delta: delta, ct_qty_after: typeof body.ct_qty_before === "number" ? body.ct_qty_before + delta : null, note, ...(unverified ? { unverified } : {}) } });
   const setStep = async (i: number, step: CtStep) => { plan = { ...plan, steps: plan.steps.map((s, j) => (j === i ? step : s)) }; await save(plan); };
   const change = (step: CtStep) => (step.kind === "set" ? step.to - step.from : step.quantity);
   const sold = async (step: CtStep) => deps.salesEvidence(tenantId, input.waitlist_record_id, step.kind === "set" ? [step.listingId] : [], new Date(Date.parse(step.attemptedAt!) - EVIDENCE_SKEW_MS).toISOString());
@@ -348,10 +386,16 @@ async function runPlan(
       if (step.kind === "set") {
         const now = all.find((listing) => listing.id === step.listingId);
         const atEnd = step.to <= 0 ? !now || now.quantity <= 0 : now?.quantity === step.to;
-        if (!atEnd || (await sold(step))) return conflict("ct_retry_unverifiable", `CardTrader listing ${step.listingId}: cannot prove the earlier write (${step.from}→${step.to}) landed; now ${now?.quantity ?? "gone"}. Check by hand.`);
+        if (!atEnd || (await sold(step))) {
+          return conflict("ct_retry_unverifiable", `CardTrader listing ${step.listingId}: cannot prove the earlier write (${step.from}→${step.to}) landed; now ${now?.quantity ?? "gone"}. Check by hand.`,
+            { listing_id: step.listingId, from: step.from, expected: Math.max(0, step.to), observed: now ? now.quantity : null, attempted_at: step.attemptedAt ?? null });
+        }
         await setStep(i, { ...step, done: { quantity: now?.quantity ?? 0 } });
       } else {
-        if (!fresh || fresh.quantity !== step.quantity || (await sold(step))) return conflict("ct_retry_unverifiable", `Cannot prove the earlier relist of ${step.quantity} landed. Check CardTrader by hand.`);
+        if (!fresh || fresh.quantity !== step.quantity || (await sold(step))) {
+          return conflict("ct_retry_unverifiable", `Cannot prove the earlier relist of ${step.quantity} landed. Check CardTrader by hand.`,
+            { listing_id: fresh?.id ?? null, from: 0, expected: step.quantity, observed: fresh ? fresh.quantity : null, attempted_at: step.attemptedAt ?? null });
+        }
         body.ct_listing_id = fresh.id;
         await setStep(i, { ...step, done: { quantity: fresh.quantity, productId: fresh.id } });
       }
@@ -512,6 +556,7 @@ export async function handleAllocation(
       return { status: 500, body: { ok: false, error: "claim_lost", note: "The answer could not be saved because another request now owns this key. Retry the key." } };
     }
     console.log(JSON.stringify({ event: "allocation", op: input.op, status, record }));
+    await raiseUnverifiable(deps, tenantId, key, claimRow(input), body, "retry");
     return { status, body };
   };
 
@@ -530,7 +575,7 @@ export async function handleAllocation(
     // A write left unanswered past STALE_SECONDS (its job lost, or the deckbuilder mode moved off) is settled here
     // through the same proof a retry uses, never by sending it again.
     if (!plan && (await deps.store.rowUnresolved(tenantId, record, key))) {
-      await resolveStaleRow(tenantId, record, deps, { exceptKey: key }).catch((error) => {
+      await resolveStaleRow(tenantId, record, deps, { exceptKey: key, source: "expiry" }).catch((error) => {
         console.error(JSON.stringify({ event: "allocation_stale_check_failed", record, error: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
       });
     }
@@ -597,7 +642,7 @@ const oldestAttempt = (plan: CtPlan): number => Math.min(...plan.steps.filter((s
  */
 export async function resolveStaleRow(
   tenantId: string, recordId: string, deps: AllocationDeps,
-  opts: { exceptKey?: string; force?: boolean } = {},
+  opts: { exceptKey?: string; force?: boolean; source?: AlertSource } = {},
 ): Promise<StaleOutcome[]> {
   const nowMs = deps.now?.() ?? Date.now();
   const pending = await deps.store.unresolvedOnRow(tenantId, recordId, opts.exceptKey ?? "");
@@ -626,13 +671,14 @@ export async function resolveStaleRow(
       const settled: StaleOutcome = result.body.error === "ct_retry_unverifiable"
         ? { key: item.key, outcome: "unverifiable", status: result.status, body: result.body }
         : { key: item.key, outcome: "landed", finished: true, status: result.status, body: result.body };
-      console.log(JSON.stringify({ event: "allocation_stale_settled", key: item.key, record: recordId, outcome: settled.outcome, status: result.status, error: result.body.error ?? null, forced: Boolean(opts.force) }));
+      console.log(JSON.stringify({ event: "allocation_stale_settled", key: item.key, record: recordId, outcome: settled.outcome, status: result.status, error: result.body.error ?? null, forced: Boolean(opts.force), source: opts.source ?? "expiry" }));
+      await raiseUnverifiable(deps, tenantId, item.key, taken.row, result.body, opts.source ?? "expiry");
       out.push(settled);
     } catch (error) {
       await deps.store.abandon(tenantId, item.key, token).catch(() => undefined);
       if (!(error instanceof NoSend)) throw error;
       // The unanswered writes were proven and saved as done; the steps never sent wait for the key's own retry.
-      console.log(JSON.stringify({ event: "allocation_stale_settled", key: item.key, record: recordId, outcome: "landed", finished: false, forced: Boolean(opts.force) }));
+      console.log(JSON.stringify({ event: "allocation_stale_settled", key: item.key, record: recordId, outcome: "landed", finished: false, forced: Boolean(opts.force), source: opts.source ?? "expiry" }));
       out.push({ key: item.key, outcome: "landed", finished: false });
     }
   }
@@ -653,7 +699,7 @@ export async function clearAllocationRow(deps: AllocationDeps, recordId: string,
   if (!(await deps.store.lockRow(tenant.id, recordId, holder, LOCK_SECONDS))) return { status: 409, body: { ok: false, error: "row_busy", note: "An allocation or reconcile is changing this row now. Try again in a minute." } };
   try {
     let results: StaleOutcome[];
-    try { results = await resolveStaleRow(tenant.id, recordId, deps, { force: true }); }
+    try { results = await resolveStaleRow(tenant.id, recordId, deps, { force: true, source: "admin_clear" }); }
     catch (error) {
       return { status: 502, body: { ok: false, error: "cannot_verify", note: (error instanceof Error ? error.message : String(error)).slice(0, 200) } };
     }
@@ -665,6 +711,64 @@ export async function clearAllocationRow(deps: AllocationDeps, recordId: string,
   } finally {
     await deps.store.unlockRow(tenant.id, recordId, holder).catch(() => undefined);
   }
+}
+
+/**
+ * Raises the owner alert for a ct_retry_unverifiable answer that was just stored. Anything else is ignored. The answer
+ * is already saved, so a failed alert is only logged; the stored 409 stays on the admin alerts list either way.
+ */
+async function raiseUnverifiable(deps: AllocationDeps, tenantId: string, key: string, row: ClaimRow, body: AllocationResponse, source: AlertSource): Promise<void> {
+  if (body.error !== "ct_retry_unverifiable") return;
+  const u = body.unverified;
+  const alert: UnverifiableAlert = {
+    tenantId, key, recordId: row.recordId, allocationId: row.allocationId, deckId: row.deckId,
+    direction: row.op === "release" ? "release" : "reserve",
+    listingId: u?.listing_id ?? null, from: u?.from ?? null, expected: u?.expected ?? null, observed: u?.observed ?? null,
+    source, note: (body.note ?? "").slice(0, 300),
+  };
+  try { await deps.alert(alert); }
+  catch (error) {
+    console.error(JSON.stringify({ event: "allocation_alert_failed", key, record: row.recordId, source, error: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
+  }
+}
+
+/** Rows the scheduled sweep settles per run, at most. Each one reads the CardTrader export and up to ORDER_PAGES of orders. */
+export const SWEEP_ROWS = 5;
+
+export type SweepResult = { tenantId: string | null; rows: { recordId: string; result: "settled" | "row_busy" | "cannot_verify"; outcomes: StaleOutcome[] }[] };
+
+/**
+ * The scheduled sweep: settles stale unanswered writes on rows nothing touches, so a key whose job was lost does not
+ * block its row (or reconcile) forever and its alert is raised. Same path as the admin clear without `force`: row
+ * lease, key takeover only when no request holds it, a guard that refuses every CardTrader write, and only writes
+ * at least STALE_SECONDS old. CardTrader is only read. When the export or a sales check cannot be read, the key is
+ * left as it was (still pending, plan kept) for the next run.
+ *
+ * Runs whether or not ALLOCATIONS_ENABLED is on. With it off, no new key can be claimed, so the sweep only finds keys
+ * left from before it was turned off; settling those is proof-only and read-only, like the admin clear (which also
+ * works with it off). When there are none it is one database query.
+ */
+export async function sweepStaleAllocations(deps: AllocationDeps, limit = SWEEP_ROWS): Promise<SweepResult> {
+  const tenant = await deps.tenant();
+  if (!tenant) return { tenantId: null, rows: [] };
+  const nowMs = deps.now?.() ?? Date.now();
+  const recordIds = await deps.store.staleRows(tenant.id, new Date(nowMs - STALE_SECONDS * 1000).toISOString(), Math.max(0, limit));
+  const rows: SweepResult["rows"] = [];
+  for (const recordId of recordIds.slice(0, limit)) {
+    const holder = `sweep:${crypto.randomUUID()}`;
+    if (!(await deps.store.lockRow(tenant.id, recordId, holder, LOCK_SECONDS))) { rows.push({ recordId, result: "row_busy", outcomes: [] }); continue; }
+    try {
+      const outcomes = await resolveStaleRow(tenant.id, recordId, deps, { source: "sweep" });
+      rows.push({ recordId, result: "settled", outcomes });
+    } catch (error) {
+      console.error(JSON.stringify({ event: "allocation_sweep_cannot_verify", record: recordId, error: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
+      rows.push({ recordId, result: "cannot_verify", outcomes: [] });
+    } finally {
+      await deps.store.unlockRow(tenant.id, recordId, holder).catch(() => undefined);
+    }
+  }
+  if (rows.length) console.log(JSON.stringify({ event: "allocation_sweep", tenant: tenant.id, rows: rows.map((r) => ({ record: r.recordId, result: r.result, outcomes: r.outcomes.map((o) => o.outcome) })) }));
+  return { tenantId: tenant.id, rows };
 }
 
 export type RowLease = { renew(): Promise<boolean>; release(): Promise<void> };
@@ -785,6 +889,7 @@ export function productionAllocationDeps(env: Env): AllocationDeps {
       return tenants.find((tenant) => purchasesAllowed(tenant)) ?? null;
     },
     store,
+    alert: allocationAlerter(env),
     async listings(tenantId) {
       return exportListings(await sellerToken(env, tenantId));
     },

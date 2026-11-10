@@ -177,8 +177,90 @@ export function allocationStoreWithQuery(query: AllocationQuery): AllocationStor
         plan: row.plan == null ? null : asJson<CtPlan>(row.plan),
       };
     },
+    async staleRows(tenantId, attemptedBeforeIso, limit) {
+      // An unanswered step (attemptedAt, no done) at or before the cutoff, on a pending key no request holds.
+      const rows = await sql.query(
+        `select r.waitlist_record_id, min((s->>'attemptedAt')::timestamptz) as oldest
+         from allocation_results r
+         cross join lateral jsonb_array_elements(coalesce(r.plan->'steps', '[]'::jsonb)) s
+         where r.tenant_id = $1 and r.state = 'pending' and (r.claimed_until is null or r.claimed_until <= now())
+           and s ? 'attemptedAt' and not s ? 'done' and (s->>'attemptedAt')::timestamptz <= $2::timestamptz
+         group by r.waitlist_record_id
+         order by oldest
+         limit $3`,
+        [tenantId, attemptedBeforeIso, limit],
+      );
+      return rows.map((row) => String(row.waitlist_record_id));
+    },
     async unlockRow(tenantId, recordId, holder) {
       await sql.query("delete from allocation_row_locks where tenant_id = $1 and record_id = $2 and holder = $3", [tenantId, recordId, holder]);
     },
   };
+}
+
+/** One stored ct_retry_unverifiable on the admin alerts list. Fields from `unverified` are null on answers stored before it existed. */
+export type AllocationAlertRow = {
+  key: string;
+  recordId: string;
+  allocationId: string;
+  deckId: string;
+  direction: "reserve" | "release";
+  listingId: number | null;
+  from: number | null;
+  expected: number | null;
+  observed: number | null;
+  attemptedAt: string | null;
+  note: string;
+  createdAt: string;
+};
+
+const ACK = "alloc_alert_ack:";
+const num = (value: unknown): number | null => (value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value));
+
+/**
+ * The persistent owner alert list: every stored ct_retry_unverifiable (state done, so retry, expiry, admin clear and
+ * sweep all land here) that no admin has marked checked. Marks live in sync_state, so no migration is needed.
+ */
+export function allocationAlertsWithQuery(query: AllocationQuery) {
+  return {
+    async open(tenantId: string, limit = 100): Promise<AllocationAlertRow[]> {
+      const rows = await query(
+        `select r.idempotency_key, r.waitlist_record_id, r.allocation_id, r.deck_id, r.op, r.result, r.created_at
+         from allocation_results r
+         where r.tenant_id = $1 and r.state = 'done' and r.result->>'error' = 'ct_retry_unverifiable'
+           and not exists (select 1 from sync_state a where a.tenant_id = r.tenant_id and a.key = $2 || r.idempotency_key)
+         order by r.created_at desc
+         limit $3`,
+        [tenantId, ACK, limit],
+      );
+      return rows.map((row) => {
+        const body = asBody(row.result);
+        const u = (body.unverified ?? {}) as Partial<NonNullable<AllocationResponse["unverified"]>>;
+        return {
+          key: String(row.idempotency_key), recordId: String(row.waitlist_record_id), allocationId: String(row.allocation_id), deckId: String(row.deck_id),
+          direction: row.op === "release" ? "release" : "reserve",
+          listingId: num(u.listing_id), from: num(u.from), expected: num(u.expected), observed: num(u.observed),
+          attemptedAt: typeof u.attempted_at === "string" ? u.attempted_at : null,
+          note: String(body.note ?? ""), createdAt: new Date(String(row.created_at)).toISOString(),
+        };
+      });
+    },
+    /** Marks one alert checked. false when the key has no stored ct_retry_unverifiable. Idempotent. */
+    async ack(tenantId: string, key: string, by: string): Promise<boolean> {
+      const rows = await query(
+        `insert into sync_state (tenant_id, key, value)
+         select r.tenant_id, $3 || r.idempotency_key, jsonb_build_object('by', $4::text, 'at', now())
+         from allocation_results r
+         where r.tenant_id = $1 and r.idempotency_key = $2 and r.state = 'done' and r.result->>'error' = 'ct_retry_unverifiable'
+         on conflict (tenant_id, key) do update set value = sync_state.value
+         returning key`,
+        [tenantId, key, ACK, by],
+      );
+      return rows.length === 1;
+    },
+  };
+}
+
+export function neonAllocationAlerts(env: Env) {
+  return allocationAlertsWithQuery((query, params) => db(env).query(query, params));
 }

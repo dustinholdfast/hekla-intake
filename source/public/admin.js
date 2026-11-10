@@ -12,6 +12,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("logout").addEventListener("click", signOut);
   $("login-signout").addEventListener("click", signOut);
   $("refresh").addEventListener("click", loadTenants);
+  $("alerts-refresh").addEventListener("click", loadAlerts);
+  $("alerts-body").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-ack]");
+    if (button) ackAlert(button.dataset.ack, button);
+  });
   $("search").addEventListener("input", (event) => {
     state.search = event.target.value;
     render();
@@ -40,7 +45,10 @@ async function boot() {
     return;
   }
   $("login-signout").hidden = false;
-  if (await loadTenants()) show("admin");
+  if (await loadTenants()) {
+    show("admin");
+    loadAlerts();
+  }
 }
 
 function show(name) {
@@ -162,4 +170,62 @@ async function confirmPlan() {
   $("plan-dialog").close();
   $("admin-flash").textContent = `${data.tenant.name} is now on ${data.tenant.plan === "pro" ? "complimentary Pro" : "Free"}.`;
   render();
+}
+
+async function loadAlerts() {
+  $("alerts-error").textContent = "";
+  const { response, data } = await api("/api/admin/allocations/alerts");
+  if (!response.ok) {
+    $("alerts-error").textContent = data.error || "Could not load allocation alerts.";
+    return;
+  }
+  renderAlerts(data.alerts || []);
+}
+
+function renderAlerts(alerts) {
+  $("alerts-meta").textContent = alerts.length ? `${alerts.length} open` : "No open alerts.";
+  const body = $("alerts-body");
+  body.replaceChildren(...alerts.map(alertRow));
+}
+
+function alertRow(alert) {
+  const tr = document.createElement("tr");
+  const cell = (text, title) => {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (title) td.title = title;
+    return td;
+  };
+  const qty = (n) => (n === null || n === undefined ? "?" : String(n));
+  const when = new Date(alert.attemptedAt || alert.createdAt).toLocaleString();
+  const risk = alert.direction === "release" ? "release (may be too high)" : "reserve (may be too low)";
+  const action = document.createElement("td");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost tiny";
+  button.dataset.ack = alert.key;
+  button.textContent = "Mark checked";
+  action.append(button);
+  tr.append(
+    cell(when, `key ${alert.key}`),
+    cell(alert.recordId, `allocation ${alert.allocationId}, deck ${alert.deckId}`),
+    cell(risk),
+    cell(alert.listingId === null ? "none found" : String(alert.listingId)),
+    cell(alert.from === null ? qty(alert.expected) : `${qty(alert.expected)} (was ${qty(alert.from)})`),
+    cell(alert.observed === null ? (alert.expected === null ? "?" : "gone") : String(alert.observed)),
+    cell(alert.note || ""),
+    action,
+  );
+  return tr;
+}
+
+async function ackAlert(key, button) {
+  button.disabled = true;
+  const { response, data } = await api("/api/admin/allocations/alerts/ack", { method: "POST", body: JSON.stringify({ key }) });
+  if (!response.ok) {
+    button.disabled = false;
+    $("alerts-error").textContent = data.error || "Could not mark it checked.";
+    return;
+  }
+  loadAlerts();
 }

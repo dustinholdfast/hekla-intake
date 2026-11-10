@@ -24,7 +24,8 @@ binding = "CF_VERSION_METADATA"
 [triggers]
 # One trigger. Every 5 min: sales (CardTrader order poll + Hekla decrements, the reconcile on :00/:15/:30/:45, the
 # optional TCGplayer email at 9 AM America/New_York; each off until its var below is set). Every 10th minute it also
-# runs enrichment. One schedule keeps it simple; a separate "*/10" is not needed.
+# runs enrichment. On :00/:15/:30/:45 it also runs the allocation stale-write sweep (read-only toward CardTrader).
+# One schedule keeps it simple; a separate "*/10" or "*/15" is not needed.
 crons = ["*/5 * * * *"]
 
 [observability]
@@ -50,6 +51,9 @@ TCGPLAYER_DAILY_EMAIL = "off"
 # ALLOCATIONS_ENABLED: false (default) | on. POST /api/allocations answers 503 until this is on.
 # The signing secret is not a var: wrangler secret put ALLOCATION_HMAC_SECRET
 ALLOCATIONS_ENABLED = "false"
+# ALLOCATION_ALERT_EMAIL: off (default) | on. Emails each unverified allocation write (ct_retry_unverifiable) through the
+#   alert email set up on Settings (Resend). Off still logs allocation_unverifiable and lists it on /admin until checked.
+ALLOCATION_ALERT_EMAIL = "off"
 # Waitlist columns for listable stock. Blank cells count as 0. Free Qty is optional; when it is absent Hekla computes Qty - the two holds.
 RESERVED_QTY_FIELD = "Reserved Qty"
 DECK_RESERVED_QTY_FIELD = "Deck Reserved Qty"

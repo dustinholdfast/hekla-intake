@@ -16,6 +16,8 @@ interface Env {
   CF_VERSION_METADATA?: { id: string; tag?: string; timestamp?: string };
   /** "on" / "true" / "1" opens POST /api/allocations. Unset or anything else answers 503. */
   ALLOCATIONS_ENABLED?: string;
+  /** "on" / "true" / "1" emails each ct_retry_unverifiable alert through the tenant's Resend connection. Default off. */
+  ALLOCATION_ALERT_EMAIL?: string;
   /** wrangler secret. Signs X-Alloc-Signature. Never a [vars] entry. */
   ALLOCATION_HMAC_SECRET?: string;
   /** Airtable column for manual holds. Default "Reserved Qty". */

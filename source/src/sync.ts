@@ -36,9 +36,10 @@ export function decrementFrom(env: Env): string | null {
 // What a cron tick runs. There is a single "*/5" trigger (one schedule is simpler to reason about); it
 // carries enrichment on every 10th minute, the same cadence as the old "*/10".
 // Any other cron string (e.g. an old "*/10" event) runs enrichment only.
-export function cronJobs(cron: string, at: Date): { enrich: boolean; sales: boolean } {
-  if (cron === "*/5 * * * *") return { enrich: at.getUTCMinutes() % 10 === 0, sales: true };
-  return { enrich: true, sales: false };
+/** sweep: the allocation stale-write sweep, every 15 minutes (:00/:15/:30/:45 UTC) on the same trigger. */
+export function cronJobs(cron: string, at: Date): { enrich: boolean; sales: boolean; sweep: boolean } {
+  if (cron === "*/5 * * * *") return { enrich: at.getUTCMinutes() % 10 === 0, sales: true, sweep: at.getUTCMinutes() % 15 === 0 };
+  return { enrich: true, sales: false, sweep: false };
 }
 
 export const dailyEmailOn = (env: Env) => (env.TCGPLAYER_DAILY_EMAIL ?? "").trim().toLowerCase() === "on";
