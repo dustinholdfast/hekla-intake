@@ -52,7 +52,9 @@ TCGPLAYER_DAILY_EMAIL = "off"
 # The signing secret is not a var: wrangler secret put ALLOCATION_HMAC_SECRET
 ALLOCATIONS_ENABLED = "false"
 # ALLOCATION_ALERT_EMAIL: off (default) | on. Emails each unverified allocation write (ct_retry_unverifiable) through the
-#   alert email set up on Settings (Resend). Off still logs allocation_unverifiable and lists it on /admin until checked.
+#   alert email set up on Settings (Resend); the 15-min sweep resends any not yet sent. Off still logs
+#   allocation_unverifiable and lists it on /admin until checked. LIVE REQUIREMENT: POST /api/allocations answers 503
+#   allocations_preflight_failed until this is on AND alert email is set up (GET /api/admin/allocations/preflight).
 ALLOCATION_ALERT_EMAIL = "off"
 # Waitlist columns for listable stock. Blank cells count as 0. Free Qty is optional; when it is absent Hekla computes Qty - the two holds.
 RESERVED_QTY_FIELD = "Reserved Qty"

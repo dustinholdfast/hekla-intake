@@ -72,7 +72,7 @@ function scryfallStore(env: Env): ScryfallStore | null {
   };
 }
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
-import { clearAllocationRow, handleAllocation, productionAllocationDeps, resolveStaleRow, sweepStaleAllocations, takeRowLease, type RowLease } from "./allocations.ts";
+import { allocationsEnabled, clearAllocationRow, handleAllocation, productionAllocationDeps, resolveStaleRow, sweepStaleAllocations, takeRowLease, type RowLease } from "./allocations.ts";
 import { neonAllocationAlerts, neonAllocationStore } from "./allocationsdb.ts";
 import { withListableQuantity } from "./listable.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
@@ -174,6 +174,14 @@ app.get("/api/admin/allocations/alerts", async (c) => {
     if (missingAllocationTables(error)) return c.json({ alerts: [], note: "allocation tables not migrated" });
     throw error;
   }
+});
+
+// Live preflight: POST /api/allocations refuses every request until this is ready (alert email on and set up).
+app.get("/api/admin/allocations/preflight", async (c) => {
+  const deps = productionAllocationDeps(c.env);
+  const tenant = await deps.tenant();
+  const missing = tenant ? await deps.preflight(tenant.id) : ["no shop tenant"];
+  return c.json({ allocationsEnabled: allocationsEnabled(c.env), ready: missing.length === 0, missing });
 });
 
 app.post("/api/admin/allocations/alerts/ack", async (c) => {

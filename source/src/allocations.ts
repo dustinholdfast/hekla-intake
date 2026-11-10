@@ -35,7 +35,8 @@ import { recordCardTraderListing, stockCardsByIds, type StockCard } from "./airt
 import { connectionSecret } from "./connections.ts";
 import { listTenants, tenantById, tenantEnv } from "./tenants.ts";
 import { neonAllocationStore } from "./allocationsdb.ts";
-import { allocationAlerter } from "./alerts.ts";
+import { allocationAlerter, allocationLiveBlockers, resendAllocationAlertEmails, sendEmail } from "./alerts.ts";
+import { neonAllocationAlerts } from "./allocationsdb.ts";
 
 export type AllocationOp = "reserve" | "release" | "finalize_built" | "finalize_sold";
 
@@ -75,7 +76,7 @@ export type AllocationResponse = {
 export type Unverified = { listing_id: number | null; from: number; expected: number; observed: number | null; attempted_at: string | null };
 
 /** Where a stored ct_retry_unverifiable came from. */
-export type AlertSource = "retry" | "expiry" | "admin_clear" | "sweep";
+export type AlertSource = "retry" | "expiry" | "admin_clear" | "sweep" | "resend";
 
 /** What the owner is told about a ct_retry_unverifiable. direction is the allocation op (reserve lowers, release raises). */
 export type UnverifiableAlert = {
@@ -89,6 +90,8 @@ export type UnverifiableAlert = {
   from: number | null;
   expected: number | null;
   observed: number | null;
+  /** false when the stored answer has no recorded quantities (stored before they were kept): the risk is "high". */
+  known: boolean;
   source: AlertSource;
   note: string;
 };
@@ -166,6 +169,10 @@ export type AllocationDeps = {
   salesEvidence: (tenantId: string, recordId: string, listingIds: number[], sinceIso: string) => Promise<boolean>;
   /** Tells the owner about a stored ct_retry_unverifiable. A failure is logged and never changes the stored answer. */
   alert: (alert: UnverifiableAlert) => Promise<void>;
+  /** What is missing before allocation writes may run (alert email on and set up). Empty when ready. */
+  preflight: (tenantId: string) => Promise<string[]>;
+  /** Run by the sweep: sends again the alert emails that never went out (no email_sent_at), capped per run. */
+  resendAlerts: (tenantId: string) => Promise<unknown>;
   now?: () => number;
   /** Waits between checks on a duplicate in flight. Tests replace it. */
   sleep?: (ms: number) => Promise<void>;
@@ -530,6 +537,12 @@ export async function handleAllocation(
   }
   if (!tenant) return { status: 503, body: { ok: false, error: "allocations_tenant_missing" } };
   const tenantId = tenant.id;
+  // Live requirement: an unverified write must be able to reach the owner by email. Refused before any claim or CardTrader call.
+  const missing = await deps.preflight(tenantId).catch((error) => [`preflight failed: ${error instanceof Error ? error.message.slice(0, 100) : String(error)}`]);
+  if (missing.length) {
+    console.error(JSON.stringify({ event: "allocation_preflight_failed", missing }));
+    return { status: 503, body: { ok: false, error: "allocations_preflight_failed", note: missing.join("; ") } };
+  }
   const key = input.idempotency_key;
   const record = input.waitlist_record_id;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -724,7 +737,7 @@ async function raiseUnverifiable(deps: AllocationDeps, tenantId: string, key: st
     tenantId, key, recordId: row.recordId, allocationId: row.allocationId, deckId: row.deckId,
     direction: row.op === "release" ? "release" : "reserve",
     listingId: u?.listing_id ?? null, from: u?.from ?? null, expected: u?.expected ?? null, observed: u?.observed ?? null,
-    source, note: (body.note ?? "").slice(0, 300),
+    known: Boolean(u), source, note: (body.note ?? "").slice(0, 300),
   };
   try { await deps.alert(alert); }
   catch (error) {
@@ -735,7 +748,7 @@ async function raiseUnverifiable(deps: AllocationDeps, tenantId: string, key: st
 /** Rows the scheduled sweep settles per run, at most. Each one reads the CardTrader export and up to ORDER_PAGES of orders. */
 export const SWEEP_ROWS = 5;
 
-export type SweepResult = { tenantId: string | null; rows: { recordId: string; result: "settled" | "row_busy" | "cannot_verify"; outcomes: StaleOutcome[] }[] };
+export type SweepResult = { tenantId: string | null; rows: { recordId: string; result: "settled" | "row_busy" | "cannot_verify" | "error"; outcomes: StaleOutcome[] }[] };
 
 /**
  * The scheduled sweep: settles stale unanswered writes on rows nothing touches, so a key whose job was lost does not
@@ -743,6 +756,8 @@ export type SweepResult = { tenantId: string | null; rows: { recordId: string; r
  * lease, key takeover only when no request holds it, a guard that refuses every CardTrader write, and only writes
  * at least STALE_SECONDS old. CardTrader is only read. When the export or a sales check cannot be read, the key is
  * left as it was (still pending, plan kept) for the next run.
+ *
+ * After the rows it resends alert emails that never went out (deps.resendAlerts, capped).
  *
  * Runs whether or not ALLOCATIONS_ENABLED is on. With it off, no new key can be claimed, so the sweep only finds keys
  * left from before it was turned off; settling those is proof-only and read-only, like the admin clear (which also
@@ -756,17 +771,22 @@ export async function sweepStaleAllocations(deps: AllocationDeps, limit = SWEEP_
   const rows: SweepResult["rows"] = [];
   for (const recordId of recordIds.slice(0, limit)) {
     const holder = `sweep:${crypto.randomUUID()}`;
-    if (!(await deps.store.lockRow(tenant.id, recordId, holder, LOCK_SECONDS))) { rows.push({ recordId, result: "row_busy", outcomes: [] }); continue; }
+    let locked = false;
     try {
+      // A database error on the row lock is this row's failure only; the rest of the run goes on.
+      locked = await deps.store.lockRow(tenant.id, recordId, holder, LOCK_SECONDS);
+      if (!locked) { rows.push({ recordId, result: "row_busy", outcomes: [] }); continue; }
       const outcomes = await resolveStaleRow(tenant.id, recordId, deps, { source: "sweep" });
       rows.push({ recordId, result: "settled", outcomes });
     } catch (error) {
       console.error(JSON.stringify({ event: "allocation_sweep_cannot_verify", record: recordId, error: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
-      rows.push({ recordId, result: "cannot_verify", outcomes: [] });
+      rows.push({ recordId, result: locked ? "cannot_verify" : "error", outcomes: [] });
     } finally {
-      await deps.store.unlockRow(tenant.id, recordId, holder).catch(() => undefined);
+      if (locked) await deps.store.unlockRow(tenant.id, recordId, holder).catch(() => undefined);
     }
   }
+  // Then email any open alert whose email never went out (failed send, Resend down, alert email set up late). Capped.
+  await deps.resendAlerts(tenant.id).catch((error) => console.error(JSON.stringify({ event: "allocation_alert_resend_failed", error: error instanceof Error ? error.message.slice(0, 200) : String(error) })));
   if (rows.length) console.log(JSON.stringify({ event: "allocation_sweep", tenant: tenant.id, rows: rows.map((r) => ({ record: r.recordId, result: r.result, outcomes: r.outcomes.map((o) => o.outcome) })) }));
   return { tenantId: tenant.id, rows };
 }
@@ -889,7 +909,9 @@ export function productionAllocationDeps(env: Env): AllocationDeps {
       return tenants.find((tenant) => purchasesAllowed(tenant)) ?? null;
     },
     store,
-    alert: allocationAlerter(env),
+    alert: allocationAlerter(env, { send: sendEmail, ledger: neonAllocationAlerts(env) }),
+    preflight: (tenantId) => allocationLiveBlockers(env, tenantId),
+    resendAlerts: (tenantId) => resendAllocationAlertEmails(env, tenantId, { send: sendEmail, ledger: neonAllocationAlerts(env) }),
     async listings(tenantId) {
       return exportListings(await sellerToken(env, tenantId));
     },

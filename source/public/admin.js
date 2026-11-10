@@ -174,6 +174,12 @@ async function confirmPlan() {
 
 async function loadAlerts() {
   $("alerts-error").textContent = "";
+  api("/api/admin/allocations/preflight").then(({ response, data }) => {
+    if (!response.ok) return;
+    $("alerts-preflight").textContent = data.ready
+      ? "Live preflight: ready (alert email on and set up)."
+      : `Live preflight: not ready. Allocations are refused until fixed: ${(data.missing || []).join("; ")}.`;
+  });
   const { response, data } = await api("/api/admin/allocations/alerts");
   if (!response.ok) {
     $("alerts-error").textContent = data.error || "Could not load allocation alerts.";
@@ -198,7 +204,7 @@ function alertRow(alert) {
   };
   const qty = (n) => (n === null || n === undefined ? "?" : String(n));
   const when = new Date(alert.attemptedAt || alert.createdAt).toLocaleString();
-  const risk = alert.direction === "release" ? "release (may be too high)" : "reserve (may be too low)";
+  const risk = alert.risk === "low" ? "May be too low" : "May be too high, check now";
   const action = document.createElement("td");
   const button = document.createElement("button");
   button.type = "button";
@@ -206,13 +212,18 @@ function alertRow(alert) {
   button.dataset.ack = alert.key;
   button.textContent = "Mark checked";
   action.append(button);
+  const riskCell = cell(risk);
+  if (alert.risk !== "low") riskCell.className = "error";
   tr.append(
     cell(when, `key ${alert.key}`),
     cell(alert.recordId, `allocation ${alert.allocationId}, deck ${alert.deckId}`),
-    cell(risk),
+    riskCell,
+    cell(alert.direction),
     cell(alert.listingId === null ? "none found" : String(alert.listingId)),
-    cell(alert.from === null ? qty(alert.expected) : `${qty(alert.expected)} (was ${qty(alert.from)})`),
-    cell(alert.observed === null ? (alert.expected === null ? "?" : "gone") : String(alert.observed)),
+    cell(qty(alert.from)),
+    cell(qty(alert.expected)),
+    cell(alert.known && alert.observed === null ? "gone" : qty(alert.observed)),
+    cell(alert.emailSentAt ? new Date(alert.emailSentAt).toLocaleString() : "not sent"),
     cell(alert.note || ""),
     action,
   );

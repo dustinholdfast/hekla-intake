@@ -245,3 +245,34 @@ test("alerts: every stored ct_retry_unverifiable is listed with row, listing, qu
   assert.equal(await list.ack(T2, "nope", "user_admin"), false);
   assert.deepEqual((await list.open(T2)).map((a) => a.key), ["sw-older"]);
 });
+
+test("alerts: email_sent_at lives in sync_state; a claim blocks a second send, a release lets the sweep resend, sent is final", async () => {
+  const list = alerts();
+  // Open on T2 now: sw-older (reserve 2 -> 1, observed 2) only.
+  let open = await list.open(T2);
+  assert.deepEqual(open.map((a) => [a.key, a.risk, a.emailSentAt]), [["sw-older", "high", null]]);
+  assert.deepEqual((await list.unsent(T2, 5)).map((a) => [a.key, a.direction, a.from, a.expected, a.observed, a.known, a.source]), [["sw-older", "reserve", 2, 1, 2, true, "resend"]]);
+
+  assert.equal(await list.claimEmail(T2, "sw-older"), true);
+  assert.equal(await list.claimEmail(T2, "sw-older"), false, "another send holds it");
+  await list.releaseEmail(T2, "sw-older");
+  assert.equal((await list.unsent(T2, 5)).length, 1, "released: still unsent");
+  assert.equal(await list.claimEmail(T2, "sw-older"), true);
+  await list.markEmailSent(T2, "sw-older");
+  assert.equal(await list.claimEmail(T2, "sw-older"), false, "sent is final");
+  await list.releaseEmail(T2, "sw-older");
+  assert.deepEqual(await list.unsent(T2, 5), []);
+  open = await list.open(T2);
+  assert.ok(open[0]!.emailSentAt, "email_sent_at shown on the admin list");
+
+  // An expired claim (a send that died mid-way) can be taken again.
+  await pg.query("insert into sync_state (tenant_id, key, value) values ($1, 'alloc_alert_email:key-s', jsonb_build_object('claimed_until', now() - interval '1 minute'))", [T]);
+  assert.equal(await list.claimEmail(T, "key-s"), true);
+  // A legacy answer with no recorded quantities is "high".
+  assert.deepEqual((await list.open(T)).map((a) => [a.key, a.risk, a.known]), [["key-s", "high", false]]);
+  // Checked alerts are not resent.
+  await list.releaseEmail(T, "key-s");
+  assert.equal((await list.unsent(T, 5)).length, 1);
+  assert.equal(await list.ack(T, "key-s", "user_admin"), true);
+  assert.deepEqual(await list.unsent(T, 5), []);
+});
