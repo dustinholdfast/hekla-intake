@@ -354,7 +354,9 @@ type BatchCard = { id: string; qty: number; status: string | null; cardTraderLis
  * export; a row whose numbers moved since the plan is skipped, not changed. A failure stops that row only.
  */
 export async function runCtBatch(items: BatchItem[], cards: Map<string, BatchCard>, startListings: CtListing[],
-  apply: (listingId: number, delta: number) => Promise<void>, log: (item: BatchItem, result: BatchResult) => Promise<void>): Promise<BatchResult[]> {
+  apply: (listingId: number, delta: number) => Promise<void>, log: (item: BatchItem, result: BatchResult) => Promise<void>,
+  /** Renews this row's allocation lease before each write; false stops the row. */
+  renew: (recordId: string) => Promise<boolean> = async () => true): Promise<BatchResult[]> {
   const results: BatchResult[] = [];
   let listings = startListings;
   for (const item of items) {
@@ -373,7 +375,10 @@ export async function runCtBatch(items: BatchItem[], cards: Map<string, BatchCar
       else {
         const applied: { listingId: number; delta: number }[] = [];
         try {
-          for (const ch of plan.changes) { await apply(ch.listingId, ch.delta); applied.push(ch); }
+          for (const ch of plan.changes) {
+            if (!(await renew(item.recordId))) throw new Error("row lease lost to an allocation");
+            await apply(ch.listingId, ch.delta); applied.push(ch);
+          }
           result = { recordId: item.recordId, status: "succeeded", before: plan.before, target, applied };
         } catch (error) {
           result = { recordId: item.recordId, status: "failed", reason: error instanceof Error ? error.message : String(error), before: plan.before, target, applied };

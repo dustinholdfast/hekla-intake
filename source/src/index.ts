@@ -72,7 +72,8 @@ function scryfallStore(env: Env): ScryfallStore | null {
   };
 }
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
-import { handleAllocation, productionAllocationDeps } from "./allocations.ts";
+import { clearAllocationRow, handleAllocation, productionAllocationDeps, resolveStaleRow, takeRowLease, type RowLease } from "./allocations.ts";
+import { neonAllocationStore } from "./allocationsdb.ts";
 import { withListableQuantity } from "./listable.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
@@ -146,6 +147,16 @@ app.use("/api/admin/*", async (c, next) => {
 
 app.get("/api/admin/tenants", async (c) => {
   return c.json({ tenants: await listTenantPlans(c.env) });
+});
+
+// Settles a Waitlist row blocked by an allocation write whose answer was never recorded (row_busy). Re-checks the
+// retry proof against CardTrader now: landed releases the row; anything it cannot prove is a 409 for a manual
+// check. It never sends a CardTrader write. Works with ALLOCATIONS_ENABLED off, so a row is never stuck.
+app.post("/api/admin/allocations/clear", async (c) => {
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const result = await clearAllocationRow(productionAllocationDeps(c.env), String(body.value.waitlist_record_id ?? ""), c.var.userId);
+  return c.json(result.body, result.status as 200);
 });
 
 app.post("/api/admin/tenants/:id/plan", async (c) => {
@@ -1005,23 +1016,34 @@ app.post("/api/reconcile/cardtrader/set", async (c) => {
   const [card] = await stockCardsByIds(c.var.tenantEnv, [recordId]);
   if (!card) return c.json({ error: "That Waitlist row was not found." }, 404);
   const token = await cardTraderToken(c);
-  const listings = await exportListings(token);
-  const stored = Number(card.cardTraderListingId);
-  const mine = listings.filter((l) => l.recordId === recordId || l.id === stored);
-  const target = expectedQty(card);
-  if (body.value.expectedTarget !== target) return c.json({ error: `Airtable now says ${target} for this card. Reload and check again.`, code: "changed" }, 409);
-  const plan = planCardTraderSet(mine, Number.isInteger(stored) ? stored : null, target);
-  if (!plan.ok) return c.json({ error: plan.error }, 400);
-  if (body.value.expectedCurrent !== plan.before) return c.json({ error: `CardTrader now shows ${plan.before}. Reload and check again.`, code: "changed" }, 409);
-  const done: { listingId: number; delta: number }[] = [];
+  // The allocation row lease, taken before the export is read, so the read-modify-write cannot interleave with an allocation.
+  const lease = await takeRowLease(neonAllocationStore(c.env), c.var.tenant.id, recordId, `reconcile:${crypto.randomUUID()}`,
+    () => resolveStaleRow(c.var.tenant.id, recordId, productionAllocationDeps(c.env)));
+  if (typeof lease === "string") return c.json({ error: `Not changed: ${lease}. Try again in a minute.`, code: "row_busy" }, 409);
   try {
-    for (const change of plan.changes) { await incrementListing(token, change.listingId, change.delta); done.push(change); }
+    const listings = await exportListings(token);
+    const stored = Number(card.cardTraderListingId);
+    const mine = listings.filter((l) => l.recordId === recordId || l.id === stored);
+    const target = expectedQty(card);
+    if (body.value.expectedTarget !== target) return c.json({ error: `Airtable now says ${target} for this card. Reload and check again.`, code: "changed" }, 409);
+    const plan = planCardTraderSet(mine, Number.isInteger(stored) ? stored : null, target);
+    if (!plan.ok) return c.json({ error: plan.error }, 400);
+    if (body.value.expectedCurrent !== plan.before) return c.json({ error: `CardTrader now shows ${plan.before}. Reload and check again.`, code: "changed" }, 409);
+    const done: { listingId: number; delta: number }[] = [];
+    try {
+      for (const change of plan.changes) {
+        if (!(await lease.renew())) throw new Error("Stopped: an allocation took this row. Reload and check again.");
+        await incrementListing(token, change.listingId, change.delta); done.push(change);
+      }
+    } finally {
+      await reconAudit(c, "cardtrader_set", recordId, { before: plan.before, target, planned: plan.changes, applied: done });
+      // Patch the cache from the fresh read plus what was applied; CardTrader's export can lag the write.
+      await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: applyCtChanges(listings, done) } satisfies CtCache);
+    }
+    return c.json({ ok: true, before: plan.before, target, ctQty: target, changes: done });
   } finally {
-    await reconAudit(c, "cardtrader_set", recordId, { before: plan.before, target, planned: plan.changes, applied: done });
-    // Patch the cache from the fresh read plus what was applied; CardTrader's export can lag the write.
-    await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: applyCtChanges(listings, done) } satisfies CtCache);
+    await lease.release();
   }
-  return c.json({ ok: true, before: plan.before, target, ctQty: target, changes: done });
 });
 
 // Reconcile All, step 1: what would change for these rows (from the last check; nothing is changed).
@@ -1051,13 +1073,32 @@ app.post("/api/reconcile/all/cardtrader", async (c) => {
     items.push({ recordId: i.recordId, expectedTarget: i.expectedTarget as number, expectedCurrent: i.expectedCurrent as number });
   }
   const token = await cardTraderToken(c);
-  const [cards, listings] = await Promise.all([stockCardsByIds(c.var.tenantEnv, items.map((i) => i.recordId)), exportListings(token)]);
-  const results = await runCtBatch(items, new Map(cards.map((k) => [k.id, k])), listings,
-    (listingId, delta) => incrementListing(token, listingId, delta).then(() => undefined),
-    (_item, r) => reconAudit(c, "cardtrader_set", r.recordId, { batchId, status: r.status, reason: r.reason ?? null, before: r.before ?? null, target: r.target ?? null, applied: r.applied }));
-  const applied = results.flatMap((r) => r.applied);
-  await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: applyCtChanges(listings, applied) } satisfies CtCache);
-  return c.json({ batchId, results });
+  // Take every row's allocation lease before the export is read; a row an allocation holds is skipped.
+  const store = neonAllocationStore(c.env);
+  const allocationDeps = productionAllocationDeps(c.env);
+  const leases = new Map<string, RowLease>();
+  const busy: { recordId: string; status: "skipped"; reason: string; applied: [] }[] = [];
+  try {
+    for (const item of items) {
+      if (leases.has(item.recordId)) continue;
+      const lease = await takeRowLease(store, c.var.tenant.id, item.recordId, `reconcile:${batchId}:${crypto.randomUUID()}`,
+        () => resolveStaleRow(c.var.tenant.id, item.recordId, allocationDeps));
+      if (typeof lease === "string") busy.push({ recordId: item.recordId, status: "skipped", reason: lease, applied: [] });
+      else leases.set(item.recordId, lease);
+    }
+    const free = items.filter((item) => leases.has(item.recordId));
+    const [cards, listings] = await Promise.all([stockCardsByIds(c.var.tenantEnv, free.map((i) => i.recordId)), exportListings(token)]);
+    const ran = await runCtBatch(free, new Map(cards.map((k) => [k.id, k])), listings,
+      (listingId, delta) => incrementListing(token, listingId, delta).then(() => undefined),
+      (_item, r) => reconAudit(c, "cardtrader_set", r.recordId, { batchId, status: r.status, reason: r.reason ?? null, before: r.before ?? null, target: r.target ?? null, applied: r.applied }),
+      (recordId) => leases.get(recordId)?.renew() ?? Promise.resolve(false));
+    for (const r of busy) await reconAudit(c, "cardtrader_set", r.recordId, { batchId, status: r.status, reason: r.reason, before: null, target: null, applied: [] });
+    const applied = ran.flatMap((r) => r.applied);
+    await setState(c.env, c.var.tenant.id, CT_CACHE, { at: new Date().toISOString(), listings: applyCtChanges(listings, applied) } satisfies CtCache);
+    return c.json({ batchId, results: [...ran, ...busy] });
+  } finally {
+    for (const lease of leases.values()) await lease.release();
+  }
 });
 
 // Sets Airtable Qty for one row, only when Airtable still shows what the admin saw.

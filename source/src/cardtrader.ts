@@ -421,9 +421,14 @@ export async function deleteProduct(token: string, productId: number, fetcher?: 
 
 /** The newest seller orders, newest first. One request. */
 export async function sellerOrders(token: string, limit = 50, fetcher?: typeof fetch): Promise<J[]> {
-  const body = await call(token, `/orders?order_as=seller&limit=${Math.min(100, Math.max(1, limit))}&sort=date.desc`, {}, fetcher) as unknown;
+  return (await sellerOrdersPage(token, 1, limit, fetcher)).filter((o) => o?.order_as === "seller");
+}
+
+/** One page (from 1) of seller orders, newest first, unfiltered. An empty page is the end of the list. */
+export async function sellerOrdersPage(token: string, page: number, limit = 100, fetcher?: typeof fetch): Promise<J[]> {
+  const body = await call(token, `/orders?order_as=seller&limit=${Math.min(100, Math.max(1, limit))}&page=${Math.max(1, Math.floor(page))}&sort=date.desc`, {}, fetcher) as unknown;
   const list = Array.isArray(body) ? body : Array.isArray((body as J)?.array) ? (body as J).array : [];
-  return (list as J[]).filter((o) => o?.order_as === "seller");
+  return list as J[];
 }
 
 export type CtListing = { id: number; blueprintId: number; quantity: number; recordId: string | null; priceCents: number | null };
@@ -439,9 +444,12 @@ export async function exportListings(token: string, fetcher?: typeof fetch): Pro
 }
 
 /** Changes a listing's quantity by delta. At 0 or below CardTrader deletes the listing. */
-export async function incrementListing(token: string, productId: number, delta: number, fetcher?: typeof fetch): Promise<void> {
-  if (!Number.isInteger(delta) || delta === 0) return;
-  await call(token, `/products/${productId}/increment`, { method: "POST", body: JSON.stringify({ delta_quantity: delta }) }, fetcher);
+/** Returns the quantity CardTrader reports after the change (resource.quantity), or null when it is missing. */
+export async function incrementListing(token: string, productId: number, delta: number, fetcher?: typeof fetch): Promise<number | null> {
+  if (!Number.isInteger(delta) || delta === 0) return null;
+  const body = await call(token, `/products/${productId}/increment`, { method: "POST", body: JSON.stringify({ delta_quantity: delta }) }, fetcher);
+  const quantity = (body.resource as J | undefined)?.quantity;
+  return typeof quantity === "number" ? quantity : null;
 }
 
 export type AppInfo = { id: number | null; name: string | null; userId: string | null; sharedSecret: string | null; webhookUrl: string | null };
