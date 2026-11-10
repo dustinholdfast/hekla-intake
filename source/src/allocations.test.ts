@@ -680,17 +680,28 @@ test("a duplicate still in flight after the wait is a retryable 503, not a secon
 test("two releases on the same row never both re-create a listing", async () => {
   let open!: () => void;
   const box = world({ listings: [], card: stock({ qty: 4, reservedQty: 0 }), gate: new Promise<void>((resolve) => { open = resolve; }) });
+  // Record each row-lock attempt, so the test waits for the second request to reach the lock instead of counting
+  // ticks: its HMAC check runs on WebCrypto's thread pool and can take any number of event-loop turns.
+  const attempts: Promise<boolean>[] = [];
+  const lockRow = box.deps.store.lockRow.bind(box.deps.store);
+  box.deps.store.lockRow = (...args) => { const tried = lockRow(...args); attempts.push(tried); return tried; };
+  const until = async (done: () => boolean, what: string) => {
+    for (const end = Date.now() + 5000; !done(); await new Promise((resolve) => setTimeout(resolve, 1))) if (Date.now() > end) assert.fail(`timed out waiting for ${what}`);
+  };
   const first = post(payload({ op: "release", idempotency_key: "rel-x", allocation_id: "alloc-x" }), box.deps);
-  while (box.calls.relist.length < 1) await new Promise((resolve) => setImmediate(resolve));
-  let settled = false;
-  const pending = post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps).finally(() => { settled = true; });
-  // Without the row lock the second would block at the gate; give it a bounded number of ticks, then open.
-  for (let i = 0; i < 500 && !settled; i++) await new Promise((resolve) => setImmediate(resolve));
+  await until(() => box.calls.relist.length === 1, "the first relist");
+  const second = post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
+  await until(() => attempts.length === 2, "the second request to try the row lock");
+  // The first holds the row (parked at CardTrader), so the second is refused. Without the row lock it would go on to
+  // relist; opening the gate then lets both finish, and the asserts below catch the second relist instead of hanging.
+  const refused = await attempts[1]!;
   open();
-  const [one, second] = await Promise.all([first, pending]);
+  const [one, two] = await Promise.all([first, second]);
+  assert.equal(refused, false, "the second request did not get the row");
   assert.equal(one.status, 200);
-  assert.equal(second.status, 503);
-  assert.equal(second.body.error, "row_busy");
+  assert.equal(two.status, 503);
+  assert.equal(two.body.error, "row_busy");
+  assert.equal(two.body.note, undefined, "refused by the row lock itself, not only by the unverified-write check behind it");
   box.state.gate = null;
   const later = await post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
   assert.equal(later.status, 200);
