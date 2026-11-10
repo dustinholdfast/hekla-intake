@@ -330,10 +330,12 @@ test("sales filter accepts only known values", () => {
 });
 
 import { cronJobs } from "./sync.ts";
-test("one */5 trigger runs sales every tick and enrichment every 10th minute", () => {
+test("one */5 trigger runs sales every tick, enrichment every 10th minute, and the allocation sweep every 15th", () => {
   const at = (m: number) => new Date(Date.UTC(2026, 9, 17, 15, m));
-  assert.deepEqual(cronJobs("*/5 * * * *", at(30)), { enrich: true, sales: true });
-  assert.deepEqual(cronJobs("*/5 * * * *", at(35)), { enrich: false, sales: true });
-  assert.deepEqual(cronJobs("*/5 * * * *", at(0)), { enrich: true, sales: true });
-  assert.deepEqual(cronJobs("*/10 * * * *", at(40)), { enrich: true, sales: false });
+  assert.deepEqual(cronJobs("*/5 * * * *", at(30)), { enrich: true, sales: true, sweep: true });
+  assert.deepEqual(cronJobs("*/5 * * * *", at(35)), { enrich: false, sales: true, sweep: false });
+  assert.deepEqual(cronJobs("*/5 * * * *", at(0)), { enrich: true, sales: true, sweep: true });
+  assert.deepEqual(cronJobs("*/5 * * * *", at(45)), { enrich: false, sales: true, sweep: true });
+  assert.deepEqual(cronJobs("*/5 * * * *", at(20)), { enrich: true, sales: true, sweep: false });
+  assert.deepEqual(cronJobs("*/10 * * * *", at(40)), { enrich: true, sales: false, sweep: false });
 });

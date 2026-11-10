@@ -72,8 +72,8 @@ function scryfallStore(env: Env): ScryfallStore | null {
   };
 }
 import { applyCtChanges, applyPending, buildView, expectedQty, filterView, livePending, planCardTraderSet, planReconcileAll, RECONCILE_BATCH, runCtBatch, tcgplayerAdjustCsv, viewCounts, viewCsv, type BatchItem, type PendingTcg, type ViewFilter } from "./threeway.ts";
-import { clearAllocationRow, handleAllocation, productionAllocationDeps, resolveStaleRow, takeRowLease, type RowLease } from "./allocations.ts";
-import { neonAllocationStore } from "./allocationsdb.ts";
+import { allocationsEnabled, clearAllocationRow, handleAllocation, productionAllocationDeps, resolveStaleRow, sweepStaleAllocations, takeRowLease, type RowLease } from "./allocations.ts";
+import { neonAllocationAlerts, neonAllocationStore } from "./allocationsdb.ts";
 import { withListableQuantity } from "./listable.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
@@ -157,6 +157,43 @@ app.post("/api/admin/allocations/clear", async (c) => {
   if (!body.ok) return c.json({ error: body.error }, 400);
   const result = await clearAllocationRow(productionAllocationDeps(c.env), String(body.value.waitlist_record_id ?? ""), c.var.userId);
   return c.json(result.body, result.status as 200);
+});
+
+const missingAllocationTables = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return /allocation_results|allocation_row_locks|sync_state/.test(message) && /does not exist/.test(message);
+};
+
+// Owner alerts: every stored ct_retry_unverifiable (an allocation write Hekla could not prove landed and did not send
+// again), newest first, until an admin marks it checked. The listing may be too high or too low; reconcile is off.
+app.get("/api/admin/allocations/alerts", async (c) => {
+  const tenant = await productionAllocationDeps(c.env).tenant();
+  if (!tenant) return c.json({ alerts: [], note: "allocations_tenant_missing" });
+  try { return c.json({ alerts: await neonAllocationAlerts(c.env).open(tenant.id) }); }
+  catch (error) {
+    if (missingAllocationTables(error)) return c.json({ alerts: [], note: "allocation tables not migrated" });
+    throw error;
+  }
+});
+
+// Live preflight: POST /api/allocations refuses every request until this is ready (alert email on and set up).
+app.get("/api/admin/allocations/preflight", async (c) => {
+  const deps = productionAllocationDeps(c.env);
+  const tenant = await deps.tenant();
+  const missing = tenant ? await deps.preflight(tenant.id) : ["no shop tenant"];
+  return c.json({ allocationsEnabled: allocationsEnabled(c.env), ready: missing.length === 0, missing });
+});
+
+app.post("/api/admin/allocations/alerts/ack", async (c) => {
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const key = typeof body.value.key === "string" ? body.value.key : "";
+  if (!key || key.length > 200) return c.json({ error: "key is required." }, 400);
+  const tenant = await productionAllocationDeps(c.env).tenant();
+  if (!tenant) return c.json({ error: "allocations_tenant_missing" }, 503);
+  if (!(await neonAllocationAlerts(c.env).ack(tenant.id, key, c.var.userId))) return c.json({ error: "No open alert for that key." }, 404);
+  console.log(JSON.stringify({ event: "allocation_alert_checked", key, by: c.var.userId }));
+  return c.json({ ok: true });
 });
 
 app.post("/api/admin/tenants/:id/plan", async (c) => {
@@ -1514,6 +1551,7 @@ export default {
     const at = new Date(event.scheduledTime);
     const jobs = cronJobs(event.cron, at);
     if (jobs.sales) ctx.waitUntil(salesCron(env, at));
+    if (jobs.sweep) ctx.waitUntil(allocationSweepCron(env));
     // Keep the stored Scryfall set list fresh off the request path (no-op while it is under 24 h old).
     { const store = scryfallStore(env); if (store) ctx.waitUntil(refreshScryfallStore(store).then((r) => { if (r === "refreshed") console.log("scryfall sets refreshed"); }).catch((e) => console.error("SCRYFALL REFRESH FAILED", String(e)))); }
     if (!jobs.enrich) return;
@@ -1538,6 +1576,18 @@ export default {
     })());
   },
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Every 15 minutes: settle stale unanswered allocation writes by proof (sweepStaleAllocations). Read-only toward
+ * CardTrader, and runs with ALLOCATIONS_ENABLED off too (see allocations.ts). No-op before migration 0013.
+ */
+export async function allocationSweepCron(env: Env, deps = productionAllocationDeps(env)): Promise<void> {
+  try { await sweepStaleAllocations(deps); }
+  catch (e) {
+    if (missingAllocationTables(e)) return;
+    console.error("cron allocation sweep failed", e instanceof Error ? e.message.slice(0, 200) : e);
+  }
+}
 
 /** True at the daily email's minute: 9:00 AM America/New_York (EDT or EST). */
 export function isDailyEmailSlot(at: Date): boolean {

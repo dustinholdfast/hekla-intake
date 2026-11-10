@@ -44,6 +44,27 @@
     </header>
     <nav class="workspace-subnav" aria-label="settings tools"><a href="/settings#inventory-settings-panel">Inventory & buy rates</a><a href="/settings#connections-panel">Connections</a></nav>
 
+    <section class="panel" id="alloc-alerts-panel">
+      <div class="panel-head">
+        <h2>Allocation alerts</h2>
+        <div class="queue-tools">
+          <button id="alerts-refresh" class="ghost tiny" type="button">Refresh</button>
+        </div>
+      </div>
+      <p class="hint">CardTrader writes Hekla could not prove landed. Nothing was sent again, and reconcile will not fix them. Check each listing on CardTrader by hand, then mark it checked.</p>
+      <p id="alerts-preflight" class="hint"></p>
+      <p id="alerts-meta" class="hint"></p>
+      <p id="alerts-error" class="error" role="alert"></p>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr><th>When</th><th>Row</th><th>Risk</th><th>Direction</th><th>Listing</th><th>Before</th><th>Expected</th><th>Observed</th><th>Email</th><th>Note</th><th></th></tr>
+          </thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <h2>Accounts</h2>

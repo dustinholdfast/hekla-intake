@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { allocationSaleLine, allocationsEnabled, clearAllocationRow, resolveStaleRow, saleSinceOnCardTrader, STALE_SECONDS, takeRowLease, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type Claim, type ClaimRow, type CtPlan } from "./allocations.ts";
+import { listingRisk } from "./alloc-risk.ts";
+import { unverifiableAlertText } from "./alerts.ts";
+import { allocationSaleLine, allocationsEnabled, clearAllocationRow, resolveStaleRow, saleSinceOnCardTrader, STALE_SECONDS, sweepStaleAllocations, takeRowLease, type UnverifiableAlert, asExportCard, handleAllocation, parseAllocation, relistPrice, rowListings, type AllocationDeps, type AllocationResponse, type AllocationStore, type Claim, type ClaimRow, type CtPlan } from "./allocations.ts";
 import type { CtListing } from "./cardtrader.ts";
 import type { StockCard } from "./airtable.ts";
 import worker from "./index.ts";
@@ -100,6 +102,18 @@ function memoryStore(clock = { skew: 0 }): AllocationStore & { rows: Map<string,
       const id = `${tenantId}:${recordId}`;
       if (locks.get(id)?.holder === holder) locks.delete(id);
     },
+    async staleRows(tenantId, beforeIso, limit) {
+      const oldest = new Map<string, string>();
+      for (const [id, row] of rows) {
+        if (!id.startsWith(`${tenantId}:`) || row.state !== "pending" || row.until > Date.now()) continue;
+        for (const step of row.plan?.steps ?? []) {
+          if (!step.attemptedAt || step.done || step.attemptedAt > beforeIso) continue;
+          const have = oldest.get(row.recordId);
+          if (!have || step.attemptedAt < have) oldest.set(row.recordId, step.attemptedAt);
+        }
+      }
+      return [...oldest.entries()].sort((a, b) => a[1].localeCompare(b[1])).map(([record]) => record).slice(0, limit);
+    },
   };
 }
 
@@ -120,19 +134,23 @@ const notFound = () => Object.assign(new Error("CardTrader said: not found"), { 
 
 /** CardTrader in memory: increment, delete, and create change `listings`. `landThenFail` applies a write, then throws a 504. */
 /** `orders` are CardTrader seller orders the evidence check reads; `ordersDown` makes that read fail. */
-type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean; failNoLand: number; missing: number[]; refuseRelist: boolean; landThenFail: number; gate: Promise<void> | null; orders: { productId: number | null; recordId: string | null; at: string }[]; ordersDown: boolean };
+type World = { listings: CtListing[]; card: StockCard | null; failIncrement: boolean; failNoLand: number; missing: number[]; refuseRelist: boolean; landThenFail: number; gate: Promise<void> | null; orders: { productId: number | null; recordId: string | null; at: string }[]; ordersDown: boolean; listingsDown: boolean; alertDown: boolean; preflightMissing: string[] };
 function world(over: Partial<World> = {}) {
-  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, failNoLand: 0, missing: [], refuseRelist: false, landThenFail: 0, gate: null, orders: [], ordersDown: false, ...over };
+  const state: World = { listings: [listing(50, 4)], card: stock(), failIncrement: false, failNoLand: 0, missing: [], refuseRelist: false, landThenFail: 0, gate: null, orders: [], ordersDown: false, listingsDown: false, alertDown: false, preflightMissing: [], ...over };
   let nextId = 77;
   const timeout = () => {
     if (state.landThenFail > 0) { state.landThenFail--; throw Object.assign(new Error("CardTrader said: gateway timeout"), { status: 504 }); }
   };
-  const calls = { listings: 0, increment: [] as [number, number][], remove: [] as number[], relist: [] as number[], relistPrice: [] as (number | null)[], sales: 0, evidence: 0 };
+  const calls = { listings: 0, increment: [] as [number, number][], remove: [] as number[], relist: [] as number[], relistPrice: [] as (number | null)[], sales: 0, evidence: 0, resends: [] as string[] };
   const store = memoryStore();
+  const alerts: UnverifiableAlert[] = [];
   const deps: AllocationDeps = {
     async tenant() { return { id: TENANT }; },
     store,
-    async listings() { calls.listings++; return state.listings.map((l) => ({ ...l })); },
+    async alert(a) { if (state.alertDown) throw new Error("alert sink down"); alerts.push(a); },
+    async preflight() { return state.preflightMissing; },
+    async resendAlerts(tenantId) { calls.resends.push(tenantId); },
+    async listings() { calls.listings++; if (state.listingsDown) throw new Error("CardTrader export: 503"); return state.listings.map((l) => ({ ...l })); },
     async increment(_tenant, id, delta) {
       calls.increment.push([id, delta]);
       if (state.gate) await state.gate;
@@ -171,7 +189,7 @@ function world(over: Partial<World> = {}) {
         || store.saleLogged(tenantId, recordId, since);
     },
   };
-  return { state, calls, deps };
+  return { state, calls, deps, alerts };
 }
 
 const payload = (over: Record<string, unknown> = {}) => JSON.stringify({
@@ -662,17 +680,28 @@ test("a duplicate still in flight after the wait is a retryable 503, not a secon
 test("two releases on the same row never both re-create a listing", async () => {
   let open!: () => void;
   const box = world({ listings: [], card: stock({ qty: 4, reservedQty: 0 }), gate: new Promise<void>((resolve) => { open = resolve; }) });
+  // Record each row-lock attempt, so the test waits for the second request to reach the lock instead of counting
+  // ticks: its HMAC check runs on WebCrypto's thread pool and can take any number of event-loop turns.
+  const attempts: Promise<boolean>[] = [];
+  const lockRow = box.deps.store.lockRow.bind(box.deps.store);
+  box.deps.store.lockRow = (...args) => { const tried = lockRow(...args); attempts.push(tried); return tried; };
+  const until = async (done: () => boolean, what: string) => {
+    for (const end = Date.now() + 5000; !done(); await new Promise((resolve) => setTimeout(resolve, 1))) if (Date.now() > end) assert.fail(`timed out waiting for ${what}`);
+  };
   const first = post(payload({ op: "release", idempotency_key: "rel-x", allocation_id: "alloc-x" }), box.deps);
-  while (box.calls.relist.length < 1) await new Promise((resolve) => setImmediate(resolve));
-  let settled = false;
-  const pending = post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps).finally(() => { settled = true; });
-  // Without the row lock the second would block at the gate; give it a bounded number of ticks, then open.
-  for (let i = 0; i < 500 && !settled; i++) await new Promise((resolve) => setImmediate(resolve));
+  await until(() => box.calls.relist.length === 1, "the first relist");
+  const second = post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
+  await until(() => attempts.length === 2, "the second request to try the row lock");
+  // The first holds the row (parked at CardTrader), so the second is refused. Without the row lock it would go on to
+  // relist; opening the gate then lets both finish, and the asserts below catch the second relist instead of hanging.
+  const refused = await attempts[1]!;
   open();
-  const [one, second] = await Promise.all([first, pending]);
+  const [one, two] = await Promise.all([first, second]);
+  assert.equal(refused, false, "the second request did not get the row");
   assert.equal(one.status, 200);
-  assert.equal(second.status, 503);
-  assert.equal(second.body.error, "row_busy");
+  assert.equal(two.status, 503);
+  assert.equal(two.body.error, "row_busy");
+  assert.equal(two.body.note, undefined, "refused by the row lock itself, not only by the unverified-write check behind it");
   box.state.gate = null;
   const later = await post(payload({ op: "release", idempotency_key: "rel-y", allocation_id: "alloc-y" }), box.deps);
   assert.equal(later.status, 200);
@@ -967,4 +996,281 @@ test("the retry sale check decides coverage by the oldest order returned, not by
   assert.equal(await saleSinceOnCardTrader(pages([[]]).page, REC, [50], since), false);
   // An undated matching item counts as a sale.
   assert.equal(await saleSinceOnCardTrader(pages([[{ order_as: "seller", order_items: [{ product_id: 50 }] }, ...older]]).page, REC, [50], since), true);
+});
+
+/* ---------- scheduled sweep and owner alerts ---------- */
+
+test("sweep: a stale unanswered write that landed is settled by proof, with no CardTrader write and no alert", async () => {
+  const box = world({ landThenFail: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "s-ok" }), box.deps)).status, 502);
+  assert.deepEqual((await sweepStaleAllocations(box.deps)).rows, [], "not stale yet: untouched");
+  assert.equal(store.rows.get(`${TENANT}:s-ok`)!.state, "pending");
+
+  later(box, STALE_MS);
+  const run = await sweepStaleAllocations(box.deps);
+  assert.deepEqual(run.rows.map((r) => [r.recordId, r.result, r.outcomes.map((o) => o.outcome)]), [[REC, "settled", ["landed"]]]);
+  const row = store.rows.get(`${TENANT}:s-ok`)!;
+  assert.equal(row.state, "done");
+  assert.equal(row.httpStatus, 200);
+  assert.equal(await store.rowUnresolved(TENANT, REC, ""), false, "the row takes new allocations again");
+  assert.equal(ctWrites(box), 1, "only the original try wrote");
+  assert.deepEqual(box.alerts, []);
+});
+
+test("sweep: no proof stores the 409 for review, raises an owner alert with the listing and quantities, and sends nothing", async () => {
+  const box = world({ failNoLand: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "s-no", allocation_id: "alloc-s", deck_id: "deck-s" }), box.deps)).status, 502);
+  later(box, STALE_MS);
+  const run = await sweepStaleAllocations(box.deps);
+  assert.deepEqual(run.rows[0]!.outcomes.map((o) => o.outcome), ["unverifiable"]);
+  const row = store.rows.get(`${TENANT}:s-no`)!;
+  assert.equal(row.state, "done");
+  assert.equal(row.httpStatus, 409);
+  assert.equal(row.body!.error, "ct_retry_unverifiable");
+  assert.deepEqual(row.body!.unverified, { listing_id: 50, from: 4, expected: 3, observed: 4, attempted_at: row.body!.unverified!.attempted_at });
+  assert.equal(box.alerts.length, 1);
+  const { note, ...alert } = box.alerts[0]!;
+  assert.deepEqual(alert, { tenantId: TENANT, key: "s-no", recordId: REC, allocationId: "alloc-s", deckId: "deck-s", direction: "reserve", listingId: 50, from: 4, expected: 3, observed: 4, known: true, source: "sweep" });
+  assert.match(note, /cannot prove/);
+  assert.equal(await store.rowUnresolved(TENANT, REC, ""), false, "released on the 409 so reconcile can lower it");
+  assert.equal(ctWrites(box), 1);
+  // The next sweep has nothing to do and raises nothing new.
+  assert.deepEqual((await sweepStaleAllocations(box.deps)).rows, []);
+  assert.equal(box.alerts.length, 1);
+});
+
+test("sweep: a key a request still holds, or a row someone has locked, is left alone", async () => {
+  const box = world({ failNoLand: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "s-held" }), box.deps)).status, 502);
+  later(box, STALE_MS);
+  const before = structuredClone(store.rows.get(`${TENANT}:s-held`)!.plan);
+  store.rows.get(`${TENANT}:s-held`)!.until = Date.now() + 60_000; // a retry of the key is in flight
+  assert.deepEqual((await sweepStaleAllocations(box.deps)).rows, []);
+  // Even if the row list is stale, the settle step re-checks the lease and does not take the key over.
+  assert.deepEqual(await resolveStaleRow(TENANT, REC, box.deps, { source: "sweep" }), [{ key: "s-held", outcome: "in_progress" }]);
+  assert.equal(store.rows.get(`${TENANT}:s-held`)!.state, "pending");
+  assert.deepEqual(store.rows.get(`${TENANT}:s-held`)!.plan, before);
+
+  store.rows.get(`${TENANT}:s-held`)!.until = 0;
+  assert.equal(await store.lockRow(TENANT, REC, "alloc:other", 120), true);
+  const busy = await sweepStaleAllocations(box.deps);
+  assert.deepEqual(busy.rows.map((r) => r.result), ["row_busy"]);
+  assert.equal(store.rows.get(`${TENANT}:s-held`)!.state, "pending");
+  assert.deepEqual(box.alerts, []);
+  assert.equal(ctWrites(box), 1);
+});
+
+test("sweep: when CardTrader or the sales check cannot be read, the key is left as it was for the next run", async () => {
+  // Export down.
+  const a = world({ failNoLand: 1 });
+  const storeA = a.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "s-down-a" }), a.deps)).status, 502);
+  later(a, STALE_MS);
+  const planA = structuredClone(storeA.rows.get(`${TENANT}:s-down-a`)!.plan);
+  a.state.listingsDown = true;
+  assert.deepEqual((await sweepStaleAllocations(a.deps)).rows.map((r) => r.result), ["cannot_verify"]);
+  assert.equal(storeA.rows.get(`${TENANT}:s-down-a`)!.state, "pending");
+  assert.deepEqual(storeA.rows.get(`${TENANT}:s-down-a`)!.plan, planA);
+  assert.equal(await storeA.rowUnresolved(TENANT, REC, ""), true);
+  assert.deepEqual(a.alerts, []);
+
+  // Seller orders down: the write looks landed (4 -> 3) but the sale check cannot run, so it is not taken as proof.
+  const b = world({ landThenFail: 1 });
+  const storeB = b.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "s-down-b" }), b.deps)).status, 502);
+  later(b, STALE_MS);
+  b.state.ordersDown = true;
+  assert.deepEqual((await sweepStaleAllocations(b.deps)).rows.map((r) => r.result), ["cannot_verify"]);
+  const rowB = storeB.rows.get(`${TENANT}:s-down-b`)!;
+  assert.equal(rowB.state, "pending");
+  assert.ok(rowB.plan!.steps[0]!.attemptedAt && !rowB.plan!.steps[0]!.done, "still unanswered");
+  assert.equal(await storeB.rowUnresolved(TENANT, REC, ""), true);
+  assert.deepEqual(b.alerts, []);
+  assert.equal(ctWrites(a) + ctWrites(b), 2);
+
+  // Next run with CardTrader back settles it.
+  b.state.ordersDown = false;
+  assert.deepEqual((await sweepStaleAllocations(b.deps)).rows[0]!.outcomes.map((o) => o.outcome), ["landed"]);
+});
+
+test("sweep: never writes to CardTrader, even when the stale key still has steps to send", async () => {
+  // Reserve 3 across two listings: the first delete lands and times out; the second was never sent.
+  const box = world({ listings: [listing(50, 2), listing(51, 1)], landThenFail: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "s-part", qty: 3 }), box.deps)).status, 502);
+  later(box, STALE_MS);
+  const run = await sweepStaleAllocations(box.deps);
+  assert.deepEqual(run.rows[0]!.outcomes, [{ key: "s-part", outcome: "landed", finished: false }]);
+  assert.deepEqual([box.calls.increment, box.calls.remove, box.calls.relist], [[], [50], []], "the second delete was not sent by the sweep");
+  assert.equal(store.rows.get(`${TENANT}:s-part`)!.state, "pending");
+  assert.equal(await store.rowUnresolved(TENANT, REC, ""), false);
+});
+
+test("sweep: works the oldest stale rows first and stops at the per-run cap", async () => {
+  const box = world({ failNoLand: 3, listings: [listing(50, 4, "recAAAAAAAAAAAAA1"), listing(51, 4, "recAAAAAAAAAAAAA2"), listing(52, 4, "recAAAAAAAAAAAAA3")] });
+  for (const n of [1, 2, 3]) {
+    box.state.card = stock({ id: `recAAAAAAAAAAAAA${n}`, cardTraderListingId: String(49 + n) });
+    assert.equal((await post(payload({ idempotency_key: `s-cap-${n}`, waitlist_record_id: `recAAAAAAAAAAAAA${n}` }), box.deps)).status, 502);
+  }
+  later(box, STALE_MS);
+  const run = await sweepStaleAllocations(box.deps, 2);
+  assert.deepEqual(run.rows.map((r) => r.recordId), ["recAAAAAAAAAAAAA1", "recAAAAAAAAAAAAA2"]);
+  assert.deepEqual((await sweepStaleAllocations(box.deps, 2)).rows.map((r) => r.recordId), ["recAAAAAAAAAAAAA3"]);
+  assert.equal(box.alerts.length, 3);
+  assert.equal(ctWrites(box), 3);
+});
+
+test("alert: every stored ct_retry_unverifiable raises one owner alert, from a retry, the expiry, and the admin clear", async () => {
+  // The key's own retry.
+  const retry = world({ failNoLand: 1 });
+  const raw = payload({ idempotency_key: "al-retry" });
+  assert.equal((await post(raw, retry.deps)).status, 502);
+  assert.equal((await post(raw, retry.deps)).body.error, "ct_retry_unverifiable");
+  assert.deepEqual(retry.alerts.map((a) => [a.key, a.source, a.listingId, a.expected, a.observed, a.direction]), [["al-retry", "retry", 50, 3, 4, "reserve"]]);
+  assert.equal((await post(raw, retry.deps)).body.error, "ct_retry_unverifiable", "a replay of the stored answer");
+  assert.equal(retry.alerts.length, 1, "a replay does not alert again");
+
+  // The 15-minute expiry, settled by the next allocation on the row.
+  const expiry = world({ failNoLand: 1 });
+  assert.equal((await post(payload({ idempotency_key: "al-exp" }), expiry.deps)).status, 502);
+  later(expiry, STALE_MS);
+  assert.equal((await post(payload({ idempotency_key: "al-exp-next", allocation_id: "alloc-2" }), expiry.deps)).status, 200);
+  assert.deepEqual(expiry.alerts.map((a) => [a.key, a.source]), [["al-exp", "expiry"]]);
+
+  // The admin clear.
+  const clear = world({ failNoLand: 1 });
+  assert.equal((await post(payload({ idempotency_key: "al-clear" }), clear.deps)).status, 502);
+  assert.equal((await clearAllocationRow(clear.deps, REC, "user_admin")).status, 409);
+  assert.deepEqual(clear.alerts.map((a) => [a.key, a.source]), [["al-clear", "admin_clear"]]);
+});
+
+test("alert: a release that cannot be proven is flagged as a release, with the listing it may have left too high", async () => {
+  const box = world({ listings: [listing(50, 1)], card: stock({ qty: 4, reservedQty: 0 }), failNoLand: 1 });
+  const raw = payload({ op: "release", idempotency_key: "al-rel", qty: 2 });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  assert.deepEqual(box.alerts.map((a) => [a.direction, a.listingId, a.from, a.expected, a.observed]), [["release", 50, 1, 3, 1]]);
+  assert.equal(box.calls.increment.length, 1);
+});
+
+test("alert: a failing alert sink never changes the stored 409", async () => {
+  const box = world({ failNoLand: 1, alertDown: true });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const raw = payload({ idempotency_key: "al-down" });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.status, 409);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  assert.equal(store.rows.get(`${TENANT}:al-down`)!.state, "done");
+});
+
+test("the alerts admin routes are behind sign-in", async () => {
+  for (const [method, path] of [["GET", "/api/admin/allocations/alerts"], ["POST", "/api/admin/allocations/alerts/ack"]] as const) {
+    const res = await worker.fetch(new Request(`https://hekla.test${path}`, { method, ...(method === "POST" ? { body: "{}", headers: { "content-type": "application/json" } } : {}) }), {});
+    assert.ok(res.status === 401 || res.status === 403 || res.status === 503, `${path} ${res.status}`);
+  }
+});
+
+test("sweep: a write younger than the 15-minute expiry is not settled even if the row list includes it", async () => {
+  const box = world({ failNoLand: 1 });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  assert.equal((await post(payload({ idempotency_key: "s-young" }), box.deps)).status, 502);
+  const eager = { ...box.deps, store: Object.assign(Object.create(store), { staleRows: async () => [REC] }) as AllocationStore };
+  const run = await sweepStaleAllocations(eager);
+  assert.deepEqual(run.rows[0]!.outcomes, [{ key: "s-young", outcome: "too_recent" }]);
+  assert.equal(store.rows.get(`${TENANT}:s-young`)!.state, "pending");
+  assert.deepEqual(box.alerts, []);
+});
+
+/* ---------- review round: risk wording, live preflight, email resend, lock errors ---------- */
+
+test("risk: a reserve that never landed, with a sale at the same time, is flagged may be too high, check now", async () => {
+  // Reserve 1 of 4 times out without landing; a buyer takes one at the same time (4 -> 3). Observed equals expected.
+  const box = world({ failNoLand: 1 });
+  const raw = payload({ idempotency_key: "r-oversell" });
+  assert.equal((await post(raw, box.deps)).status, 502);
+  box.state.listings[0]!.quantity = 3;
+  box.state.orders.push({ productId: 50, recordId: REC, at: new Date().toISOString() });
+  const retry = await post(raw, box.deps);
+  assert.equal(retry.body.error, "ct_retry_unverifiable");
+  const alert = box.alerts[0]!;
+  assert.deepEqual([alert.direction, alert.from, alert.expected, alert.observed, alert.known], ["reserve", 4, 3, 3, true]);
+  assert.equal(listingRisk(alert), "high");
+  const { subject, text } = unverifiableAlertText(alert);
+  assert.match(subject, /may be too high/);
+  assert.match(text, /may be too high, check now/);
+  assert.doesNotMatch(`${subject}\n${text}`, /too low/);
+});
+
+test("risk: decided from before, expected and observed; too low only when the listing cannot be too high", () => {
+  const r = (direction: "reserve" | "release", from: number | null, expected: number | null, observed: number | null, known = true) => listingRisk({ direction, from, expected, observed, known });
+  // reserve: anything still listed may be too high (never landed, or never landed plus sales)
+  assert.equal(r("reserve", 4, 3, 4), "high", "never landed");
+  assert.equal(r("reserve", 4, 3, 3), "high", "never landed + a sale reads as landed");
+  assert.equal(r("reserve", 4, 3, 2), "high");
+  assert.equal(r("reserve", 4, 3, 5), "high");
+  assert.equal(r("reserve", 2, 0, 1), "high", "a delete that may not have landed");
+  assert.equal(r("reserve", 4, 3, 0), "low", "nothing listed cannot oversell");
+  assert.equal(r("reserve", 2, 0, null), "low", "listing gone");
+  // release: above where it was before the release may be too high
+  assert.equal(r("release", 1, 3, 3), "high", "landed, or someone else raised it");
+  assert.equal(r("release", 1, 3, 4), "high");
+  assert.equal(r("release", 1, 3, 2), "high", "landed and a sale, or not landed and raised by hand");
+  assert.equal(r("release", 1, 3, 1), "low", "at its level before the release");
+  assert.equal(r("release", 0, 2, null), "low", "relist never showed up");
+  assert.equal(r("release", 0, 2, 2), "high", "a relist showed up but a sale was logged");
+  // in doubt: high
+  assert.equal(r("release", null, null, null, false), "high", "no recorded quantities");
+  assert.equal(r("reserve", null, null, null, false), "high");
+  assert.equal(r("release", null, 3, 1), "high", "no before value");
+  for (const risk of ["high", "low"] as const) {
+    const a = { tenantId: TENANT, key: "k", recordId: REC, allocationId: "a", deckId: "d", direction: "release" as const, listingId: 50, from: 1, expected: 3, observed: risk === "high" ? 3 : 1, known: true, source: "sweep" as const, note: "" };
+    const t = unverifiableAlertText(a);
+    if (risk === "high") { assert.match(t.text, /may be too high, check now/); assert.doesNotMatch(`${t.subject}${t.text}`, /too low/); }
+    else assert.match(t.text, /may be too low/);
+  }
+});
+
+test("live preflight: allocation writes are refused until alert email is on and set up, before any claim or CardTrader call", async () => {
+  const box = world({ preflightMissing: ["ALLOCATION_ALERT_EMAIL is not on"] });
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const res = await post(payload({ idempotency_key: "pf-1" }), box.deps);
+  assert.equal(res.status, 503);
+  assert.equal(res.body.error, "allocations_preflight_failed");
+  assert.match(res.body.note ?? "", /ALLOCATION_ALERT_EMAIL/);
+  assert.equal(store.rows.size, 0, "no key claimed");
+  assert.equal(box.calls.listings, 0);
+  assert.equal(ctWrites(box), 0);
+  // A preflight that cannot be checked also refuses.
+  const broken = world();
+  broken.deps.preflight = async () => { throw new Error("neon down"); };
+  assert.equal((await post(payload({ idempotency_key: "pf-2" }), broken.deps)).body.error, "allocations_preflight_failed");
+  // Ready: goes through.
+  box.state.preflightMissing = [];
+  assert.equal((await post(payload({ idempotency_key: "pf-1" }), box.deps)).status, 200);
+});
+
+test("sweep: a database error on one row's lock does not stop the rest of the run, and the sweep then resends alert emails", async () => {
+  const box = world({ failNoLand: 2, listings: [listing(50, 4, "recAAAAAAAAAAAAA1"), listing(51, 4, "recAAAAAAAAAAAAA2")] });
+  for (const n of [1, 2]) {
+    box.state.card = stock({ id: `recAAAAAAAAAAAAA${n}`, cardTraderListingId: String(49 + n) });
+    assert.equal((await post(payload({ idempotency_key: `lk-${n}`, waitlist_record_id: `recAAAAAAAAAAAAA${n}` }), box.deps)).status, 502);
+  }
+  later(box, STALE_MS);
+  const store = box.deps.store as ReturnType<typeof memoryStore>;
+  const flaky = Object.assign(Object.create(store), {
+    lockRow: async (t: string, rec: string, holder: string, sec: number) => { if (rec === "recAAAAAAAAAAAAA1") throw new Error("connection reset"); return store.lockRow(t, rec, holder, sec); },
+  }) as AllocationStore;
+  const run = await sweepStaleAllocations({ ...box.deps, store: flaky });
+  assert.deepEqual(run.rows.map((r) => [r.recordId, r.result]), [["recAAAAAAAAAAAAA1", "error"], ["recAAAAAAAAAAAAA2", "settled"]]);
+  assert.equal(store.rows.get(`${TENANT}:lk-1`)!.state, "pending", "row 1 untouched");
+  assert.equal(store.rows.get(`${TENANT}:lk-2`)!.state, "done");
+  assert.deepEqual(box.calls.resends, [TENANT]);
+  // A failing resend does not fail the sweep.
+  box.deps.resendAlerts = async () => { throw new Error("neon down"); };
+  await sweepStaleAllocations(box.deps);
 });

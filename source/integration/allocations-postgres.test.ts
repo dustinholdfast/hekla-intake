@@ -3,7 +3,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
-import { allocationStoreWithQuery } from "../src/allocationsdb.ts";
+import { allocationAlertsWithQuery, allocationStoreWithQuery } from "../src/allocationsdb.ts";
 import { allocationSaleLine } from "../src/allocations.ts";
 import { saleStoreWithQuery } from "../src/salesdb.ts";
 
@@ -11,6 +11,7 @@ const pg = new PGlite();
 const T = "00000000-0000-4000-8000-000000000001";
 const REC = "recAAAAAAAAAAAAAA";
 const alloc = () => allocationStoreWithQuery(async (sql, params) => (await pg.query<Record<string, unknown>>(sql, params)).rows);
+const alerts = () => allocationAlertsWithQuery(async (sql, params) => (await pg.query<Record<string, unknown>>(sql, params)).rows);
 const sales = () => saleStoreWithQuery(async (sql, params) => (await pg.query<Record<string, unknown>>(sql, params)).rows);
 
 before(async () => {
@@ -18,6 +19,8 @@ before(async () => {
   await pg.query("insert into tenants values ($1)", [T]);
   const salesSql = readFileSync(new URL("../db/migrations/0005_sales.sql", import.meta.url), "utf8").split("-- A short lease")[0]!;
   await pg.exec(salesSql);
+  // sync_state (0005, after the stock lock part) holds the alert "checked" marks.
+  await pg.exec(readFileSync(new URL("../db/migrations/0005_sales.sql", import.meta.url), "utf8").split("create table if not exists sync_state")[1]!.split(";")[0]!.replace(/^/, "create table if not exists sync_state") + ";");
   const migration = readFileSync(new URL("../db/migrations/0012_allocations.sql", import.meta.url), "utf8");
   await pg.exec(migration);
   await pg.exec(migration);
@@ -188,4 +191,88 @@ test("a deck sale is logged once and is not a Hekla Qty decrement", async () => 
   assert.equal(pending.length, 1);
   assert.equal(pending[0]!.platform, "cardtrader");
   await assert.rejects(store.insertLines(T, [{ ...line, platform: "ebay" as "allocation", externalOrderId: "nope", lineKey: "nope" }]));
+});
+
+const T2 = "00000000-0000-4000-8000-000000000002";
+
+test("sweep: stale rows are pending keys no request holds with an unanswered write at or before the cutoff, oldest first, capped", async () => {
+  await pg.query("insert into tenants values ($1) on conflict do nothing", [T2]);
+  const store = alloc();
+  const at = (iso: string, done = false) => ({ steps: [{ kind: "set" as const, listingId: 70, from: 2, to: 1, attemptedAt: iso, ...(done ? { done: { quantity: 1 } } : {}) }], status: 200, body: { ok: true } });
+  const put = async (key: string, row: string, plan: ReturnType<typeof at> | null, release = true) => {
+    assert.equal((await store.claim(T2, key, { ...req({ allocationId: key }), recordId: row }, `tok-${key}`, 60)).kind, "claimed");
+    if (plan) await store.savePlan(T2, key, `tok-${key}`, plan);
+    if (release) await store.abandon(T2, key, `tok-${key}`);
+  };
+  await put("sw-old", "recSWEEPAAAAAAAA1", at("2026-11-09T10:00:00.000Z"));
+  await put("sw-older", "recSWEEPAAAAAAAA2", at("2026-11-09T09:00:00.000Z"));
+  await put("sw-recent", "recSWEEPAAAAAAAA3", at("2026-11-09T12:59:00.000Z"));
+  await put("sw-held", "recSWEEPAAAAAAAA4", at("2026-11-09T08:00:00.000Z"), false);
+  await put("sw-done-step", "recSWEEPAAAAAAAA5", at("2026-11-09T08:00:00.000Z", true));
+  await put("sw-unsent", "recSWEEPAAAAAAAA6", { steps: [{ kind: "set", listingId: 70, from: 2, to: 1 }], status: 200, body: { ok: true } } as never);
+  await put("sw-noplan", "recSWEEPAAAAAAAA7", null);
+  const cutoff = "2026-11-09T12:45:00.000Z";
+  assert.deepEqual(await store.staleRows(T2, cutoff, 10), ["recSWEEPAAAAAAAA2", "recSWEEPAAAAAAAA1"]);
+  assert.deepEqual(await store.staleRows(T2, cutoff, 1), ["recSWEEPAAAAAAAA2"]);
+  assert.deepEqual(await store.staleRows(T, cutoff, 10), [], "per tenant");
+  // A finished key is not stale.
+  const taken = await store.takeOver(T2, "sw-older", "tok-sweep", 60);
+  assert.ok(taken);
+  assert.equal(await store.finish(T2, "sw-older", "tok-sweep", 409, { ok: false, error: "ct_retry_unverifiable", note: "n", unverified: { listing_id: 70, from: 2, expected: 1, observed: 2, attempted_at: "2026-11-09T09:00:00.000Z" } }), true);
+  assert.deepEqual(await store.staleRows(T2, cutoff, 10), ["recSWEEPAAAAAAAA1"]);
+});
+
+test("alerts: every stored ct_retry_unverifiable is listed with row, listing, quantities and direction until it is marked checked", async () => {
+  const store = alloc();
+  const list = alerts();
+  // From the previous test: sw-older (reserve) was stored as ct_retry_unverifiable.
+  assert.equal((await store.claim(T2, "al-rel", { ...req({ allocationId: "al-rel" }), op: "release", recordId: "recALERTAAAAAAAAA" }, "tok-r", 60)).kind, "claimed");
+  assert.equal(await store.finish(T2, "al-rel", "tok-r", 409, { ok: false, error: "ct_retry_unverifiable", note: "relist", unverified: { listing_id: null, from: 0, expected: 2, observed: null, attempted_at: null } }), true);
+  assert.equal((await store.claim(T2, "al-ok", { ...req({ allocationId: "al-ok" }), recordId: "recALERTAAAAAAAAA" }, "tok-o", 60)).kind, "claimed");
+  assert.equal(await store.finish(T2, "al-ok", "tok-o", 409, { ok: false, error: "ct_changed_during_retry" }), true);
+
+  const open = await list.open(T2);
+  assert.deepEqual(open.map((a) => [a.key, a.recordId, a.direction, a.listingId, a.from, a.expected, a.observed]).sort(), [
+    ["al-rel", "recALERTAAAAAAAAA", "release", null, 0, 2, null],
+    ["sw-older", "recSWEEPAAAAAAAA2", "reserve", 70, 2, 1, 2],
+  ]);
+  // Per tenant; an answer stored before `unverified` existed (key-s, earlier test) is listed with unknown quantities.
+  assert.deepEqual((await list.open(T)).map((a) => [a.key, a.direction, a.listingId, a.expected, a.observed]), [["key-s", "reserve", null, null, null]]);
+
+  assert.equal(await list.ack(T2, "al-rel", "user_admin"), true);
+  assert.equal(await list.ack(T2, "al-rel", "user_admin"), true, "idempotent");
+  assert.equal(await list.ack(T2, "al-ok", "user_admin"), false, "only unverified writes are alerts");
+  assert.equal(await list.ack(T2, "nope", "user_admin"), false);
+  assert.deepEqual((await list.open(T2)).map((a) => a.key), ["sw-older"]);
+});
+
+test("alerts: email_sent_at lives in sync_state; a claim blocks a second send, a release lets the sweep resend, sent is final", async () => {
+  const list = alerts();
+  // Open on T2 now: sw-older (reserve 2 -> 1, observed 2) only.
+  let open = await list.open(T2);
+  assert.deepEqual(open.map((a) => [a.key, a.risk, a.emailSentAt]), [["sw-older", "high", null]]);
+  assert.deepEqual((await list.unsent(T2, 5)).map((a) => [a.key, a.direction, a.from, a.expected, a.observed, a.known, a.source]), [["sw-older", "reserve", 2, 1, 2, true, "resend"]]);
+
+  assert.equal(await list.claimEmail(T2, "sw-older"), true);
+  assert.equal(await list.claimEmail(T2, "sw-older"), false, "another send holds it");
+  await list.releaseEmail(T2, "sw-older");
+  assert.equal((await list.unsent(T2, 5)).length, 1, "released: still unsent");
+  assert.equal(await list.claimEmail(T2, "sw-older"), true);
+  await list.markEmailSent(T2, "sw-older");
+  assert.equal(await list.claimEmail(T2, "sw-older"), false, "sent is final");
+  await list.releaseEmail(T2, "sw-older");
+  assert.deepEqual(await list.unsent(T2, 5), []);
+  open = await list.open(T2);
+  assert.ok(open[0]!.emailSentAt, "email_sent_at shown on the admin list");
+
+  // An expired claim (a send that died mid-way) can be taken again.
+  await pg.query("insert into sync_state (tenant_id, key, value) values ($1, 'alloc_alert_email:key-s', jsonb_build_object('claimed_until', now() - interval '1 minute'))", [T]);
+  assert.equal(await list.claimEmail(T, "key-s"), true);
+  // A legacy answer with no recorded quantities is "high".
+  assert.deepEqual((await list.open(T)).map((a) => [a.key, a.risk, a.known]), [["key-s", "high", false]]);
+  // Checked alerts are not resent.
+  await list.releaseEmail(T, "key-s");
+  assert.equal((await list.unsent(T, 5)).length, 1);
+  assert.equal(await list.ack(T, "key-s", "user_admin"), true);
+  assert.deepEqual(await list.unsent(T, 5), []);
 });

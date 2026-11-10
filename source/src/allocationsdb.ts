@@ -2,7 +2,8 @@
  * Neon storage for POST /api/allocations: one row per tenant and idempotency key (claimed, then finished), the
  * CardTrader plan saved with a claim, the last reserve price for a relist, and a lease per Waitlist row.
  */
-import type { AllocationResponse, AllocationStore, Claim, ClaimRow, CtPlan, StoredAllocation } from "./allocations.ts";
+import type { AllocationResponse, AllocationStore, Claim, ClaimRow, CtPlan, StoredAllocation, UnverifiableAlert } from "./allocations.ts";
+import { listingRisk, type ListingRisk } from "./alloc-risk.ts";
 import { db } from "./tenants.ts";
 
 type Row = Record<string, unknown>;
@@ -177,8 +178,137 @@ export function allocationStoreWithQuery(query: AllocationQuery): AllocationStor
         plan: row.plan == null ? null : asJson<CtPlan>(row.plan),
       };
     },
+    async staleRows(tenantId, attemptedBeforeIso, limit) {
+      // An unanswered step (attemptedAt, no done) at or before the cutoff, on a pending key no request holds.
+      const rows = await sql.query(
+        `select r.waitlist_record_id, min((s->>'attemptedAt')::timestamptz) as oldest
+         from allocation_results r
+         cross join lateral jsonb_array_elements(coalesce(r.plan->'steps', '[]'::jsonb)) s
+         where r.tenant_id = $1 and r.state = 'pending' and (r.claimed_until is null or r.claimed_until <= now())
+           and s ? 'attemptedAt' and not s ? 'done' and (s->>'attemptedAt')::timestamptz <= $2::timestamptz
+         group by r.waitlist_record_id
+         order by oldest
+         limit $3`,
+        [tenantId, attemptedBeforeIso, limit],
+      );
+      return rows.map((row) => String(row.waitlist_record_id));
+    },
     async unlockRow(tenantId, recordId, holder) {
       await sql.query("delete from allocation_row_locks where tenant_id = $1 and record_id = $2 and holder = $3", [tenantId, recordId, holder]);
     },
   };
+}
+
+/** One stored ct_retry_unverifiable on the admin alerts list. Fields from `unverified` are null on answers stored before it existed. */
+export type AllocationAlertRow = {
+  key: string;
+  recordId: string;
+  allocationId: string;
+  deckId: string;
+  direction: "reserve" | "release";
+  listingId: number | null;
+  from: number | null;
+  expected: number | null;
+  observed: number | null;
+  /** false: no quantities were recorded, so the risk is "high". */
+  known: boolean;
+  /** Which way the listing may be wrong. "high" (oversell, check now) whenever it cannot be ruled out. */
+  risk: ListingRisk;
+  attemptedAt: string | null;
+  note: string;
+  createdAt: string;
+  /** When the alert email went out; null until Resend accepted it. */
+  emailSentAt: string | null;
+};
+
+const ACK = "alloc_alert_ack:";
+const EMAIL = "alloc_alert_email:";
+/** How long one send holds the email claim before another run may try. */
+const EMAIL_CLAIM_SECONDS = 600;
+const num = (value: unknown): number | null => (value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value));
+
+const ALERT_SELECT = `select r.idempotency_key, r.waitlist_record_id, r.allocation_id, r.deck_id, r.op, r.result, r.created_at,
+           e.value->>'sent_at' as email_sent_at
+         from allocation_results r
+         left join sync_state e on e.tenant_id = r.tenant_id and e.key = $2 || r.idempotency_key
+         where r.tenant_id = $1 and r.state = 'done' and r.result->>'error' = 'ct_retry_unverifiable'
+           and not exists (select 1 from sync_state a where a.tenant_id = r.tenant_id and a.key = $3 || r.idempotency_key)`;
+
+function toAlertRow(row: Row): AllocationAlertRow {
+  const body = asBody(row.result);
+  const u = body.unverified as Partial<NonNullable<AllocationResponse["unverified"]>> | undefined;
+  const direction = row.op === "release" ? "release" : "reserve";
+  const from = num(u?.from); const expected = num(u?.expected); const observed = num(u?.observed);
+  const known = Boolean(u);
+  return {
+    key: String(row.idempotency_key), recordId: String(row.waitlist_record_id), allocationId: String(row.allocation_id), deckId: String(row.deck_id),
+    direction, listingId: num(u?.listing_id), from, expected, observed, known,
+    risk: listingRisk({ direction, from, expected, observed, known }),
+    attemptedAt: typeof u?.attempted_at === "string" ? u.attempted_at : null,
+    note: String(body.note ?? ""), createdAt: new Date(String(row.created_at)).toISOString(),
+    emailSentAt: row.email_sent_at == null ? null : String(row.email_sent_at),
+  };
+}
+
+/**
+ * The persistent owner alert list and its email ledger: every stored ct_retry_unverifiable (state done, so retry,
+ * expiry, admin clear and sweep all land here) that no admin has marked checked. Checked marks and email_sent_at live
+ * in sync_state (alloc_alert_ack:<key>, alloc_alert_email:<key>), so no migration is needed.
+ */
+export function allocationAlertsWithQuery(query: AllocationQuery) {
+  return {
+    async open(tenantId: string, limit = 100): Promise<AllocationAlertRow[]> {
+      const rows = await query(`${ALERT_SELECT} order by r.created_at desc limit $4`, [tenantId, EMAIL, ACK, limit]);
+      return rows.map(toAlertRow);
+    },
+    /** Marks one alert checked. false when the key has no stored ct_retry_unverifiable. Idempotent. */
+    async ack(tenantId: string, key: string, by: string): Promise<boolean> {
+      const rows = await query(
+        `insert into sync_state (tenant_id, key, value)
+         select r.tenant_id, $3 || r.idempotency_key, jsonb_build_object('by', $4::text, 'at', now())
+         from allocation_results r
+         where r.tenant_id = $1 and r.idempotency_key = $2 and r.state = 'done' and r.result->>'error' = 'ct_retry_unverifiable'
+         on conflict (tenant_id, key) do update set value = sync_state.value
+         returning key`,
+        [tenantId, key, ACK, by],
+      );
+      return rows.length === 1;
+    },
+    /** Takes the send for one alert: false when it was already sent or another send holds it. */
+    async claimEmail(tenantId: string, key: string): Promise<boolean> {
+      const rows = await query(
+        `insert into sync_state (tenant_id, key, value) values ($1, $2 || $3::text, jsonb_build_object('claimed_until', now() + make_interval(secs => $4)))
+         on conflict (tenant_id, key) do update set value = excluded.value, updated_at = now()
+           where sync_state.value->>'sent_at' is null
+             and coalesce((sync_state.value->>'claimed_until')::timestamptz, '-infinity'::timestamptz) <= now()
+         returning key`,
+        [tenantId, EMAIL, key, EMAIL_CLAIM_SECONDS],
+      );
+      return rows.length === 1;
+    },
+    /** email_sent_at: stored only after Resend accepted the email. */
+    async markEmailSent(tenantId: string, key: string): Promise<void> {
+      await query(
+        `insert into sync_state (tenant_id, key, value) values ($1, $2 || $3::text, jsonb_build_object('sent_at', now()))
+         on conflict (tenant_id, key) do update set value = jsonb_build_object('sent_at', now()), updated_at = now()`,
+        [tenantId, EMAIL, key],
+      );
+    },
+    /** Gives an unsent claim back at once, so the next sweep sends it again. */
+    async releaseEmail(tenantId: string, key: string): Promise<void> {
+      await query(`delete from sync_state where tenant_id = $1 and key = $2 || $3::text and value->>'sent_at' is null`, [tenantId, EMAIL, key]);
+    },
+    /** Open alerts with no email_sent_at, oldest first. */
+    async unsent(tenantId: string, limit: number): Promise<UnverifiableAlert[]> {
+      const rows = await query(`${ALERT_SELECT} and (e.value->>'sent_at') is null order by r.created_at asc limit $4`, [tenantId, EMAIL, ACK, limit]);
+      return rows.map(toAlertRow).map((a) => ({
+        tenantId, key: a.key, recordId: a.recordId, allocationId: a.allocationId, deckId: a.deckId, direction: a.direction,
+        listingId: a.listingId, from: a.from, expected: a.expected, observed: a.observed, known: a.known, source: "resend" as const, note: a.note,
+      }));
+    },
+  };
+}
+
+export function neonAllocationAlerts(env: Env) {
+  return allocationAlertsWithQuery((query, params) => db(env).query(query, params));
 }
