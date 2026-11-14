@@ -58,16 +58,16 @@
                 </span>
                 <small id="set-hint" class="hint"></small>
               </label>
-              <label>Finish
+              <label id="finish-field">Finish
                 <select id="finish" name="finish"></select>
               </label>
-              <label>Condition
+              <label id="condition-field">Condition
                 <select id="condition" name="condition"></select>
               </label>
-              <label>Qty
+              <label id="qty-field">Qty
                 <input id="qty" name="qty" type="number" min="1" max="250" step="1" inputmode="numeric" value="1" />
               </label>
-              <label>Cost (optional)
+              <label id="cost-field">Cost (optional)
                 <span class="money-field">
                   <span class="money-prefix" aria-hidden="true">$</span>
                   <input id="cost" name="costBasisUsd" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" />
@@ -190,13 +190,13 @@
       <textarea id="bulk-text" rows="6" placeholder="13 42 Foil NM 1"></textarea>
       <div class="actions">
         <button id="bulk-preview" class="ghost" type="button">Preview</button>
-        <button id="bulk-commit" class="primary" type="button" disabled>Add these to waitlist</button>
+        <button id="bulk-commit" class="primary gold" type="button" disabled>Add these to waitlist</button>
         <button id="bulk-close" class="ghost" type="button">Close</button>
       </div>
       <fieldset class="dup-policy" id="dup-policy" hidden>
         <legend>When a line matches a Waitlist or Listed row</legend>
-        <label><input type="radio" name="onDuplicate" value="skip" /> Skip those lines</label>
         <label><input type="radio" name="onDuplicate" value="merge" checked /> Merge qty into the existing row</label>
+        <label><input type="radio" name="onDuplicate" value="skip" /> Skip those lines</label>
         <label><input type="radio" name="onDuplicate" value="add" /> Add anyway</label>
       </fieldset>
       <p id="bulk-summary" class="bulk-summary" hidden></p>

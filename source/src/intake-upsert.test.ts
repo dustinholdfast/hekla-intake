@@ -115,17 +115,22 @@ test("bulk paste defaults to merge and never falls back to add", () => {
 
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   const js = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.match(html, /name="onDuplicate" value="merge" checked/);
+  const css = readFileSync(new URL("../public/app.css", import.meta.url), "utf8");
+  assert.match(html, /value="merge" checked[\s\S]*value="skip"[\s\S]*value="add"/);
+  assert.match(html, /id="bulk-commit" class="primary gold"/);
   assert.match(html, /Cost \(optional\)/);
   assert.match(html, /Per card, or the lot total split evenly\./);
   assert.match(html, /Add as new row/);
   assert.match(js, /Add to existing/);
   assert.match(js, /const onDuplicate = bulkPolicy\(\)/);
   assert.match(js, /new rows forced/);
+  assert.match(js, /merge \$\{tally\.merge\}/);
+  assert.match(js, /×\$\{row\.card\.qty\}/);
+  assert.match(css, /#finish-field[\s\S]*#qty-field/);
+  assert.match(css, /height:\s*44px/);
   assert.match(js, /Already in stock:/);
   assert.doesNotMatch(js, /window\.confirm\(/);
   assert.match(js, /confirmOverride: true/);
-  const css = readFileSync(new URL("../public/app.css", import.meta.url), "utf8");
   assert.match(css, /color:\s*#f0c987/);
   assert.match(css, /rgba\(232,\s*185,\s*106,\s*0\.08\)/);
   assert.match(css, /rgba\(232,\s*185,\s*106,\s*0\.35\)/);

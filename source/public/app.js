@@ -1446,14 +1446,16 @@ function bulkTally(rows) {
   let fresh = 0;
   let merge = 0;
   let forced = 0;
+  let skipped = 0;
   for (const row of rows || []) {
     if (row.error || !row.card) continue;
     const matched = (row.matches || []).length > 0 || (row.alsoInPaste || []).length > 0;
     if (!matched) fresh += 1;
     else if (policy === "add") forced += 1;
     else if (policy === "merge") merge += 1;
+    else skipped += 1;
   }
-  return { fresh, merge, forced };
+  return { fresh, merge, forced, skipped };
 }
 
 function stockTag(matched) {
@@ -1462,6 +1464,30 @@ function stockTag(matched) {
   if (policy === "add") return "New row";
   if (policy === "skip") return "Skip";
   return "Add to existing";
+}
+
+function bulkCommitLabel(tally, valid) {
+  if (!valid) return "Add these to waitlist";
+  const parts = [];
+  if (tally.fresh) parts.push(`Add ${tally.fresh}`);
+  if (tally.merge) parts.push(parts.length ? `merge ${tally.merge}` : `Merge ${tally.merge}`);
+  if (tally.forced) parts.push(parts.length ? `force ${tally.forced}` : `Force ${tally.forced}`);
+  if (!parts.length && tally.skipped) return `Skip ${tally.skipped}`;
+  return parts.join(" · ") || "Add these to waitlist";
+}
+
+function bulkCompact(tr, identity, detail) {
+  const td = document.createElement("td");
+  td.className = "bulk-line";
+  const id = document.createElement("div");
+  id.className = "bulk-line-id";
+  id.textContent = identity;
+  const check = document.createElement("div");
+  check.className = "bulk-line-check";
+  if (typeof detail === "string") check.textContent = detail;
+  else check.append(detail);
+  td.append(id, check);
+  tr.append(td);
 }
 
 function renderBulk(data) {
@@ -1473,6 +1499,7 @@ function renderBulk(data) {
     const tr = document.createElement("tr");
     if (row.error) {
       tr.append(cell("Line", String(row.line)), cell("Set", "—"), cell("#", "—"), cell("Finish", "—"), cell("Cond", "—"), cell("Qty", "—"), cell("Cost", "—"), cell("Name", "—"), cell("Check", row.error));
+      bulkCompact(tr, String(row.line), row.error);
     } else {
       valid += 1;
       const matches = row.matches || [];
@@ -1503,6 +1530,21 @@ function renderBulk(data) {
         cell("Check", ""),
       );
       tr.lastChild.replaceChildren(check);
+      const detail = document.createElement("span");
+      const name = row.card.cardName || "";
+      if (name) detail.append(document.createTextNode(`${name} · `));
+      if (tag) {
+        const pill = document.createElement("span");
+        pill.className = "stock-tag";
+        pill.textContent = tag;
+        detail.append(pill, document.createTextNode(" · "));
+      }
+      const note = [
+        ...matches.map((match) => `${match.status} qty ${match.qty}`),
+        ...paste.map((line) => `also line ${line}`),
+      ].join(", ") || "Ready";
+      detail.append(document.createTextNode(note));
+      bulkCompact(tr, `${row.line} · ${row.card.collectorNumber} · ${row.card.finish} · ${row.card.condition} · ×${row.card.qty}`, detail);
     }
     body.append(tr);
   }
@@ -1518,7 +1560,7 @@ function renderBulk(data) {
     $("bulk-warning").textContent = data.warning;
   }
   $("bulk-commit").disabled = valid === 0;
-  $("bulk-commit").textContent = valid ? `Add ${valid} to waitlist` : "Add these to waitlist";
+  $("bulk-commit").textContent = bulkCommitLabel(tally, valid);
 }
 
 async function commitBulk(options = {}) {
