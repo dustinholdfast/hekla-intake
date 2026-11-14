@@ -546,17 +546,17 @@ function updateBulkHelp() {
   const sample = $("bulk-sample");
   if (!help || !sample) return;
   if (game === "Lorcana") {
-    help.textContent = "One Lorcana card per line. First token is the set number, then collector number, finish (Normal, Foil, or Enchanted), condition, optional quantity, and an optional name. Spaces, commas, or tabs. Every line uses Lorcana.";
-    sample.textContent = "8 042 Foil NM 1\n8,156,Normal,NM,2,Elsa - Snow Queen\n13\t15\tFoil\tLP\t1\tTiana";
+    help.textContent = "One Lorcana card per line. First token is the set number, then collector number, finish (Normal, Foil, or Enchanted), condition, optional quantity, an optional cost (2.50), and an optional name. A blank cost is left unknown. Spaces, commas, or tabs. Every line uses Lorcana.";
+    sample.textContent = "8 042 Foil NM 1 2.50\n8,156,Normal,NM,2,1.25,Elsa - Snow Queen\n13\t15\tFoil\tLP\t1\tTiana";
     return;
   }
   if (game === "Magic: The Gathering") {
-    help.textContent = "One Magic card per line. First token is the set code, then collector number, finish, condition, optional quantity, and an optional name. Finish is Normal, Foil, or that printing's CardTrader treatment (Borderless, Extended Art, Showcase, Etched). Use commas or tabs when the finish has spaces. Every line uses Magic.";
+    help.textContent = "One Magic card per line. First token is the set code, then collector number, finish, condition, optional quantity, an optional cost (2.50), and an optional name. A blank cost is left unknown. Finish is Normal, Foil, or that printing's CardTrader treatment (Borderless, Extended Art, Showcase, Etched). Use commas or tabs when the finish has spaces. Every line uses Magic.";
     sample.textContent = bulkSample(game);
     return;
   }
   const finishes = finishesFor(game).join(", ");
-  help.textContent = `One ${game} card per line. First token is the set identifier, then collector number, finish (${finishes}), condition, optional quantity, and an optional name. Use commas or tabs when the set identifier has spaces. Every line uses ${game}.`;
+  help.textContent = `One ${game} card per line. First token is the set identifier, then collector number, finish (${finishes}), condition, optional quantity, an optional cost (2.50), and an optional name. A blank cost is left unknown. Use commas or tabs when the set identifier has spaces. Every line uses ${game}.`;
   sample.textContent = bulkSample(game);
 }
 
@@ -714,12 +714,16 @@ async function resolveDupe(choice) {
   const payload = state.pending;
   if (!payload) return;
   const selected = document.querySelector("input[name=merge-target]:checked");
+  if (choice === "add") {
+    const confirmed = window.confirm("Add anyway creates a second row for the same card, even when one is already Listed. That duplicate is recorded and the owner is alerted. Continue?");
+    if (!confirmed) return;
+  }
   $("dupe-dialog").close();
   if (choice === "merge") {
     await submitCard({ ...payload, onDuplicate: "merge", mergeRecordId: selected ? selected.value : undefined });
     return;
   }
-  await submitCard({ ...payload, onDuplicate: "add" });
+  await submitCard({ ...payload, onDuplicate: "add", confirmOverride: true });
 }
 
 async function refreshAll() {
@@ -1371,7 +1375,7 @@ function renderBulk(data) {
   for (const row of data.rows || []) {
     const tr = document.createElement("tr");
     if (row.error) {
-      tr.append(cell("Line", String(row.line)), cell("Set", "—"), cell("#", "—"), cell("Finish", "—"), cell("Cond", "—"), cell("Qty", "—"), cell("Name", "—"), cell("Check", row.error));
+      tr.append(cell("Line", String(row.line)), cell("Set", "—"), cell("#", "—"), cell("Finish", "—"), cell("Cond", "—"), cell("Qty", "—"), cell("Cost", "—"), cell("Name", "—"), cell("Check", row.error));
     } else {
       valid += 1;
       const matches = row.matches || [];
@@ -1388,6 +1392,7 @@ function renderBulk(data) {
         cell("Finish", row.card.finish),
         cell("Cond", row.card.condition),
         cell("Qty", String(row.card.qty)),
+        cell("Cost", row.card.costBasisUsd == null ? "—" : String(row.card.costBasisUsd)),
         cell("Name", row.card.cardName || "—"),
         cell("Check", check),
       );
@@ -1395,6 +1400,8 @@ function renderBulk(data) {
     body.append(tr);
   }
   $("dup-policy").hidden = dupes === 0;
+  const mergeChoice = document.querySelector("input[name=onDuplicate][value=merge]");
+  if (mergeChoice && !document.querySelector("input[name=onDuplicate]:checked")) mergeChoice.checked = true;
   if (data.warning) {
     $("bulk-warning").hidden = false;
     $("bulk-warning").textContent = data.warning;
@@ -1406,16 +1413,16 @@ function renderBulk(data) {
 async function commitBulk() {
   const text = $("bulk-text").value;
   const selected = document.querySelector("input[name=onDuplicate]:checked");
-  const needsPolicy = !$("dup-policy").hidden;
-  if (needsPolicy && !selected) {
-    $("bulk-error").textContent = "Choose skip, merge, or add anyway for the duplicate lines.";
-    return;
+  const onDuplicate = selected ? selected.value : "merge";
+  if (onDuplicate === "add") {
+    const confirmed = window.confirm("Add anyway creates a second row for each duplicate line. Those duplicates are recorded and the owner is alerted. Continue?");
+    if (!confirmed) return;
   }
   $("bulk-error").textContent = "";
   $("bulk-commit").disabled = true;
   const { response, data } = await api("/api/intake/bulk", {
     method: "POST",
-    body: JSON.stringify({ text, mode: "commit", game: state.game || "Lorcana", onDuplicate: selected ? selected.value : "add" }),
+    body: JSON.stringify({ text, mode: "commit", game: state.game || "Lorcana", onDuplicate, confirmOverride: onDuplicate === "add" }),
   });
   $("bulk-commit").disabled = false;
   if (!response.ok) {

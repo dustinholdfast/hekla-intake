@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { weightedCost } from "./cleanup.ts";
+import { draftIdentityKey } from "./intake-upsert.ts";
 import { FIXTURE_TENANT } from "./inventory-fixtures.ts";
 import { defaultInventorySettings } from "./inventory-settings.ts";
 import { exampleAcceptInput, exampleCatalog, exampleSellRequestRecord, EXAMPLE_RECEIVED_ON, EXAMPLE_SR_ID } from "./purchases-fixtures.ts";
@@ -407,4 +409,61 @@ test("the example catalog matches ember and leaves moss untracked", () => {
   assert.equal(catalog.lines[0]?.wantQty, 2);
   assert.equal(catalog.lines[2]?.wantQty, null);
   assert.equal(defaultInventorySettings().creditCostRule, "face_value");
+});
+
+test("receive merges a matching stock identity instead of posting a row, and averages an existing cost", () => {
+  const planned = planAcceptance(exampleAcceptInput());
+  assert.equal(planned.ok, true);
+  if (!planned.ok) return;
+  const purchase = structuredClone(planned.purchase);
+  const line = purchase.lines.find((item) => item.item === "Example Lantern Thief");
+  assert.ok(line);
+  assert.equal(line.stockRecordId, null);
+  const identityKey = draftIdentityKey({
+    game: line.game,
+    setNumber: line.game === "Lorcana" ? line.setIdentity : null,
+    setIdentifier: line.game === "Lorcana" ? null : line.setIdentity,
+    collectorNumber: line.collectorNumber ?? "",
+    finish: line.finishStored ?? "",
+    condition: line.condition,
+    language: line.language,
+  });
+  assert.ok(identityKey);
+  const blocked = planReceipt({
+    purchase: structuredClone(purchase),
+    receivedOn: EXAMPLE_RECEIVED_ON,
+    now: NOW,
+    confirms: [{ lineNo: line.lineNo, condition: line.condition }],
+    balanceCents: 0,
+    mintRecordId: (lineNo) => `recNewStockLn${String(lineNo).padStart(4, "0")}`,
+    identityStock: [
+      { identityKey, id: "recLANTERNEXIST01", qty: 1, costBasisUsd: 2, unknownCostQty: 0, status: "Listed" },
+      { identityKey, id: "recLANTERNEXIST02", qty: 4, costBasisUsd: 2, unknownCostQty: 0, status: "Waitlist" },
+    ],
+  });
+  assert.equal(blocked.ok, false);
+  if (blocked.ok) return;
+  assert.deepEqual(blocked.duplicate?.recordIds, ["recLANTERNEXIST01", "recLANTERNEXIST02"]);
+
+  const receipt = planReceipt({
+    purchase,
+    receivedOn: EXAMPLE_RECEIVED_ON,
+    now: NOW,
+    confirms: purchase.lines.map((item) => ({ lineNo: item.lineNo, condition: item.condition })),
+    balanceCents: 0,
+    mintRecordId: (lineNo) => `recNewStockLn${String(lineNo).padStart(4, "0")}`,
+    identityStock: [{ identityKey, id: "recLANTERNEXIST01", qty: 1, costBasisUsd: 2, unknownCostQty: 0, status: "Listed" }],
+  });
+  assert.equal(receipt.ok, true);
+  if (!receipt.ok) return;
+  assert.equal(receipt.plan.writes.some((write) => write.kind === "create_stock" && write.lineKey.endsWith(`:${line.lineNo}`)), false);
+  const patch = receipt.plan.writes.find((write) => write.kind === "patch_qty" && write.recordId === "recLANTERNEXIST01");
+  assert.equal(patch?.kind, "patch_qty");
+  if (patch?.kind !== "patch_qty") return;
+  assert.equal(patch.fields.Qty, 1 + line.qty);
+  assert.equal(patch.before, 1);
+  const averaged = weightedCost([{ qty: 1, costBasisUsd: 2 }, { qty: line.qty, costBasisUsd: line.unitCostCents / 100 }]);
+  assert.equal(patch.fields["Cost Basis USD"], averaged.cost);
+  assert.equal(receipt.plan.lots.find((lot) => lot.recordId === "recLANTERNEXIST01")?.qtyIn, line.qty);
+  assert.equal(receipt.plan.purchase.lines.find((item) => item.lineNo === line.lineNo)?.stockRecordId, "recLANTERNEXIST01");
 });

@@ -69,6 +69,10 @@ export type PrintingRef = {
   setIdentifier?: string | null;
   collectorNumber: string;
   finish: string;
+  /** Blank on a draft means NM, the intake default. A blank on a stored row is not NM. */
+  condition?: string | null;
+  /** Blank means English, the same rule as the inventory ledger. */
+  language?: string | null;
 };
 
 export type FieldMap = Record<string, string | number>;
@@ -131,6 +135,35 @@ export function buildMergeFields(qty: number): FieldMap {
   return fields;
 }
 
+const STOCK_MERGE_FIELDS = new Set(["Qty", "Cost Basis USD", "Unknown-Cost Qty"]);
+
+/**
+ * Qty plus the cost fields a merge may write. Reserved Qty and Deck Reserved Qty are absent on purpose:
+ * existing holds stay, and the copies just added are listable. A blank cost omits Cost Basis USD.
+ */
+export function buildStockMergeFields(input: { qty: number; costBasisUsd?: number | null; unknownCostQty?: number | null }): FieldMap {
+  if (!Number.isInteger(input.qty) || input.qty < 1 || input.qty > 100_000) {
+    throw new Error("Merged quantity must be a whole number from 1 to 100000.");
+  }
+  const fields: FieldMap = { Qty: input.qty };
+  if (input.costBasisUsd != null) {
+    if (!Number.isFinite(input.costBasisUsd) || input.costBasisUsd < 0 || input.costBasisUsd > 100_000) {
+      throw new Error("Cost basis must be a USD amount from 0 to 100000.");
+    }
+    fields["Cost Basis USD"] = Math.round(input.costBasisUsd * 100) / 100;
+  }
+  if (input.unknownCostQty != null) {
+    if (!Number.isInteger(input.unknownCostQty) || input.unknownCostQty < 0 || input.unknownCostQty > input.qty) {
+      throw new Error("Unknown-cost quantity must be a whole number from 0 to the new quantity.");
+    }
+    fields["Unknown-Cost Qty"] = input.unknownCostQty;
+  }
+  for (const key of Object.keys(fields)) {
+    if (!STOCK_MERGE_FIELDS.has(key)) throw new Error(`Merge cannot write “${key}”.`);
+  }
+  return fields;
+}
+
 export function assertCreateFields(fields: FieldMap): void {
   for (const key of Object.keys(fields)) {
     if (!ALLOWED.has(key) || (FORBIDDEN_FIELDS as readonly string[]).includes(key)) {
@@ -164,6 +197,8 @@ export type IntakeBody = {
   priority?: number | null;
   notes?: string;
   onDuplicate?: "ask" | "merge" | "add";
+  /** Required with onDuplicate "add" when a matching row exists. Absent or false does not create a duplicate. */
+  confirmOverride?: boolean;
   mergeRecordId?: string;
 };
 
@@ -286,6 +321,7 @@ export function parseIntakeBody(value: unknown): { ok: true; body: IntakeBody } 
   if (typeof record.mergeRecordId === "string" && record.mergeRecordId.trim()) {
     body.mergeRecordId = record.mergeRecordId.trim();
   }
+  if (record.confirmOverride === true) body.confirmOverride = true;
 
   if (record.qty !== undefined && record.qty !== null && record.qty !== "") {
     const qty = typeof record.qty === "number" ? record.qty : Number(record.qty);

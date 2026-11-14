@@ -82,8 +82,8 @@
                 <select id="rarity" name="rarity"></select>
               </div>
               <div>
-                <label class="field" for="cost">Cost basis USD</label>
-                <input id="cost" name="costBasisUsd" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" />
+                <label class="field" for="cost">Cost basis USD <span class="opt">optional, this lot only</span></label>
+                <input id="cost" name="costBasisUsd" type="number" min="0" step="0.01" inputmode="decimal" placeholder="blank leaves cost unknown" />
               </div>
             </div>
 
@@ -163,12 +163,12 @@
   <dialog id="dupe-dialog">
     <form method="dialog" id="dupe-form">
       <h3>Already in the queue</h3>
-      <p id="dupe-copy">Same game, set, collector number, and finish is already Waitlist or Listed. Merging adds your quantity onto that row. Adding anyway creates a second row. Neither lists the card.</p>
+      <p id="dupe-copy">Same game, set, collector number, finish, condition, and language is already Waitlist or Listed. Blank language counts as English. Merge is the default: it adds your quantity onto that row and keeps its holds. Add anyway creates a second row, records the duplicate, and alerts the owner. Neither lists the card.</p>
       <div id="dupe-list" class="choice-list"></div>
       <p id="dupe-listed" class="warn" hidden>A match is already Listed. Merging increases the Airtable listed quantity. It does not change the CardTrader listing.</p>
       <div class="actions">
         <button id="dupe-merge" class="primary" type="button" value="merge">Merge qty</button>
-        <button id="dupe-add" class="ghost" type="button" value="add">Add anyway</button>
+        <button id="dupe-add" class="ghost" type="button" value="add">Add anyway…</button>
         <button class="ghost" type="button" id="dupe-cancel">Cancel</button>
       </div>
     </form>
@@ -191,7 +191,7 @@
       <fieldset class="dup-policy" id="dup-policy" hidden>
         <legend>When a line matches a Waitlist or Listed row</legend>
         <label><input type="radio" name="onDuplicate" value="skip" /> Skip those lines</label>
-        <label><input type="radio" name="onDuplicate" value="merge" /> Merge qty into the existing row</label>
+        <label><input type="radio" name="onDuplicate" value="merge" checked /> Merge qty into the existing row</label>
         <label><input type="radio" name="onDuplicate" value="add" /> Add anyway</label>
       </fieldset>
       <p id="bulk-warning" class="warn" hidden></p>
@@ -199,7 +199,7 @@
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Line</th><th>Set</th><th>#</th><th>Finish</th><th>Cond</th><th>Qty</th><th>Name</th><th>Check</th></tr>
+            <tr><th>Line</th><th>Set</th><th>#</th><th>Finish</th><th>Cond</th><th>Qty</th><th>Cost</th><th>Name</th><th>Check</th></tr>
           </thead>
           <tbody id="bulk-body"></tbody>
         </table>

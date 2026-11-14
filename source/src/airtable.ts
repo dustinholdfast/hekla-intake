@@ -1,7 +1,7 @@
 import {
   buildCreateFields,
   buildEditFields,
-  buildMergeFields,
+  buildStockMergeFields,
   type EditInput,
   collectorVariants,
   dedupeKey,
@@ -9,6 +9,7 @@ import {
   type DraftCard,
   type PrintingRef,
 } from "./fields.ts";
+import { matchesStock, mergeCostUpdate } from "./intake-upsert.ts";
 import { holdFieldNames, type HoldFieldNames } from "./listable.ts";
 import { airtableWriteTypecast } from "./magic-finish.ts";
 import { effectiveGame, finishQueryValues, readFinish, sameFinish, setName, type Game, type Status } from "./sets.ts";
@@ -32,6 +33,10 @@ export type QueueCard = {
   finish: string | null; condition: string | null; qty: number; status: string | null; rankScore: number | null;
   marketPriceUsd: number | null; notes: string | null; priority: number | null; createdTime: string;
   autoRank: number | null; rarity: string | null; costBasisUsd: number | null; cardType: string | null; recommendation: string | null; rankReason: string | null; enrichedAt: string | null; priceSource: string | null;
+  /** Omitted when the read did not ask for Language. Blank and omitted both mean English for identity matching. */
+  language?: string | null;
+  /** Omitted when the read did not ask for Unknown-Cost Qty. */
+  unknownCostQty?: number | null;
 };
 export type Summary = { listedQty: number; waitlistQty: number; counts: Record<Status, number>; truncated: boolean };
 
@@ -75,7 +80,7 @@ function textField(value: unknown): string | null { return typeof value === "str
 function numberField(value: unknown): number | null { return typeof value === "number" && Number.isFinite(value) ? value : null; }
 export function toQueueCard(record: AirtableRecord): QueueCard {
   const fields = record.fields ?? {}; const cardName = textField(fields["Card Name"]); const resolvedName = textField(fields["Resolved Name"]); const setNumber = textField(fields["Set #"]);
-  return { id: record.id, name: cardName || resolvedName || "", cardName, resolvedName, game: storedGame(fields.Game), setNumber, setIdentifier: textField(fields["Set Identifier"]), setName: setName(setNumber), collectorNumber: textField(fields["Collector Number"]), finish: textField(fields.Finish), condition: textField(fields.Condition), qty: numberField(fields.Qty) ?? 0, status: textField(fields.Status), rankScore: numberField(fields["Rank Score"]), marketPriceUsd: numberField(fields["Market Price USD"]), notes: textField(fields.Notes), priority: numberField(fields.Priority), createdTime: record.createdTime, autoRank: numberField(fields["Auto Rank"]), rarity: textField(fields.Rarity), costBasisUsd: numberField(fields["Cost Basis USD"]), cardType: textField(fields["Card Type"]), recommendation: textField(fields.Recommendation), rankReason: textField(fields["Rank Reason"]), enrichedAt: textField(fields["Enriched At"]), priceSource: textField(fields["Price Source"]) };
+  return { id: record.id, name: cardName || resolvedName || "", cardName, resolvedName, game: storedGame(fields.Game), setNumber, setIdentifier: textField(fields["Set Identifier"]), setName: setName(setNumber), collectorNumber: textField(fields["Collector Number"]), finish: textField(fields.Finish), condition: textField(fields.Condition), qty: numberField(fields.Qty) ?? 0, status: textField(fields.Status), rankScore: numberField(fields["Rank Score"]), marketPriceUsd: numberField(fields["Market Price USD"]), notes: textField(fields.Notes), priority: numberField(fields.Priority), createdTime: record.createdTime, autoRank: numberField(fields["Auto Rank"]), rarity: textField(fields.Rarity), costBasisUsd: numberField(fields["Cost Basis USD"]), cardType: textField(fields["Card Type"]), recommendation: textField(fields.Recommendation), rankReason: textField(fields["Rank Reason"]), enrichedAt: textField(fields["Enriched At"]), priceSource: textField(fields["Price Source"]), language: textField(fields.Language), unknownCostQty: numberField(fields["Unknown-Cost Qty"]) };
 }
 async function listRecords(env: Env, filterByFormula: string, fields: readonly string[] = READ_FIELDS): Promise<{ records: AirtableRecord[]; truncated: boolean }> {
   const records: AirtableRecord[] = []; let offset: string | undefined;
@@ -94,7 +99,12 @@ function orEquals(field: string, values: string[]): string { const clauses = [..
 /** Read filter only. Normal and Regular are both searched. The Finish field is not written here. */
 export function finishMatchFormula(finish: string): string { return orEquals("Finish", finishQueryValues(finish)); }
 function setClause(card: PrintingRef): string { if (effectiveGame(card.game) === "Lorcana") return `{Set #}=${formulaString(card.setNumber ?? "")}`; const identifier = (card.setIdentifier ?? "").trim().toLowerCase(); return `LOWER({Set Identifier}&"")=${formulaString(identifier)}`; }
-export async function findDuplicates(env: Env, card: PrintingRef): Promise<QueueCard[]> { const selected = effectiveGame(card.game); if (!selected) return []; const collectorClause = orEquals("Collector Number", collectorVariants(card.collectorNumber)); const formula = `AND(${gameFormula(selected)},${setClause(card)},${finishMatchFormula(card.finish)},OR({Status}='Waitlist',{Status}='Listed'),${collectorClause})`; const { records } = await listRecords(env, formula); return sortQueue(records.map(toQueueCard).filter((row) => matchesPrinting(row, card)), "Waitlist"); }
+const OPEN_OPTIONAL = ["Language", "Unknown-Cost Qty"] as const;
+async function listOpenRecords(env: Env, formula: string): Promise<AirtableRecord[]> {
+  const { records } = await listWithOptionalFields(env, formula, READ_FIELDS, OPEN_OPTIONAL);
+  return records;
+}
+export async function findDuplicates(env: Env, card: PrintingRef): Promise<QueueCard[]> { const selected = effectiveGame(card.game); if (!selected) return []; const collectorClause = orEquals("Collector Number", collectorVariants(card.collectorNumber)); const formula = `AND(${gameFormula(selected)},${setClause(card)},${finishMatchFormula(card.finish)},OR({Status}='Waitlist',{Status}='Listed'),${collectorClause})`; const records = await listOpenRecords(env, formula); return sortQueue(records.map(toQueueCard).filter((row) => matchesStock(row, card)), "Waitlist"); }
 async function writeRecords(env: Env, method: "POST" | "PATCH", records: { id?: string; fields: Record<string, string | number> }[]): Promise<QueueCard[]> {
   // A new Magic treatment (Borderless, Extended Art, …) is added as a Finish choice. Existing choices stay.
   const typecast = records.some((record) => airtableWriteTypecast(record.fields));
@@ -102,11 +112,34 @@ async function writeRecords(env: Env, method: "POST" | "PATCH", records: { id?: 
   return (body.records ?? []).map(toQueueCard);
 }
 export async function createCards(env: Env, cards: DraftCard[]): Promise<QueueCard[]> { const created: QueueCard[] = []; for (let index = 0; index < cards.length; index += 10) { const chunk = cards.slice(index, index + 10).map((card) => ({ fields: buildCreateFields(card) })); created.push(...await writeRecords(env, "POST", chunk)); } return created; }
-export async function mergeQty(env: Env, recordId: string, addQty: number): Promise<QueueCard> { if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400); const url = new URL(endpoint(env)); url.pathname += `/${recordId}`; const existing = await airtable(env, url.toString()) as AirtableRecord; const card = toQueueCard(existing); if (card.status !== "Waitlist" && card.status !== "Listed") throw new AirtableError("Only Waitlist or Listed rows can take a quantity merge.", 400); const nextQty = (card.qty || 0) + addQty; const [updated] = await writeRecords(env, "PATCH", [{ id: recordId, fields: buildMergeFields(nextQty) }]); if (!updated) throw new AirtableError("Airtable did not return the merged row.", 502); return updated; }
+export async function mergeQty(env: Env, recordId: string, addQty: number, added?: { costBasisUsd?: number | null }): Promise<QueueCard> {
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) throw new AirtableError("That record id is not an Airtable row.", 400);
+  if (!Number.isInteger(addQty) || addQty < 1 || addQty > 250) throw new AirtableError("Quantity must be a whole number from 1 to 250.", 400);
+  const url = new URL(endpoint(env)); url.pathname += `/${recordId}`;
+  const card = toQueueCard(await airtable(env, url.toString()) as AirtableRecord);
+  if (card.status !== "Waitlist" && card.status !== "Listed") throw new AirtableError("Only Waitlist or Listed rows can take a quantity merge.", 400);
+  const effect = mergeCostUpdate({ qty: card.qty || 0, costBasisUsd: card.costBasisUsd, unknownCostQty: card.unknownCostQty }, { qty: addQty, costBasisUsd: added?.costBasisUsd ?? null });
+  const fields = buildStockMergeFields({ qty: effect.qty, costBasisUsd: effect.writeCost ? effect.costBasisUsd : undefined, unknownCostQty: effect.writeUnknown ? effect.unknownCostQty : undefined });
+  const patch = async (body: Record<string, string | number>) => {
+    const [updated] = await writeRecords(env, "PATCH", [{ id: recordId, fields: body }]);
+    if (!updated) throw new AirtableError("Airtable did not return the merged row.", 502);
+    return updated;
+  };
+  try {
+    return await patch(fields);
+  } catch (error) {
+    if (error instanceof AirtableError && fields["Unknown-Cost Qty"] != null && /unknown field/i.test(error.message)) {
+      const retry = { ...fields };
+      delete retry["Unknown-Cost Qty"];
+      return patch(retry);
+    }
+    throw error;
+  }
+}
 export function matchesPrinting(card: QueueCard, draft: PrintingRef): boolean { if (effectiveGame(card.game) !== draft.game || !sameFinish(card.finish, draft.finish)) return false; if (card.status !== "Waitlist" && card.status !== "Listed") return false; if (setIdentityOf(card) !== setIdentityOf(draft)) return false; const wanted = new Set(collectorVariants(draft.collectorNumber).map((value) => value.toLowerCase())); return collectorVariants(card.collectorNumber ?? "").some((value) => wanted.has(value.toLowerCase())); }
 export function printingKey(card: Pick<QueueCard, "game" | "setNumber" | "setIdentifier" | "collectorNumber" | "finish">): string[] { const finish = readFinish(card.finish) ?? ""; return collectorVariants(card.collectorNumber ?? "").map((value) => dedupeKey(effectiveGame(card.game) ?? "", setIdentityOf(card), value, finish)); }
-export async function listOpenPrintings(env: Env, game: Game): Promise<QueueCard[]> { const formula = `AND(OR({Status}='Waitlist',{Status}='Listed'),${gameFormula(game)})`; const { records } = await listRecords(env, formula); return records.map(toQueueCard).filter((card) => cardMatchesGame(card.game, game)); }
-export function duplicatesAmong(cards: QueueCard[], draft: PrintingRef): QueueCard[] { return cards.filter((card) => matchesPrinting(card, draft)); }
+export async function listOpenPrintings(env: Env, game: Game): Promise<QueueCard[]> { const formula = `AND(OR({Status}='Waitlist',{Status}='Listed'),${gameFormula(game)})`; const records = await listOpenRecords(env, formula); return records.map(toQueueCard).filter((card) => cardMatchesGame(card.game, game)); }
+export function duplicatesAmong(cards: QueueCard[], draft: PrintingRef): QueueCard[] { return cards.filter((card) => matchesStock(card, draft)); }
 
 /** Inline edit from the queue: Waitlist rows only, Finish/Condition/Qty only. */
 export async function editCard(env: Env, recordId: string, input: EditInput): Promise<QueueCard> {

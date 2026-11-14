@@ -36,7 +36,7 @@ import { readSalesFilter, salesCsv, totalsByPlatform } from "./sales.ts";
 import { getState, listSales, setState } from "./salesdb.ts";
 import { onHand, WAITLIST_BASE_ID, type BuyListInput, type InventoryFilter, type MovementDraft, type WaitlistInput } from "./inventory.ts";
 import { buildLiveDetail, buildLiveInventory, InventoryReadError } from "./live-inventory.ts";
-import { isMissingLedger, isMissingPhase2Settings, listMovements, readInventorySettings, readThresholds, saveInventorySettings } from "./inventorydb.ts";
+import { insertMovements, isMissingLedger, isMissingPhase2Settings, listMovements, readInventorySettings, readThresholds, saveInventorySettings } from "./inventorydb.ts";
 import { applyReceiveWrites, fetchSellRequest, matchLines, planAcceptance, planReceipt, draftRedemption, splitCardList, type CatalogLine, type SellRequestView } from "./purchases.ts";
 import { purchasesAllowed } from './purchase-access.ts';
 import { PurchaseSafetyError, purchaseDatabase, requirePurchaseSafety } from './purchase-safety.ts';
@@ -78,6 +78,8 @@ import { withListableQuantity } from "./listable.ts";
 import { cronJobs, dailyEmailOn, decrementFrom, handleCardTraderEvent, ingestStarfoil, pollCardTrader, reconcileMode, runDecrements, runReconcile, salesMode, sendDailyPull, tcgplayerPull } from "./sync.ts";
 import { checklistCsv, tcgplayerCsv } from "./tcgplayer.ts";
 import { parseDraft, parseIntakeBody, type DraftCard } from "./fields.ts";
+import { bulkDuplicateChoice, draftIdentityKey, insertIntakeLot, intakeIdentityKey, intakeMovement, intakeSnapshot, planIntakeUpsert, type Sql, type UpsertMatch } from "./intake-upsert.ts";
+import { duplicateAlertEmailOn, emailDuplicateAlert, isMissingDuplicateAlerts, neonDuplicateAlerts, type DuplicateNotice } from "./duplicate-alerts.ts";
 import { MAGIC_FALLBACK_FINISHES } from "./magic-finish.ts";
 import { PREVIEW_IMAGE_HOSTS, resolvePreview, riftboundNumberKey } from "./preview.ts";
 import { parseBulk, type ParsedRow } from "./parse.ts";
@@ -193,6 +195,36 @@ app.post("/api/admin/allocations/alerts/ack", async (c) => {
   if (!tenant) return c.json({ error: "allocations_tenant_missing" }, 503);
   if (!(await neonAllocationAlerts(c.env).ack(tenant.id, key, c.var.userId))) return c.json({ error: "No open alert for that key." }, 404);
   console.log(JSON.stringify({ event: "allocation_alert_checked", key, by: c.var.userId }));
+  return c.json({ ok: true });
+});
+
+// Duplicate stock identities (an Add anyway override, or any other path that left two open rows). Email is off
+// unless DUPLICATE_ALERT_EMAIL is on. The list itself does not depend on that flag.
+app.get("/api/admin/duplicates/alerts", async (c) => {
+  const tenant = await productionAllocationDeps(c.env).tenant();
+  const email = duplicateAlertEmailOn(c.env);
+  if (!tenant) return c.json({ alerts: [], email, note: "tenant_missing" });
+  try { return c.json({ alerts: await neonDuplicateAlerts(c.env).open(tenant.id), email }); }
+  catch (error) {
+    if (isMissingDuplicateAlerts(error)) return c.json({ alerts: [], email, note: "duplicate alerts not migrated" });
+    throw error;
+  }
+});
+
+app.post("/api/admin/duplicates/alerts/ack", async (c) => {
+  const body = await readJson(c);
+  if (!body.ok) return c.json({ error: body.error }, 400);
+  const key = typeof body.value.key === "string" ? body.value.key.trim() : "";
+  if (!key || key.length > 400) return c.json({ error: "key is required." }, 400);
+  const tenant = await productionAllocationDeps(c.env).tenant();
+  if (!tenant) return c.json({ error: "tenant_missing" }, 503);
+  try {
+    if (!(await neonDuplicateAlerts(c.env).ack(tenant.id, key, c.var.userId))) return c.json({ error: "No open alert for that key." }, 404);
+  } catch (error) {
+    if (isMissingDuplicateAlerts(error)) return c.json({ error: "Duplicate alerts are not in this database yet. Apply migration 0014. Nothing was changed." }, 503);
+    throw error;
+  }
+  console.log(JSON.stringify({ event: "duplicate_alert_checked", key, by: c.var.userId }));
   return c.json({ ok: true });
 });
 
@@ -399,6 +431,64 @@ app.get("/api/queue", async (c) => {
   return c.json(result);
 });
 
+function asMatch(card: QueueCard): UpsertMatch {
+  return { id: card.id, qty: card.qty, status: card.status, costBasisUsd: card.costBasisUsd, unknownCostQty: card.unknownCostQty ?? null };
+}
+
+async function noteDuplicate(c: AppContext, notice: DuplicateNotice): Promise<void> {
+  if (!c.env.DATABASE_URL?.trim() || !notice.identityKey || notice.recordIds.length < 2) return;
+  try {
+    const saved = await neonDuplicateAlerts(c.env).record(c.var.tenant.id, notice);
+    if (saved.created || notice.source === "override") await emailDuplicateAlert(c.env, saved.alert);
+  } catch (error) {
+    if (!isMissingDuplicateAlerts(error)) console.error("duplicate alert failed", error instanceof Error ? error.message : error);
+  }
+}
+
+async function noteIntakeLedger(c: AppContext, input: {
+  recordId: string;
+  qtyBefore: number;
+  addQty: number;
+  costBasisUsd: number | null;
+  status: string | null;
+  identityKey: string | null;
+  card: DraftCard;
+  eventId: string;
+  note: string;
+}): Promise<{ lot: boolean; movement: boolean }> {
+  if (!c.env.DATABASE_URL?.trim()) return { lot: false, movement: false };
+  const now = new Date().toISOString();
+  let movement = false;
+  let lot = false;
+  try {
+    await insertMovements(c.env, [intakeMovement({
+      tenantId: c.var.tenant.id,
+      recordId: input.recordId,
+      qtyBefore: input.qtyBefore,
+      addQty: input.addQty,
+      unitCostCents: input.costBasisUsd == null ? null : Math.round(input.costBasisUsd * 100),
+      appliedBy: c.var.userId,
+      now,
+      eventId: input.eventId,
+      snapshot: intakeSnapshot(input.card, input.status, input.identityKey),
+      note: input.note,
+    })]);
+    movement = true;
+  } catch (error) {
+    if (!isMissingLedger(error)) console.error("intake movement failed", error instanceof Error ? error.message : error);
+  }
+  if (input.costBasisUsd != null) {
+    try {
+      const sql: Sql = (text, params) => db(c.env).query(text, params);
+      await insertIntakeLot(sql, { tenantId: c.var.tenant.id, recordId: input.recordId, qty: input.addQty, costBasisUsd: input.costBasisUsd, acquiredAt: now });
+      lot = true;
+    } catch (error) {
+      if (!isMissingPurchases(error)) console.error("intake lot failed", error instanceof Error ? error.message : error);
+    }
+  }
+  return { lot, movement };
+}
+
 app.post("/api/intake", async (c) => {
   const body = await readJson(c);
   if (!body.ok) return c.json({ error: body.error }, 400);
@@ -413,35 +503,56 @@ app.post("/api/intake", async (c) => {
   }
 
   const choice = parsedBody.body.onDuplicate ?? "ask";
-  if (choice !== "add") {
-    const matches = await findDuplicates(c.var.tenantEnv, draft.card);
-    if (matches.length > 0) {
-      if (choice === "ask" || (choice === "merge" && matches.length > 1 && !parsedBody.body.mergeRecordId)) {
-        return c.json(
-          {
-            error: "duplicate",
-            message: "This game, set, collector number, and finish is already Waitlist or Listed.",
-            matches,
-          },
-          409,
-        );
-      }
-      const target = parsedBody.body.mergeRecordId
-        ? matches.find((match) => match.id === parsedBody.body.mergeRecordId)
-        : matches[0];
-      if (!target) return c.json({ error: "That row is not a matching Waitlist or Listed card." }, 400);
-      const card = await mergeQty(c.var.tenantEnv, target.id, draft.card.qty);
-      audit(c, "merge", [card]);
-      backgroundEnrich(c, card.id);
-      return c.json({ card, merged: true });
+  const found = await findDuplicates(c.var.tenantEnv, draft.card);
+  const plan = planIntakeUpsert({
+    card: draft.card,
+    matches: found.map(asMatch),
+    choice,
+    confirmOverride: parsedBody.body.confirmOverride === true,
+    mergeRecordId: parsedBody.body.mergeRecordId,
+  });
+  if (plan.action === "reject") return c.json({ error: plan.error }, 400);
+  if (plan.action === "ask") {
+    if (plan.observedDuplicate && plan.identityKey) {
+      await noteDuplicate(c, { identityKey: plan.identityKey, recordIds: found.map((match) => match.id), source: "observed", note: "Quick Add found more than one row for this stock identity." });
     }
+    return c.json({ error: "duplicate", message: "This game, set, collector number, finish, condition, and language is already Waitlist or Listed.", matches: found }, 409);
+  }
+  if (plan.action === "skip") return c.json({ error: "That card is already Waitlist or Listed." }, 409);
+  const costBasisUsd = draft.card.costBasisUsd ?? null;
+  if (plan.action === "merge") {
+    const card = await mergeQty(c.var.tenantEnv, plan.target.id, draft.card.qty, { costBasisUsd });
+    const ledger = await noteIntakeLedger(c, {
+      recordId: card.id, qtyBefore: Math.max(0, card.qty - draft.card.qty), addQty: draft.card.qty, costBasisUsd,
+      status: card.status, identityKey: plan.identityKey, card: draft.card, eventId: crypto.randomUUID(), note: "Intake merge.",
+    });
+    if (plan.observedDuplicate && plan.identityKey) {
+      await noteDuplicate(c, { identityKey: plan.identityKey, recordIds: found.map((match) => match.id), source: "observed", note: "Quick Add merged into one of several rows for this stock identity." });
+    }
+    audit(c, "merge", [card]);
+    backgroundEnrich(c, card.id);
+    return c.json({ card, merged: true, costLot: ledger.lot });
   }
 
   const [card] = await createCards(c.var.tenantEnv, [draft.card]);
   if (!card) return c.json({ error: "Airtable did not return the new row." }, 502);
+  const again = await findDuplicates(c.var.tenantEnv, draft.card);
+  const ledger = await noteIntakeLedger(c, {
+    recordId: card.id, qtyBefore: 0, addQty: draft.card.qty, costBasisUsd, status: card.status,
+    identityKey: plan.identityKey, card: draft.card, eventId: crypto.randomUUID(), note: plan.recordOverride ? "Intake add anyway." : "Intake add.",
+  });
+  if (plan.identityKey && (plan.recordOverride || again.length > 1)) {
+    const recordIds = [...new Set([...plan.matchedIds, ...again.map((match) => match.id), card.id])];
+    await noteDuplicate(c, {
+      identityKey: plan.identityKey,
+      recordIds,
+      source: plan.recordOverride ? "override" : "observed",
+      note: plan.recordOverride ? "Add anyway created a second row for this stock identity." : "A second row for this stock identity appeared while adding.",
+    });
+  }
   audit(c, "create", [card]);
   backgroundEnrich(c, card.id);
-  return c.json({ card, merged: false }, 201);
+  return c.json({ card, merged: false, duplicate: plan.recordOverride || again.length > 1, costLot: ledger.lot }, 201);
 });
 
 app.post("/api/intake/bulk", async (c) => {
@@ -451,10 +562,9 @@ app.post("/api/intake/bulk", async (c) => {
   if (typeof text !== "string") return c.json({ error: "Paste the cards as text." }, 400);
   if (text.length > 20_000) return c.json({ error: "That paste is too long." }, 400);
   const mode = body.value.mode === "commit" ? "commit" : "preview";
-  const onDuplicate = body.value.onDuplicate;
-  if (mode === "commit" && onDuplicate !== "skip" && onDuplicate !== "merge" && onDuplicate !== "add") {
-    return c.json({ error: "Choose skip, merge, or add for duplicates." }, 400);
-  }
+  const decided = bulkDuplicateChoice(body.value.onDuplicate, body.value.confirmOverride === true);
+  if (mode === "commit" && !decided.ok) return c.json({ error: decided.error }, 400);
+  const choice = decided.ok ? decided.choice : "merge";
 
   const game = readGame(typeof body.value.game === "string" ? body.value.game : "Lorcana");
   if (!game) return c.json({ error: gameError() }, 400);
@@ -484,6 +594,8 @@ app.post("/api/intake/bulk", async (c) => {
   const merged: QueueCard[] = [];
   const skipped: { line: number; raw: string; reason: string }[] = [];
   const errors: { line: number; raw: string; error: string }[] = [];
+  const notices: DuplicateNotice[] = [];
+  const overrideLines = new Map<number, string[]>();
   let pending: { line: number; raw: string; card: DraftCard }[] = [];
   let writeFailed = false;
 
@@ -493,13 +605,27 @@ app.post("/api/intake/bulk", async (c) => {
     pending = [];
     try {
       const cards = await createCards(c.var.tenantEnv, batch.map((item) => item.card));
-      cards.forEach((card) => {
-        created.push(card);
-        open.push(card);
-      });
       if (cards.length !== batch.length) {
+        cards.forEach((card) => { created.push(card); open.push(card); });
         writeFailed = true;
         errors.push({ line: batch[0]?.line ?? 0, raw: batch[0]?.raw ?? "", error: "Airtable returned an unexpected number of rows. Stopped the rest of the paste." });
+        return;
+      }
+      for (let index = 0; index < cards.length; index++) {
+        const card = cards[index];
+        const item = batch[index];
+        if (!card || !item) continue;
+        created.push(card);
+        open.push(card);
+        const matched = overrideLines.get(item.line) ?? [];
+        const identityKey = draftIdentityKey(item.card);
+        await noteIntakeLedger(c, {
+          recordId: card.id, qtyBefore: 0, addQty: item.card.qty, costBasisUsd: item.card.costBasisUsd ?? null,
+          status: card.status, identityKey, card: item.card, eventId: `bulk:${item.line}:${card.id}`, note: "Intake bulk add.",
+        });
+        if (matched.length && identityKey) {
+          notices.push({ identityKey, recordIds: [...matched, card.id], source: "override", note: `Bulk line ${item.line} was added anyway beside ${matched.join(", ")}.` });
+        }
       }
     } catch (error) {
       writeFailed = true;
@@ -518,12 +644,6 @@ app.post("/api/intake/bulk", async (c) => {
       errors.push({ line: row.line, raw: row.raw, error: row.error ?? "Could not read this line." });
       continue;
     }
-    if (onDuplicate === "add") {
-      pending.push({ line: row.line, raw: row.raw, card: row.card });
-      if (pending.length === 10) await flush();
-      continue;
-    }
-
     const stagedHit = pending.some((item) => duplicatesAmong([draftAsCard(item.card, `pending-${item.line}`)], row.card!).length > 0);
     if (stagedHit) await flush();
     if (writeFailed) {
@@ -531,38 +651,51 @@ app.post("/api/intake/bulk", async (c) => {
       continue;
     }
     const matches = duplicatesAmong(open, row.card);
-    if (matches.length === 0) {
-      pending.push({ line: row.line, raw: row.raw, card: row.card });
-      if (pending.length === 10) await flush();
+    const plan = planIntakeUpsert({ card: row.card, matches: matches.map(asMatch), choice, confirmOverride: true });
+    if (plan.action === "reject") {
+      errors.push({ line: row.line, raw: row.raw, error: plan.error });
       continue;
     }
-    if (onDuplicate === "skip") {
+    if (plan.action === "skip") {
       skipped.push({ line: row.line, raw: row.raw, reason: `Already ${matches.map((match) => match.status).join(" / ")}.` });
       continue;
     }
-    if (matches.length > 1) {
-      errors.push({
-        line: row.line,
-        raw: row.raw,
-        error: "Several matching rows. Merge this card from Quick Add so you can pick the row.",
-      });
+    if (plan.action === "ask") {
+      errors.push({ line: row.line, raw: row.raw, error: "Several matching rows. Merge this card from Quick Add so you can pick the row." });
+      if (plan.observedDuplicate && plan.identityKey) {
+        notices.push({ identityKey: plan.identityKey, recordIds: matches.map((match) => match.id), source: "observed", note: `Bulk line ${row.line} matches more than one stock row.` });
+      }
       continue;
     }
-    const target = matches[0];
-    if (!target) continue;
-    try {
-      const updated = await mergeQty(c.var.tenantEnv, target.id, row.card.qty);
-      const index = open.findIndex((card) => card.id === updated.id);
-      if (index >= 0) open[index] = updated;
-      else open.push(updated);
-      merged.push(updated);
-    } catch (error) {
-      writeFailed = true;
-      const message = error instanceof AirtableError ? error.message : "Could not merge that row.";
-      errors.push({ line: row.line, raw: row.raw, error: message });
+    if (plan.action === "merge") {
+      const target = matches.find((match) => match.id === plan.target.id) ?? matches[0];
+      if (!target) continue;
+      try {
+        const updated = await mergeQty(c.var.tenantEnv, target.id, row.card.qty, { costBasisUsd: row.card.costBasisUsd ?? null });
+        if (updated.language == null) updated.language = target.language;
+        if (updated.unknownCostQty == null) updated.unknownCostQty = target.unknownCostQty;
+        const index = open.findIndex((card) => card.id === updated.id);
+        if (index >= 0) open[index] = updated;
+        else open.push(updated);
+        merged.push(updated);
+        await noteIntakeLedger(c, {
+          recordId: updated.id, qtyBefore: Math.max(0, updated.qty - row.card.qty), addQty: row.card.qty,
+          costBasisUsd: row.card.costBasisUsd ?? null, status: updated.status, identityKey: plan.identityKey,
+          card: row.card, eventId: `bulk:${row.line}:${updated.id}`, note: "Intake bulk merge.",
+        });
+      } catch (error) {
+        writeFailed = true;
+        const message = error instanceof AirtableError ? error.message : "Could not merge that row.";
+        errors.push({ line: row.line, raw: row.raw, error: message });
+      }
+      continue;
     }
+    if (plan.recordOverride) overrideLines.set(row.line, plan.matchedIds);
+    pending.push({ line: row.line, raw: row.raw, card: row.card });
+    if (pending.length === 10) await flush();
   }
   await flush();
+  for (const notice of notices) await noteDuplicate(c, notice);
   audit(c, "create", created);
   audit(c, "merge", merged);
   if (created.length || merged.length) {
@@ -1326,6 +1459,16 @@ app.post("/api/purchases/receive", async (c) => {
       if (qty != null) line.onHand = qty;
     }
     const balance = await customerBalance(c.env, c.var.tenant.id, sellRequestId);
+    const games = [...new Set(purchase.lines.map((line) => effectiveGame(line.game)).filter((game): game is Game => game != null))];
+    const identityStock = [];
+    for (const game of games) {
+      const open = await listOpenPrintings(c.var.tenantEnv, game);
+      for (const card of open) {
+        const identityKey = intakeIdentityKey(card);
+        if (!identityKey) continue;
+        identityStock.push({ identityKey, id: card.id, qty: card.qty, costBasisUsd: card.costBasisUsd, unknownCostQty: card.unknownCostQty ?? null, status: card.status });
+      }
+    }
     const planned = planReceipt({
       purchase,
       receivedOn,
@@ -1333,8 +1476,12 @@ app.post("/api/purchases/receive", async (c) => {
       confirms,
       balanceCents: balance,
       mintRecordId: (lineNo) => `recPendCreate${String(lineNo).padStart(4, "0")}`,
+      identityStock,
     });
-    if (!planned.ok) return c.json({ error: planned.error }, 400);
+    if (!planned.ok) {
+      if (planned.duplicate) await noteDuplicate(c, { ...planned.duplicate, source: "observed", note: planned.error });
+      return c.json({ error: planned.error }, 400);
+    }
     const stockWrites = planned.plan.writes.filter((write) => write.kind !== "create_purchase");
     const stockApplied = await applyReceiveWrites({ token, writes: stockWrites });
     for (const made of stockApplied.stock) {

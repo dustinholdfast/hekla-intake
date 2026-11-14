@@ -62,6 +62,26 @@
       </div>
     </section>
 
+    <section class="panel" id="duplicate-alerts-panel">
+      <div class="panel-head">
+        <h2>Duplicate stock</h2>
+        <div class="queue-tools">
+          <button id="dup-alerts-refresh" class="ghost tiny" type="button">Refresh</button>
+        </div>
+      </div>
+      <p class="hint">The same game, set, collector number, finish, condition, and language on more than one Waitlist or Listed row. Blank language counts as English. An Add anyway override records one. So does any other path that leaves a second row. Check the rows, then mark it checked.</p>
+      <p id="dup-alerts-meta" class="hint"></p>
+      <p id="dup-alerts-error" class="error" role="alert"></p>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr><th>When</th><th>Identity</th><th>Rows</th><th>Found by</th><th>Email</th><th>Note</th><th></th></tr>
+          </thead>
+          <tbody id="dup-alerts-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <h2>Accounts</h2>
