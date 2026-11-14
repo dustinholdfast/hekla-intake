@@ -29,6 +29,15 @@ function parseQtyToken(token: string): number | null {
   return qty;
 }
 
+/** A cost needs a decimal (2.50) so a whole number stays the quantity. Blank means no cost. */
+function parseCostToken(token: string): number | null {
+  const match = /^\$?(\d+)\.(\d{1,2})$/.exec(token.trim());
+  if (!match?.[1]) return null;
+  const cost = Number(`${match[1]}.${(match[2] ?? "").padEnd(2, "0")}`);
+  if (!Number.isFinite(cost) || cost < 0 || cost > 100_000) return null;
+  return Math.round(cost * 100) / 100;
+}
+
 /** One card per line. Blank lines and # comments are dropped. Game comes from the sticky picker. */
 export function parseBulk(text: string, game: Game = "Lorcana"): ParsedRow[] {
   const lines = text.split(/\r?\n/);
@@ -44,7 +53,7 @@ export function parseBulk(text: string, game: Game = "Lorcana"): ParsedRow[] {
       rows.push({
         line,
         raw,
-        error: "Need set, collector number, finish, and condition. Quantity and name are optional.",
+        error: "Need set, collector number, finish, and condition. Quantity, cost, and name are optional.",
       });
       return;
     }
@@ -93,6 +102,15 @@ export function parseBulk(text: string, game: Game = "Lorcana"): ParsedRow[] {
       }
     }
 
+    let cost: number | undefined;
+    if (nameTokens.length > 0) {
+      const money = parseCostToken(nameTokens[0] ?? "");
+      if (money !== null) {
+        cost = money;
+        nameTokens = nameTokens.slice(1);
+      }
+    }
+
     const nameJoiner = delimiter === "," ? ", " : " ";
     const cardName = nameTokens.join(nameJoiner).trim();
     let card: DraftCard;
@@ -109,6 +127,7 @@ export function parseBulk(text: string, game: Game = "Lorcana"): ParsedRow[] {
       }
       card.cardName = cardName;
     }
+    if (cost !== undefined) card.costBasisUsd = cost;
 
     // Prove the row can be written with the create whitelist before preview.
     buildCreateFields(card);

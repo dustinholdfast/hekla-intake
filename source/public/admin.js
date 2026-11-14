@@ -13,6 +13,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("login-signout").addEventListener("click", signOut);
   $("refresh").addEventListener("click", loadTenants);
   $("alerts-refresh").addEventListener("click", loadAlerts);
+  $("dup-alerts-refresh").addEventListener("click", loadDuplicateAlerts);
+  $("dup-alerts-body").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-dup-ack]");
+    if (button) ackDuplicate(button.dataset.dupAck, button);
+  });
   $("alerts-body").addEventListener("click", (event) => {
     const button = event.target.closest("[data-ack]");
     if (button) ackAlert(button.dataset.ack, button);
@@ -48,6 +53,7 @@ async function boot() {
   if (await loadTenants()) {
     show("admin");
     loadAlerts();
+    loadDuplicateAlerts();
   }
 }
 
@@ -228,6 +234,57 @@ function alertRow(alert) {
     action,
   );
   return tr;
+}
+
+async function loadDuplicateAlerts() {
+  $("dup-alerts-error").textContent = "";
+  const { response, data } = await api("/api/admin/duplicates/alerts");
+  if (!response.ok) {
+    $("dup-alerts-error").textContent = data.error || "Could not load duplicate alerts.";
+    return;
+  }
+  const alerts = data.alerts || [];
+  const email = data.email ? "Email is on." : "Email is off (DUPLICATE_ALERT_EMAIL). Alerts stay on this page.";
+  const note = data.note ? ` ${data.note}.` : "";
+  $("dup-alerts-meta").textContent = `${alerts.length ? `${alerts.length} open` : "No open alerts."} ${email}${note}`;
+  $("dup-alerts-body").replaceChildren(...alerts.map(duplicateRow));
+}
+
+function duplicateRow(alert) {
+  const tr = document.createElement("tr");
+  const cell = (text) => {
+    const td = document.createElement("td");
+    td.textContent = text;
+    return td;
+  };
+  const action = document.createElement("td");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost tiny";
+  button.dataset.dupAck = alert.identityKey;
+  button.textContent = "Mark checked";
+  action.append(button);
+  tr.append(
+    cell(new Date(alert.createdAt).toLocaleString()),
+    cell(alert.identityKey),
+    cell((alert.recordIds || []).join(", ")),
+    cell(alert.source === "override" ? "Add anyway" : "Found"),
+    cell(alert.emailSentAt ? new Date(alert.emailSentAt).toLocaleString() : "not sent"),
+    cell(alert.note || ""),
+    action,
+  );
+  return tr;
+}
+
+async function ackDuplicate(key, button) {
+  button.disabled = true;
+  const { response, data } = await api("/api/admin/duplicates/alerts/ack", { method: "POST", body: JSON.stringify({ key }) });
+  if (!response.ok) {
+    button.disabled = false;
+    $("dup-alerts-error").textContent = data.error || "Could not mark it checked.";
+    return;
+  }
+  loadDuplicateAlerts();
 }
 
 async function ackAlert(key, button) {

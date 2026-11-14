@@ -135,7 +135,11 @@ textarea { resize: vertical; }
 .hekla-actions { justify-content: flex-end; }
 .defaults {
   display: grid;
-  grid-template-columns: 2fr 2fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-areas:
+    "set set"
+    "finish condition"
+    "qty cost";
   gap: 0.45rem;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -145,7 +149,68 @@ textarea { resize: vertical; }
 .defaults legend { color: var(--muted); font-size: 0.75rem; padding: 0 0.3rem; }
 .finish-hint:not([hidden]) { display: block; margin: 0.15rem 0 0.55rem; }
 .defaults label { display: grid; gap: 0.25rem; color: var(--muted); font-size: 0.72rem; }
-.defaults select, .defaults input { padding: 0.55rem 0.4rem; }
+.defaults select, .defaults input { padding: 0 0.4rem; height: 44px; min-height: 44px; box-sizing: border-box; }
+.defaults .hint { font-size: 0.68rem; line-height: 1.3; }
+.money-field { position: relative; display: block; }
+.money-prefix {
+  position: absolute;
+  left: 0.45rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, monospace);
+  pointer-events: none;
+}
+.money-field input { height: 44px; min-height: 44px; padding: 0 0.4rem 0 1.25rem; box-sizing: border-box; }
+#set-number-field, #set-identifier-field { grid-area: set; }
+#finish-field { grid-area: finish; }
+#condition-field { grid-area: condition; }
+#qty-field { grid-area: qty; }
+#cost-field { grid-area: cost; }
+.amber-box {
+  color: #f0c987;
+  background: rgba(232, 185, 106, 0.08);
+  border: 1px solid rgba(232, 185, 106, 0.35);
+  border-radius: 10px;
+  padding: 0.75rem 0.85rem;
+}
+.amber-box p { margin: 0.35rem 0 0; color: #f0c987; }
+.amber-box p:first-child { margin-top: 0; }
+#match-note { margin-top: 0.85rem; }
+#duplicate-alerts-panel,
+#duplicate-alerts-panel h2,
+#duplicate-alerts-panel .hint,
+#duplicate-alerts-panel th,
+#duplicate-alerts-panel td { color: #f0c987; }
+.primary.gold {
+  background: linear-gradient(180deg, #f3d27a, #d7a433);
+  color: #1a1408;
+}
+.primary.gold:hover:not(:disabled) { background: #e8b84a; }
+.link-quiet {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  min-height: 0;
+  padding: 0.15rem 0;
+  font-size: 0.85rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.bulk-summary { margin: 0.7rem 0 0.2rem; font-weight: 600; color: var(--text); }
+.stock-tag {
+  display: inline-block;
+  margin-right: 0.35rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(232, 185, 106, 0.16);
+  color: #f0c987;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+@media (max-width: 520px) {
+  .defaults { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
 details { margin-top: 0.7rem; }
 summary { cursor: pointer; color: var(--ice); min-height: 44px; display: flex; align-items: center; }
@@ -217,7 +282,13 @@ dialog::backdrop { background: rgba(5, 8, 14, 0.72); }
   td::before { content: attr(data-label); color: var(--muted); font-size: 0.72rem; padding-top: 0.15rem; }
   td.empty { display: block; }
   td.empty::before { content: none; }
+  #bulk-body td:not(.bulk-line) { display: none; }
+  #bulk-body td.bulk-line { display: block; padding: 0.55rem 0.7rem; }
+  #bulk-body td.bulk-line::before { content: none; }
+  .bulk-line-id { font-family: var(--mono); font-size: 0.84rem; color: var(--text); }
+  .bulk-line-check { margin-top: 0.28rem; color: var(--muted); font-size: 0.84rem; }
 }
+.bulk-line { display: none; }
 
 /* ===== Hekla brand sheet (Oct 2026) ===== */
 :root {

@@ -18,6 +18,8 @@ interface Env {
   ALLOCATIONS_ENABLED?: string;
   /** "on" / "true" / "1" emails each ct_retry_unverifiable alert through the tenant's Resend connection. Default off. */
   ALLOCATION_ALERT_EMAIL?: string;
+  /** "on" / "true" / "1" emails each new duplicate stock identity through the tenant's Resend connection. Default off. The /admin list does not depend on it. */
+  DUPLICATE_ALERT_EMAIL?: string;
   /** wrangler secret. Signs X-Alloc-Signature. Never a [vars] entry. */
   ALLOCATION_HMAC_SECRET?: string;
   /** Airtable column for manual holds. Default "Reserved Qty". */

@@ -12,6 +12,8 @@ const state = {
   bulkPreview: null,
   heklaAction: null,
   submitting: false,
+  matches: null,
+  override: null,
 };
 
 let queueGeneration = 0;
@@ -26,8 +28,8 @@ const views = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
-  $("logout").addEventListener("click", signOut);
-  $("login-signout").addEventListener("click", signOut);
+  $("logout").addEventListener("click", () => { if (document.documentElement.dataset.preview === "1") return; signOut(); });
+  $("login-signout").addEventListener("click", () => { if (document.documentElement.dataset.preview === "1") return; signOut(); });
   $("add-form").addEventListener("submit", onAdd);
   $("add-form").addEventListener("change", saveDefaults);
   $("game").addEventListener("change", (event) => selectGame(event.target.value));
@@ -53,9 +55,16 @@ document.addEventListener("DOMContentLoaded", () => {
     state.bulkPreview = null;
     $("bulk-commit").disabled = true;
   });
-  $("dupe-merge").addEventListener("click", () => resolveDupe("merge"));
-  $("dupe-add").addEventListener("click", () => resolveDupe("add"));
-  $("dupe-cancel").addEventListener("click", () => $("dupe-dialog").close());
+  $("match-override").addEventListener("click", () => openOverride("card"));
+  $("override-confirm").addEventListener("click", confirmOverride);
+  $("override-cancel").addEventListener("click", () => $("override-dialog").close());
+  $("qty").addEventListener("input", () => { if (state.matches) renderMatch(state.matches); });
+  for (const id of ["collector", "finish", "condition", "set", "set-identifier", "game"]) {
+    $(id).addEventListener("change", clearMatch);
+  }
+  document.querySelectorAll("input[name=onDuplicate]").forEach((radio) => {
+    radio.addEventListener("change", () => { if (state.bulkPreview) renderBulk(state.bulkPreview); });
+  });
   $("ask-process").addEventListener("click", runAutoSort);
   $("rerank-listed").addEventListener("click", runRerankListed);
   $("rescan").addEventListener("click", runRescan);
@@ -97,6 +106,22 @@ function showOrganizations(clerk, message) {
 }
 
 async function boot() {
+  if (document.documentElement.dataset.preview === "1") {
+    const { response, data } = await api("/api/session");
+    if (!response.ok) {
+      show("login");
+      $("login-error").textContent = data.error || "Preview session failed.";
+      return;
+    }
+    state.session = data;
+    $("admin-link").hidden = true;
+    buildForm(data);
+    applyDefaults();
+    markTabs();
+    show("app");
+    await refreshAll();
+    return;
+  }
   let clerk;
   try {
     clerk = await loadClerk();
@@ -546,17 +571,17 @@ function updateBulkHelp() {
   const sample = $("bulk-sample");
   if (!help || !sample) return;
   if (game === "Lorcana") {
-    help.textContent = "One Lorcana card per line. First token is the set number, then collector number, finish (Normal, Foil, or Enchanted), condition, optional quantity, and an optional name. Spaces, commas, or tabs. Every line uses Lorcana.";
-    sample.textContent = "8 042 Foil NM 1\n8,156,Normal,NM,2,Elsa - Snow Queen\n13\t15\tFoil\tLP\t1\tTiana";
+    help.textContent = "One Lorcana card per line. First token is the set number, then collector number, finish (Normal, Foil, or Enchanted), condition, optional quantity, an optional cost (2.50), and an optional name. A blank cost is left unknown. Spaces, commas, or tabs. Every line uses Lorcana.";
+    sample.textContent = "8 042 Foil NM 1 2.50\n8,156,Normal,NM,2,1.25,Elsa - Snow Queen\n13\t15\tFoil\tLP\t1\tTiana";
     return;
   }
   if (game === "Magic: The Gathering") {
-    help.textContent = "One Magic card per line. First token is the set code, then collector number, finish, condition, optional quantity, and an optional name. Finish is Normal, Foil, or that printing's CardTrader treatment (Borderless, Extended Art, Showcase, Etched). Use commas or tabs when the finish has spaces. Every line uses Magic.";
+    help.textContent = "One Magic card per line. First token is the set code, then collector number, finish, condition, optional quantity, an optional cost (2.50), and an optional name. A blank cost is left unknown. Finish is Normal, Foil, or that printing's CardTrader treatment (Borderless, Extended Art, Showcase, Etched). Use commas or tabs when the finish has spaces. Every line uses Magic.";
     sample.textContent = bulkSample(game);
     return;
   }
   const finishes = finishesFor(game).join(", ");
-  help.textContent = `One ${game} card per line. First token is the set identifier, then collector number, finish (${finishes}), condition, optional quantity, and an optional name. Use commas or tabs when the set identifier has spaces. Every line uses ${game}.`;
+  help.textContent = `One ${game} card per line. First token is the set identifier, then collector number, finish (${finishes}), condition, optional quantity, an optional cost (2.50), and an optional name. A blank cost is left unknown. Use commas or tabs when the set identifier has spaces. Every line uses ${game}.`;
   sample.textContent = bulkSample(game);
 }
 
@@ -637,8 +662,12 @@ async function onAdd(event) {
     }
     saveDefaults();
   }
-  const payload = cardPayload({ onDuplicate: "ask" });
-  await submitCard(payload);
+  if (state.matches?.length) {
+    const selected = document.querySelector("input[name=merge-target]:checked");
+    await submitCard(cardPayload({ onDuplicate: "merge", mergeRecordId: selected ? selected.value : state.matches[0].id }));
+    return;
+  }
+  await submitCard(cardPayload({ onDuplicate: "ask" }));
 }
 
 async function submitCard(payload) {
@@ -651,7 +680,7 @@ async function submitCard(payload) {
     });
     if (response.status === 409 && data.error === "duplicate") {
       state.pending = payload;
-      openDupe(data.matches || []);
+      renderMatch(data.matches || []);
       return;
     }
     if (!response.ok) {
@@ -659,6 +688,7 @@ async function submitCard(payload) {
       return;
     }
     state.pending = null;
+    clearMatch();
     const name = data.card?.name || data.card?.collectorNumber || "Card";
     $("form-flash").textContent = data.merged
       ? `Merged qty onto ${name}. Still not listed.`
@@ -685,41 +715,85 @@ function clearEntry() {
   $("notes").value = "";
 }
 
-function openDupe(matches) {
-  const list = $("dupe-list");
-  list.replaceChildren();
-  matches.forEach((match, index) => {
-    const label = document.createElement("label");
-    const radio = document.createElement("input");
-    radio.type = "radio";
-    radio.name = "merge-target";
-    radio.value = match.id;
-    radio.checked = index === 0;
-    const text = document.createElement("span");
-    const title = document.createElement("strong");
-    title.textContent = match.name || "Unnamed card";
-    const detail = document.createElement("span");
-    detail.className = "sub";
-    const setLabel = match.game && match.game !== "Lorcana" ? (match.setIdentifier || "?") : (match.setNumber || "?");
-    detail.textContent = `${match.game || "Card"} · ${setLabel} · #${match.collectorNumber || "?"} · ${match.finish || "?"} · ${match.condition || "?"} · qty ${match.qty} · ${match.status}`;
-    text.append(title, detail);
-    label.append(radio, text);
-    list.append(label);
-  });
-  $("dupe-listed").hidden = !matches.some((match) => match.status === "Listed");
-  $("dupe-dialog").showModal();
+function stockLanguage(value) {
+  const text = (value || "").trim();
+  const lower = text.toLowerCase();
+  if (!text || lower === "en" || lower === "english") return "English";
+  return text;
 }
 
-async function resolveDupe(choice) {
-  const payload = state.pending;
-  if (!payload) return;
+function selectedMatch() {
+  const matches = state.matches || [];
   const selected = document.querySelector("input[name=merge-target]:checked");
-  $("dupe-dialog").close();
-  if (choice === "merge") {
-    await submitCard({ ...payload, onDuplicate: "merge", mergeRecordId: selected ? selected.value : undefined });
+  return matches.find((match) => match.id === selected?.value) || matches[0] || null;
+}
+
+function clearMatch() {
+  state.matches = null;
+  const note = $("match-note");
+  if (note) note.hidden = true;
+  const button = $("add-button");
+  if (button) {
+    button.textContent = "Add to waitlist";
+    button.className = "primary";
+  }
+  const link = $("match-override");
+  if (link) link.hidden = true;
+}
+
+function renderMatch(matches) {
+  const previous = document.querySelector("input[name=merge-target]:checked")?.value;
+  state.matches = matches;
+  const note = $("match-note");
+  const list = $("match-choices");
+  list.replaceChildren();
+  if (matches.length > 1) {
+    matches.forEach((match, index) => {
+      const label = document.createElement("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "merge-target";
+      radio.value = match.id;
+      radio.checked = previous ? match.id === previous : index === 0;
+      radio.addEventListener("change", () => renderMatch(matches));
+      const text = document.createElement("span");
+      text.textContent = `${match.name || "Unnamed card"} · qty ${match.qty} · ${match.status}`;
+      label.append(radio, text);
+      list.append(label);
+    });
+  }
+  const match = selectedMatch();
+  const adding = Number($("qty").value) || 1;
+  const have = match ? match.qty : 0;
+  $("match-copy").textContent = match
+    ? `Already in stock: ${have} · ${match.condition || "NM"} · ${stockLanguage(match.language)}. Adding ${adding} brings it to ${have + adding}.`
+    : "";
+  $("match-listed").hidden = !matches.some((item) => item.status === "Listed");
+  note.hidden = false;
+  const button = $("add-button");
+  button.textContent = "Add to existing";
+  button.className = "primary gold";
+  $("match-override").hidden = false;
+}
+
+function openOverride(kind) {
+  state.override = kind;
+  $("override-copy").textContent = kind === "bulk"
+    ? "Add anyway creates a second row for each matched line. Those duplicates are recorded and the owner is alerted."
+    : "This creates a second row for the same card. That duplicate is recorded and the owner is alerted. It does not list the card.";
+  $("override-dialog").showModal();
+}
+
+async function confirmOverride() {
+  const kind = state.override;
+  $("override-dialog").close();
+  if (kind === "bulk") {
+    await commitBulk({ confirmed: true });
     return;
   }
-  await submitCard({ ...payload, onDuplicate: "add" });
+  const payload = state.pending;
+  if (!payload) return;
+  await submitCard({ ...payload, onDuplicate: "add", confirmOverride: true });
 }
 
 async function refreshAll() {
@@ -1363,6 +1437,59 @@ async function previewBulk() {
   renderBulk(data);
 }
 
+function bulkPolicy() {
+  return document.querySelector("input[name=onDuplicate]:checked")?.value || "merge";
+}
+
+function bulkTally(rows) {
+  const policy = bulkPolicy();
+  let fresh = 0;
+  let merge = 0;
+  let forced = 0;
+  let skipped = 0;
+  for (const row of rows || []) {
+    if (row.error || !row.card) continue;
+    const matched = (row.matches || []).length > 0 || (row.alsoInPaste || []).length > 0;
+    if (!matched) fresh += 1;
+    else if (policy === "add") forced += 1;
+    else if (policy === "merge") merge += 1;
+    else skipped += 1;
+  }
+  return { fresh, merge, forced, skipped };
+}
+
+function stockTag(matched) {
+  if (!matched) return null;
+  const policy = bulkPolicy();
+  if (policy === "add") return "New row";
+  if (policy === "skip") return "Skip";
+  return "Add to existing";
+}
+
+function bulkCommitLabel(tally, valid) {
+  if (!valid) return "Add these to waitlist";
+  const parts = [];
+  if (tally.fresh) parts.push(`Add ${tally.fresh}`);
+  if (tally.merge) parts.push(parts.length ? `merge ${tally.merge}` : `Merge ${tally.merge}`);
+  if (tally.forced) parts.push(parts.length ? `force ${tally.forced}` : `Force ${tally.forced}`);
+  if (!parts.length && tally.skipped) return `Skip ${tally.skipped}`;
+  return parts.join(" · ") || "Add these to waitlist";
+}
+
+function bulkCompact(tr, identity, detail) {
+  const td = document.createElement("td");
+  td.className = "bulk-line";
+  const id = document.createElement("div");
+  id.className = "bulk-line-id";
+  id.textContent = identity;
+  const check = document.createElement("div");
+  check.className = "bulk-line-check";
+  if (typeof detail === "string") check.textContent = detail;
+  else check.append(detail);
+  td.append(id, check);
+  tr.append(td);
+}
+
 function renderBulk(data) {
   const body = $("bulk-body");
   body.replaceChildren();
@@ -1371,16 +1498,26 @@ function renderBulk(data) {
   for (const row of data.rows || []) {
     const tr = document.createElement("tr");
     if (row.error) {
-      tr.append(cell("Line", String(row.line)), cell("Set", "—"), cell("#", "—"), cell("Finish", "—"), cell("Cond", "—"), cell("Qty", "—"), cell("Name", "—"), cell("Check", row.error));
+      tr.append(cell("Line", String(row.line)), cell("Set", "—"), cell("#", "—"), cell("Finish", "—"), cell("Cond", "—"), cell("Qty", "—"), cell("Cost", "—"), cell("Name", "—"), cell("Check", row.error));
+      bulkCompact(tr, String(row.line), row.error);
     } else {
       valid += 1;
       const matches = row.matches || [];
       const paste = row.alsoInPaste || [];
-      if (matches.length || paste.length) dupes += 1;
-      const check = [
+      const matched = matches.length > 0 || paste.length > 0;
+      if (matched) dupes += 1;
+      const check = document.createElement("span");
+      const tag = stockTag(matched);
+      if (tag) {
+        const pill = document.createElement("span");
+        pill.className = "stock-tag";
+        pill.textContent = tag;
+        check.append(pill);
+      }
+      check.append(document.createTextNode([
         ...matches.map((match) => `${match.status} qty ${match.qty}`),
         ...paste.map((line) => `also line ${line}`),
-      ].join(", ") || "Ready";
+      ].join(", ") || "Ready"));
       tr.append(
         cell("Line", String(row.line)),
         cell("Set", row.card.game === "Lorcana" ? row.card.setNumber : (row.card.setIdentifier || "—")),
@@ -1388,34 +1525,56 @@ function renderBulk(data) {
         cell("Finish", row.card.finish),
         cell("Cond", row.card.condition),
         cell("Qty", String(row.card.qty)),
+        cell("Cost", row.card.costBasisUsd == null ? "—" : String(row.card.costBasisUsd)),
         cell("Name", row.card.cardName || "—"),
-        cell("Check", check),
+        cell("Check", ""),
       );
+      tr.lastChild.replaceChildren(check);
+      const detail = document.createElement("span");
+      const name = row.card.cardName || "";
+      if (name) detail.append(document.createTextNode(`${name} · `));
+      if (tag) {
+        const pill = document.createElement("span");
+        pill.className = "stock-tag";
+        pill.textContent = tag;
+        detail.append(pill, document.createTextNode(" · "));
+      }
+      const note = [
+        ...matches.map((match) => `${match.status} qty ${match.qty}`),
+        ...paste.map((line) => `also line ${line}`),
+      ].join(", ") || "Ready";
+      detail.append(document.createTextNode(note));
+      bulkCompact(tr, `${row.line} · ${row.card.collectorNumber} · ${row.card.finish} · ${row.card.condition} · ×${row.card.qty}`, detail);
     }
     body.append(tr);
   }
+  const tally = bulkTally(data.rows);
+  const summary = $("bulk-summary");
+  summary.hidden = valid === 0;
+  summary.textContent = `${tally.fresh} new · ${tally.merge} add to existing · ${tally.forced} new rows forced`;
   $("dup-policy").hidden = dupes === 0;
+  const mergeChoice = document.querySelector("input[name=onDuplicate][value=merge]");
+  if (mergeChoice && !document.querySelector("input[name=onDuplicate]:checked")) mergeChoice.checked = true;
   if (data.warning) {
     $("bulk-warning").hidden = false;
     $("bulk-warning").textContent = data.warning;
   }
   $("bulk-commit").disabled = valid === 0;
-  $("bulk-commit").textContent = valid ? `Add ${valid} to waitlist` : "Add these to waitlist";
+  $("bulk-commit").textContent = bulkCommitLabel(tally, valid);
 }
 
-async function commitBulk() {
+async function commitBulk(options = {}) {
   const text = $("bulk-text").value;
-  const selected = document.querySelector("input[name=onDuplicate]:checked");
-  const needsPolicy = !$("dup-policy").hidden;
-  if (needsPolicy && !selected) {
-    $("bulk-error").textContent = "Choose skip, merge, or add anyway for the duplicate lines.";
+  const onDuplicate = bulkPolicy();
+  if (onDuplicate === "add" && !options.confirmed) {
+    openOverride("bulk");
     return;
   }
   $("bulk-error").textContent = "";
   $("bulk-commit").disabled = true;
   const { response, data } = await api("/api/intake/bulk", {
     method: "POST",
-    body: JSON.stringify({ text, mode: "commit", game: state.game || "Lorcana", onDuplicate: selected ? selected.value : "add" }),
+    body: JSON.stringify({ text, mode: "commit", game: state.game || "Lorcana", onDuplicate, confirmOverride: onDuplicate === "add" }),
   });
   $("bulk-commit").disabled = false;
   if (!response.ok) {

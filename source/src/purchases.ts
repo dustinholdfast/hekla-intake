@@ -4,6 +4,7 @@
  * A customer is a Sell Request record id. Names, emails, and phones are not stored.
  */
 import { buildCreateFields, setIdentityOf, type DraftCard } from "./fields.ts";
+import { draftIdentityKey, mergeCostUpdate } from "./intake-upsert.ts";
 import {
   buyListSetIdentity,
   canonicalCollector,
@@ -653,6 +654,15 @@ function snapshotFor(line: PurchaseLine, condition: string): StockSnapshot {
   };
 }
 
+export type IdentityStockRow = {
+  identityKey: string;
+  id: string;
+  qty: number;
+  costBasisUsd: number | null;
+  unknownCostQty: number | null;
+  status: string | null;
+};
+
 export function planReceipt(input: {
   purchase: PurchaseDraft;
   receivedOn: string;
@@ -660,7 +670,9 @@ export function planReceipt(input: {
   confirms: readonly { lineNo: number; condition: string }[];
   balanceCents: number;
   mintRecordId: (lineNo: number) => string;
-}): { ok: true; plan: ReceiptPlan } | { ok: false; error: string } {
+  /** Open rows keyed like intake. One match is merged. Several matches stop the receive before any write. */
+  identityStock?: readonly IdentityStockRow[];
+}): { ok: true; plan: ReceiptPlan } | { ok: false; error: string; duplicate?: { identityKey: string; recordIds: string[] } } {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.receivedOn)) return { ok: false, error: "Date received must be YYYY-MM-DD." };
   const purchase: PurchaseDraft = { ...input.purchase, lines: input.purchase.lines.map((line) => ({ ...line })) };
   const movements: MovementDraft[] = [];
@@ -690,6 +702,35 @@ export function planReceipt(input: {
       line.costBasisCents = null;
       line.stockStatus = null;
     }
+    if (!line.stockRecordId && input.identityStock) {
+      const identityKey = draftIdentityKey({
+        game: line.game,
+        setNumber: line.game === "Lorcana" ? line.setIdentity : null,
+        setIdentifier: line.game === "Lorcana" ? null : line.setIdentity,
+        collectorNumber: line.collectorNumber ?? "",
+        finish: line.finishStored ?? line.finish ?? "",
+        condition: received,
+        language: line.language,
+      });
+      const hits = identityKey
+        ? input.identityStock.filter((row) => row.identityKey === identityKey && (row.status === "Waitlist" || row.status === "Listed"))
+        : [];
+      if (hits.length > 1) {
+        return {
+          ok: false,
+          error: `Line ${line.lineNo} matches ${hits.length} stock rows (${hits.map((hit) => hit.id).join(", ")}). Nothing was received.`,
+          duplicate: { identityKey: identityKey ?? "", recordIds: hits.map((hit) => hit.id) },
+        };
+      }
+      const hit = hits[0];
+      if (hit) {
+        line.stockRecordId = hit.id;
+        line.onHand = hit.qty;
+        line.unknownCostQty = hit.unknownCostQty;
+        line.costBasisCents = hit.costBasisUsd == null ? null : Math.round(hit.costBasisUsd * 100);
+        line.stockStatus = hit.status;
+      }
+    }
     const creating = !line.stockRecordId;
     const recordId = line.stockRecordId ?? input.mintRecordId(line.lineNo);
     if (!RECORD_ID.test(recordId)) return { ok: false, error: "A new stock row needs an Airtable record id." };
@@ -704,13 +745,22 @@ export function planReceipt(input: {
     line.wantStatusAfter = want.statusAfter;
     line.overstockQty = want.overstockQty;
     line.movementSourceRef = sourceRef;
-    const cost = nextKnownCost({
+    const known = nextKnownCost({
       onHand: before,
       unknownCostQty: line.unknownCostQty,
       costBasisCents: before === 0 ? null : line.costBasisCents,
       addQty: line.qty,
       addCostTotalCents: line.costTotalCents,
     });
+    const averaged = !creating && line.costBasisCents != null
+      ? mergeCostUpdate(
+        { qty: before, costBasisUsd: line.costBasisCents / 100, unknownCostQty: line.unknownCostQty },
+        { qty: line.qty, costBasisUsd: line.unitCostCents / 100 },
+      )
+      : null;
+    const cost = averaged?.writeCost && averaged.costBasisUsd != null
+      ? { ...known, costBasisUsd: averaged.costBasisUsd, unknownCostQty: averaged.unknownCostQty }
+      : known;
     if (creating) {
       const note = `Hekla purchase ${purchaseLineKey(purchase.sellRequestId, line.lineNo)}`;
       writes.push({ kind: "create_stock", lineKey: purchaseLineKey(purchase.sellRequestId, line.lineNo), note, fields: stockCreateFields(line, input.receivedOn, purchaseLineKey(purchase.sellRequestId, line.lineNo)) });

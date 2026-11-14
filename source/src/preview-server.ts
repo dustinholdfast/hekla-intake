@@ -9,6 +9,11 @@ import { defaultInventorySettings, presentSettings, SettingsError, validateInven
 import { fixtureBuyList, fixtureMovements, fixtureRows, FIXTURE_TENANT } from "./inventory-fixtures.ts";
 import { exampleAcceptInput, EXAMPLE_RECEIVED_ON, EXAMPLE_SR_ID } from "./purchases-fixtures.ts";
 import { planAcceptance, PurchaseBook } from "./purchases.ts";
+import { parseDraft } from "./fields.ts";
+import { parseBulk } from "./parse.ts";
+import { duplicatesAmong, type QueueCard } from "./airtable.ts";
+import { planIntakeUpsert } from "./intake-upsert.ts";
+import { CONDITIONS, FINISHES, FINISHES_BY_GAME, GAMES, RARITIES, SETS, type Game } from "./sets.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDir = path.join(root, "public");
@@ -48,6 +53,65 @@ function filterOf(url: URL): InventoryFilter {
     flag: flag === "low" || flag === "overstock" || flag === "slow" || flag === "review" ? flag : undefined,
     cost: cost === "known" || cost === "unknown" ? cost : undefined,
   };
+}
+
+function openQueue(): QueueCard[] {
+  return currentStock.flatMap((row) => {
+    const fields = row.fields;
+    const status = typeof fields.Status === "string" ? fields.Status : null;
+    if (status !== "Waitlist" && status !== "Listed") return [];
+    const qty = typeof fields.Qty === "number" ? fields.Qty : 0;
+    return [{
+      id: row.id,
+      name: typeof fields["Card Name"] === "string" ? fields["Card Name"] : "",
+      cardName: typeof fields["Card Name"] === "string" ? fields["Card Name"] : null,
+      resolvedName: null,
+      game: typeof fields.Game === "string" ? fields.Game : "Lorcana",
+      setNumber: typeof fields["Set #"] === "string" ? fields["Set #"] : null,
+      setIdentifier: typeof fields["Set Identifier"] === "string" ? fields["Set Identifier"] : null,
+      setName: null,
+      collectorNumber: typeof fields["Collector Number"] === "string" ? fields["Collector Number"] : null,
+      finish: typeof fields.Finish === "string" ? fields.Finish : null,
+      condition: typeof fields.Condition === "string" ? fields.Condition : null,
+      language: typeof fields.Language === "string" ? fields.Language : null,
+      qty,
+      status,
+      rankScore: null,
+      marketPriceUsd: typeof fields["Market Price USD"] === "number" ? fields["Market Price USD"] : null,
+      notes: null,
+      priority: null,
+      createdTime: row.createdTime ?? "",
+      autoRank: null,
+      rarity: null,
+      costBasisUsd: typeof fields["Cost Basis USD"] === "number" ? fields["Cost Basis USD"] : null,
+      cardType: null,
+      recommendation: null,
+      rankReason: null,
+      enrichedAt: null,
+      priceSource: null,
+    }];
+  });
+}
+
+function previewBulkRows(rows: ReturnType<typeof parseBulk>, open: QueueCard[]) {
+  const virtual: QueueCard[] = [];
+  return rows.map((row) => {
+    if (!row.card) return { line: row.line, raw: row.raw, error: row.error, matches: [] as QueueCard[], alsoInPaste: [] as number[] };
+    const card = row.card;
+    const asQueue = (id: string): QueueCard => ({
+      id, name: card.cardName ?? "", cardName: card.cardName ?? null, resolvedName: null, game: card.game,
+      setNumber: card.game === "Lorcana" ? card.setNumber : null,
+      setIdentifier: card.game === "Lorcana" ? null : card.setIdentifier,
+      setName: null, collectorNumber: card.collectorNumber, finish: card.finish, condition: card.condition,
+      language: null, qty: card.qty, status: "Waitlist", rankScore: null, marketPriceUsd: null, notes: null,
+      priority: null, createdTime: "", autoRank: null, rarity: null, costBasisUsd: card.costBasisUsd ?? null,
+      cardType: null, recommendation: null, rankReason: null, enrichedAt: null, priceSource: null,
+    });
+    const matches = duplicatesAmong(open, card);
+    const alsoInPaste = duplicatesAmong(virtual, card).map((item) => Number(item.id.replace("line-", ""))).filter((line) => Number.isFinite(line));
+    virtual.push(asQueue(`line-${row.line}`));
+    return { line: row.line, raw: row.raw, card, matches, alsoInPaste };
+  });
 }
 
 function sendJson(res: import("node:http").ServerResponse, status: number, body: unknown) {
@@ -152,6 +216,75 @@ const server = createServer(async (req, res) => {
     sendJson(res, 200, { ...presentSettings(settings), stored: settingsStored, phase2: true, canManage: true });
     return;
   }
+  if (url.pathname === "/api/session" && req.method === "GET") {
+    sendJson(res, 200, {
+      ok: true, via: "preview", tenant: "Fixture", role: null, plan: "free", platformAdmin: false,
+      baseId: "appFIXTUREBASE01", tableId: "tblFIXTURETABLE1",
+      games: GAMES, sets: SETS, finishes: FINISHES, finishesByGame: FINISHES_BY_GAME,
+      conditions: CONDITIONS, rarities: RARITIES,
+      conditionLabels: { NM: "Near Mint", LP: "Lightly Played", MP: "Moderately Played", HP: "Heavily Played", DMG: "Damaged" },
+    });
+    return;
+  }
+  if (url.pathname === "/api/summary" && req.method === "GET") {
+    const game = url.searchParams.get("game") || "Lorcana";
+    const rows = currentStock.filter((row) => String(row.fields.Game || "Lorcana") === game);
+    const counts = { Waitlist: 0, Listed: 0, Sold: 0, Skip: 0 };
+    let listedQty = 0;
+    let waitlistQty = 0;
+    for (const row of rows) {
+      const status = String(row.fields.Status || "");
+      if (status in counts) counts[status as keyof typeof counts] += 1;
+      const qty = typeof row.fields.Qty === "number" ? row.fields.Qty : 0;
+      if (status === "Listed") listedQty += qty;
+      if (status === "Waitlist") waitlistQty += qty;
+    }
+    sendJson(res, 200, { listedQty, waitlistQty, counts, truncated: false });
+    return;
+  }
+  if (url.pathname === "/api/queue" && req.method === "GET") {
+    const game = url.searchParams.get("game") || "Lorcana";
+    const status = url.searchParams.get("status") || "Waitlist";
+    const cards = openQueue().filter((card) => card.game === game && card.status === status);
+    sendJson(res, 200, { cards, truncated: false });
+    return;
+  }
+  if (url.pathname === "/api/intake" && req.method === "POST") {
+    let body: unknown;
+    try { body = await readJson(req); } catch { sendJson(res, 400, { error: "That was not valid JSON." }); return; }
+    const draft = parseDraft(body as Parameters<typeof parseDraft>[0]);
+    if (!draft.ok) { sendJson(res, 400, { error: draft.error }); return; }
+    const matches = duplicatesAmong(openQueue(), draft.card);
+    const record = body as { onDuplicate?: "ask" | "merge" | "add"; confirmOverride?: boolean; mergeRecordId?: string };
+    const plan = planIntakeUpsert({
+      card: draft.card,
+      matches: matches.map((card) => ({ id: card.id, qty: card.qty, status: card.status, costBasisUsd: card.costBasisUsd, unknownCostQty: card.unknownCostQty ?? null })),
+      choice: record.onDuplicate ?? "ask",
+      confirmOverride: record.confirmOverride === true,
+      mergeRecordId: record.mergeRecordId,
+    });
+    if (plan.action === "reject") { sendJson(res, 400, { error: plan.error }); return; }
+    if (plan.action === "ask") { sendJson(res, 409, { error: "duplicate", message: "Already in stock.", matches }); return; }
+    if (plan.action === "merge") {
+      const row = currentStock.find((item) => item.id === plan.target.id);
+      if (row) row.fields.Qty = Number(row.fields.Qty ?? 0) + draft.card.qty;
+      const card = openQueue().find((item) => item.id === plan.target.id);
+      sendJson(res, 200, { card, merged: true, costLot: draft.card.costBasisUsd != null });
+      return;
+    }
+    if (plan.action !== "create") { sendJson(res, 409, { error: "That card is already in stock." }); return; }
+    sendJson(res, 201, { card: { ...draft.card, id: "recPREVIEWNEW0001", name: draft.card.cardName || draft.card.collectorNumber, status: "Waitlist" }, merged: false, duplicate: plan.recordOverride });
+    return;
+  }
+  if (url.pathname === "/api/intake/bulk" && req.method === "POST") {
+    let body: { text?: string; game?: string; mode?: string } = {};
+    try { body = await readJson(req) as typeof body; } catch { sendJson(res, 400, { error: "That was not valid JSON." }); return; }
+    const game = (GAMES as readonly string[]).includes(body.game || "") ? body.game as Game : "Lorcana";
+    const rows = parseBulk(typeof body.text === "string" ? body.text : "", game);
+    if (body.mode === "commit") { sendJson(res, 200, { preview: false, created: [], merged: [], skipped: [], errors: [] }); return; }
+    sendJson(res, 200, { preview: true, dedupeChecked: true, rows: previewBulkRows(rows, openQueue().filter((card) => card.game === game)) });
+    return;
+  }
   if (url.pathname === "/api/inventory") {
     const body = JSON.stringify(buildLiveInventory({ tenantId: FIXTURE_TENANT,
       stock: { rows: currentStock, startedAt: now.toISOString(), completedAt: now.toISOString() },
@@ -170,7 +303,9 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify(body ?? { error: "That card is not in the fixture ledger." }));
     return;
   }
-  const page = url.pathname === "/" || url.pathname === "/inventory"
+  const page = url.pathname === "/intake"
+    ? "/index.html"
+    : url.pathname === "/" || url.pathname === "/inventory"
     ? "/inventory.html"
     : url.pathname === "/settings"
       ? "/settings.html"
@@ -187,7 +322,7 @@ const server = createServer(async (req, res) => {
   }
   try {
     let data = await readFile(file);
-    if (file.endsWith("inventory.html") || file.endsWith("settings.html") || file.endsWith("purchases.html") || file.endsWith("credit.html")) {
+    if (file.endsWith("inventory.html") || file.endsWith("settings.html") || file.endsWith("purchases.html") || file.endsWith("credit.html") || file.endsWith("index.html")) {
       const html = data.toString("utf8").replace("<html lang=\"en\">", "<html lang=\"en\" data-preview=\"1\">");
       data = Buffer.from(html);
     }
@@ -200,6 +335,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
+  console.log(`intake preview http://127.0.0.1:${port}/intake`);
   console.log(`inventory preview http://127.0.0.1:${port}/inventory`);
   console.log(`purchase preview http://127.0.0.1:${port}/purchases/new?sr=${EXAMPLE_SR_ID}`);
   console.log(`liability preview http://127.0.0.1:${port}/credit`);
