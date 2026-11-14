@@ -25,56 +25,25 @@
     </div>
   </section>
 
-  <div id="app-view" class="app" hidden>
+  <div id="app-view" class="admin intake-page" hidden>
     <nav class="workspace-nav" aria-label="Workspaces">
       <a class="workspace-brand" href="/inventory" aria-label="Hekla inventory"><img src="/hekla-icon-dark.png" alt="" width="28" height="40" /><span>HEKLA<small>Store workspace</small></span></a>
       <div class="workspace-links"><a href="/inventory">Inventory</a><a href="/" aria-current="page">Buy / Intake</a><a href="/sales">Sales</a><a href="/settings">Settings</a></div>
+      <div class="workspace-user"><a id="admin-link" class="text-link" href="/admin" hidden>Platform admin</a><button id="logout" class="ghost tiny" type="button">Sign out</button></div>
     </nav>
-    <div class="game-bar" id="game-bar" role="tablist" aria-label="Game"></div>
-    <aside>
-      <div class="brand-row">
-        <span class="queue-label">Card queue</span>
-        <button id="logout" class="ghost tiny" type="button">Sign out</button>
-      </div>
-      <nav aria-label="Queue">
-        <button type="button" data-go="form">Add cards</button>
-        <button type="button" data-status="Waitlist" class="on">Waiting to list <em data-count="Waitlist">0</em></button>
-        <button type="button" data-status="Listed">Listed <em data-count="Listed">0</em></button>
-        <button type="button" data-status="Sold">Sold <em data-count="Sold">0</em></button>
-        <button type="button" data-status="Skip">Skipped <em data-count="Skip">0</em></button>
-      </nav>
-      <section class="cap" aria-label="Inventory">
-        <div class="cap-label"><span data-cap-game>Lorcana</span> listed on CardTrader</div>
-        <div class="cap-num"><span data-cap="listed">–</span> <small>cards</small></div>
-        <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> cards waiting on the Waitlist.</p>
-        <p id="cap-error" class="error"></p>
-      </section>
-      <a class="airtable-link text-link" href="https://airtable.com/app4Tjz72sZtVMQyp/tblvHPu7dgDHA91bc" target="_blank" rel="noopener noreferrer">Open Waitlist in Airtable</a>
-      <a id="admin-link" class="text-link admin-link" href="/admin" hidden>Platform admin</a>
-    </aside>
+    <nav class="workspace-subnav" aria-label="Buying tools"><a href="/" aria-current="page">Add cards</a><a href="/purchases/new">Receive purchases</a></nav>
 
     <main>
-      <header class="top">
-        <div>
-          <h1>Buy / Intake</h1>
-          <p>Add stock or receive a purchase. Review prices before listing.</p>
-          <a class="task-link" href="/purchases/new">Receive an accepted purchase →</a>
-        </div>
-        <section class="mobile-cap" aria-label="Inventory">
-          <div class="cap-label"><span data-cap-game>Lorcana</span> listed on CardTrader</div>
-          <div class="cap-num"><span data-cap="listed">–</span> <small>cards</small></div>
-          <p class="cap-note"><span data-cap="waitlist">–</span> <span data-cap-scope>Lorcana</span> cards waiting on the Waitlist.</p>
-        </section>
-      </header>
-
+      <h1 class="sr">Buy / Intake</h1>
       <div class="layout">
         <section class="panel" id="quick-add">
           <div class="panel-head">
             <h2>Quick add</h2>
             <button id="open-bulk" class="ghost" type="button">Bulk paste</button>
           </div>
-          <p class="lede">Choose the printing and quantity. Your last choices stay on this device.</p>
           <form id="add-form" autocomplete="off">
+            <label class="field" for="game">Game</label>
+            <select id="game"></select>
             <fieldset class="defaults">
               <legend>Printing & quantity</legend>
               <label id="set-number-field">Set #
@@ -137,7 +106,7 @@
 
         <section class="panel" id="queue-panel">
           <div class="panel-head">
-            <h2>Queue</h2>
+            <h2>Queue <small class="queue-game" data-cap-game>Lorcana</small></h2>
             <div class="hekla-actions">
               <button id="ask-process" class="ghost" type="button">Auto-sort pending</button>
               <button id="ct-export" class="primary" type="button">List on CardTrader</button>
@@ -147,6 +116,15 @@
                 <button id="ask-greenlight" class="ghost" type="button">Send shortlist to Hekla</button>
               </div></details>
             </div>
+          </div>
+          <div class="queue-bar">
+            <div class="queue-tabs" role="group" aria-label="Queue status">
+              <button type="button" data-status="Waitlist" class="on">Waiting to list <em data-count="Waitlist">0</em></button>
+              <button type="button" data-status="Listed">Listed <em data-count="Listed">0</em></button>
+              <button type="button" data-status="Sold">Sold <em data-count="Sold">0</em></button>
+              <button type="button" data-status="Skip">Skipped <em data-count="Skip">0</em></button>
+            </div>
+            <p class="queue-strip"><b data-cap="listed">–</b> cards listed on CardTrader · <b data-cap="waitlist">–</b> waiting <span id="cap-error" class="error"></span></p>
           </div>
           <div class="queue-tools">
             <label class="search">
@@ -180,7 +158,6 @@
         </section>
       </div>
     </main>
-    </div>
   </div>
 
   <dialog id="dupe-dialog">
