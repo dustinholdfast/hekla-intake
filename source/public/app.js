@@ -30,6 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("login-signout").addEventListener("click", signOut);
   $("add-form").addEventListener("submit", onAdd);
   $("add-form").addEventListener("change", saveDefaults);
+  $("game").addEventListener("change", (event) => selectGame(event.target.value));
   wireCombo();
   $("set-identifier").addEventListener("change", () => {
     const code = resolveSet($("set-identifier").value, setLists[state.game]?.sets || []);
@@ -77,10 +78,7 @@ document.addEventListener("DOMContentLoaded", () => {
       state.status = statusButton.dataset.status;
       markTabs();
       loadQueue();
-      document.getElementById("queue-panel").scrollIntoView({ behavior: "smooth", block: "start" });
     }
-    const go = event.target.closest("[data-go='form']");
-    if (go) document.getElementById("quick-add").scrollIntoView({ behavior: "smooth", block: "start" });
   });
   document.querySelectorAll("input[type=number]").forEach((input) => {
     input.addEventListener("wheel", () => input.blur(), { passive: true });
@@ -151,7 +149,7 @@ function show(name) {
 }
 
 function buildForm(session) {
-  buildGameBar(session.games || ["Lorcana"]);
+  fillSelect($("game"), session.games || ["Lorcana"], (game) => game, (game) => game);
   fillSelect($("set"), session.sets, (set) => set.id, (set) => `${set.id} · ${set.name}`);
   fillSelect($("finish"), session.finishes, (finish) => finish, (finish) => finish);
   fillSelect(
@@ -174,20 +172,6 @@ function fillSelect(select, options, valueOf, labelOf) {
     node.value = valueOf(option);
     node.textContent = labelOf(option);
     select.append(node);
-  }
-}
-
-function buildGameBar(games) {
-  const bar = $("game-bar");
-  bar.replaceChildren();
-  for (const game of games) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.setAttribute("role", "tab");
-    button.dataset.game = game;
-    button.textContent = game;
-    button.addEventListener("click", () => selectGame(game));
-    bar.append(button);
   }
 }
 
@@ -285,11 +269,7 @@ function selectGame(game, options = {}) {
   if (options.refresh !== false) saveDefaults();
   const saved = options.saved || defaults();
   state.game = knownGame(game);
-  document.querySelectorAll("#game-bar [data-game]").forEach((button) => {
-    const on = button.dataset.game === state.game;
-    button.classList.toggle("on", on);
-    button.setAttribute("aria-selected", on ? "true" : "false");
-  });
+  $("game").value = state.game;
   const lorcana = state.game === "Lorcana";
   $("set-number-field").hidden = !lorcana;
   $("set-identifier-field").hidden = lorcana;
@@ -555,7 +535,7 @@ function effectiveGame(game) {
 function paintGame() {
   const game = state.game || "Lorcana";
   document.title = `Hekla · ${game} intake`;
-  document.querySelectorAll("[data-cap-game], [data-cap-scope]").forEach((node) => {
+  document.querySelectorAll("[data-cap-game]").forEach((node) => {
     node.textContent = game;
   });
 }
