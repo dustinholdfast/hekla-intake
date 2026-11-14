@@ -898,6 +898,7 @@ function markPriceSort() {
 
 function renderQueue() {
   const body = $("queue-body");
+  closeRowMenu(true);
   if ($("queue-error").textContent) {
     body.replaceChildren();
     return;
@@ -923,21 +924,22 @@ function renderQueue() {
   $("queue-meta").textContent = `${rows.length} shown · ${state.cards.length} ${state.game} ${state.status}. ${sortNote}${trunc}`;
 }
 
+/** One line per card. Notes and priority show in the hover preview; row actions are in the row menu. */
 function renderRow(card) {
   const tr = document.createElement("tr");
-  const setLabel = card.game && card.game !== "Lorcana"
-    ? (card.setIdentifier || "—")
-    : (card.setName ? `${card.setNumber} · ${card.setName}` : (card.setNumber || card.setIdentifier || "—"));
+  const lorcana = !card.game || card.game === "Lorcana";
+  const set = cell("Set", lorcana ? (card.setNumber || card.setIdentifier || "—") : (card.setIdentifier || "—"), "c-set");
+  if (card.setName) set.title = lorcana && card.setNumber ? `${card.setNumber} · ${card.setName}` : card.setName;
   tr.append(
-    cell("Set", setLabel),
-    cell("#", card.collectorNumber || "—"),
+    set,
+    cell("#", card.collectorNumber || "—", "c-num"),
     nameCell(card),
     ...(card.status === "Waitlist"
       ? [editCell(card, "finish", "Finish"), editCell(card, "condition", "Cond"), editCell(card, "qty", "Qty")]
-      : [cell("Finish", card.finish || "—"), cell("Cond", card.condition || "—"), cell("Qty", String(card.qty ?? 0))]),
-    statusCell(card),
+      : [cell("Finish", card.finish || "—", "c-finish"), cell("Cond", card.condition || "—", "c-cond"), cell("Qty", String(card.qty ?? 0), "c-qty")]),
     rankCell(card),
-    cell("Price", money(card.marketPriceUsd)),
+    cell("Price", money(card.marketPriceUsd), "c-price"),
+    menuCell(card),
   );
   attachPreview(tr, card);
   return tr;
@@ -947,7 +949,7 @@ function renderRow(card) {
 function rankCell(card) {
   const td = document.createElement("td");
   td.dataset.label = "Rank";
-  td.className = "rank-cell";
+  td.className = "rank-cell c-rank";
   const top = document.createElement("div");
   top.className = "rank-line";
   const score = document.createElement("span");
@@ -957,20 +959,112 @@ function rankCell(card) {
   top.append(score);
   if (card.recommendation) top.append(recBadge(card.recommendation, card.status));
   td.append(top);
-  if (card.status === "Waitlist") td.append(deleteControl(card));
+  return td;
+}
+
+/* ---------- Row menu: Re-sort, Open in Airtable, Delete. One shared menu, placed beside the row's button. ---------- */
+let rowMenuButton = null;
+let rowMenuBusy = false;
+
+function menuCell(card) {
+  const td = document.createElement("td");
+  td.className = "c-menu";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "row-menu-button";
+  button.textContent = "⋯";
+  button.setAttribute("aria-label", `Actions for ${card.name || card.collectorNumber || card.id}`);
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  button.addEventListener("click", () => {
+    if (rowMenuButton === button) closeRowMenu(); else openRowMenu(button, card);
+  });
+  td.append(button);
+  return td;
+}
+
+function ensureRowMenu() {
+  let menu = $("row-menu");
+  if (menu) return menu;
+  menu = document.createElement("div");
+  menu.id = "row-menu";
+  menu.className = "row-menu";
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+  document.body.append(menu);
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !rowMenuButton || rowMenuBusy) return;
+    const button = rowMenuButton;
+    closeRowMenu();
+    button.focus({ preventScroll: true });
+  });
+  document.addEventListener("click", (e) => {
+    if (rowMenuButton && !menu.contains(e.target) && !rowMenuButton.contains(e.target)) closeRowMenu();
+  });
+  window.addEventListener("scroll", () => closeRowMenu(), { passive: true });
+  window.addEventListener("resize", () => closeRowMenu());
+  return menu;
+}
+
+/** A running Re-sort or Delete keeps the menu open so its result is seen; `force` is for a redrawn queue. */
+function closeRowMenu(force) {
+  if (rowMenuBusy && !force) return;
+  rowMenuBusy = false;
+  const menu = $("row-menu");
+  if (menu) menu.hidden = true;
+  if (rowMenuButton) rowMenuButton.setAttribute("aria-expanded", "false");
+  rowMenuButton = null;
+}
+
+function openRowMenu(button, card) {
+  const menu = ensureRowMenu();
+  closeRowMenu();
+  if (rowMenuBusy) return;
+  clearTimeout(previewTimer);
+  closePreview();
+  rowMenuButton = button;
+  button.setAttribute("aria-expanded", "true");
+  fillRowMenu(menu, card);
+  menu.hidden = false;
+  positionRowMenu(menu, button);
+  menu.querySelector("[role=menuitem]")?.focus({ preventScroll: true });
+}
+
+function positionRowMenu(menu, button) {
+  const r = button.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  const left = Math.min(Math.max(8, r.right - w), window.innerWidth - w - 8);
+  const top = r.bottom + 4 + h > window.innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+function fillRowMenu(menu, card) {
+  const item = (text, className) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.textContent = text;
+    if (className) button.className = className;
+    return button;
+  };
+  const failed = () => ({ response: { ok: false }, data: { error: "Network error" } });
+  const note = document.createElement("p");
+  note.className = "row-menu-note";
+  note.setAttribute("role", "alert");
+  const items = [];
+
   if (card.status === "Waitlist" || card.status === "Listed") {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "resort";
-    btn.textContent = card.enrichedAt ? "Re-sort" : "Sort now";
-    btn.title = card.rankReason || "Run auto-sort for this card";
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      btn.disabled = true; btn.textContent = "Sorting…";
-      const { response, data } = await api(`/api/enrich/${encodeURIComponent(card.id)}`, { method: "POST" }).catch(() => ({ response: { ok: false }, data: { error: "Network error" } }));
+    const sort = item(card.enrichedAt ? "Re-sort" : "Sort now");
+    sort.title = card.rankReason || "Run auto-sort for this card";
+    sort.addEventListener("click", async () => {
+      rowMenuBusy = true;
+      sort.disabled = true; sort.textContent = "Sorting…"; note.textContent = "";
+      const { response, data } = await api(`/api/enrich/${encodeURIComponent(card.id)}`, { method: "POST" }).catch(failed);
+      rowMenuBusy = false;
       if (!response.ok || !data.card) {
-        btn.disabled = false; btn.textContent = "Retry";
-        btn.title = data.error || (data.failed && data.failed[0]?.error) || "Auto-sort failed";
+        sort.disabled = false; sort.textContent = "Retry";
+        note.textContent = data.error || (data.failed && data.failed[0]?.error) || "Auto-sort failed";
         return;
       }
       const index = state.cards.findIndex((c) => c.id === card.id);
@@ -979,44 +1073,51 @@ function rankCell(card) {
       sortCardsByRank();
       renderQueue();
     });
-    td.append(btn);
+    items.push(sort);
   }
-  return td;
-}
 
-function deleteControl(card) {
-  const wrap = document.createElement("span");
-  wrap.className = "del-wrap";
-  const del = document.createElement("button");
-  del.type = "button"; del.className = "del-btn"; del.textContent = "Delete";
-  del.setAttribute("aria-label", `Delete ${card.name || card.id}`);
-  const confirmBox = document.createElement("span");
-  confirmBox.className = "del-confirm"; confirmBox.hidden = true;
-  const q = document.createElement("span"); q.textContent = "Delete?";
-  const yes = document.createElement("button"); yes.type = "button"; yes.className = "del-yes"; yes.textContent = "Yes";
-  const no = document.createElement("button"); no.type = "button"; no.className = "del-no"; no.textContent = "Cancel";
-  const err = document.createElement("span"); err.className = "save-state error"; err.setAttribute("role", "alert");
-  confirmBox.append(q, yes, no);
-  wrap.append(del, confirmBox, err);
-  const stop = (e) => e.stopPropagation();
-  wrap.addEventListener("click", stop);
-  del.addEventListener("click", () => { del.hidden = true; confirmBox.hidden = false; err.textContent = ""; yes.focus(); });
-  no.addEventListener("click", () => { confirmBox.hidden = true; del.hidden = false; del.focus(); });
-  yes.addEventListener("click", async () => {
-    yes.disabled = true; no.disabled = true; yes.textContent = "Deleting…";
-    const { response, data } = await api(`/api/cards/${encodeURIComponent(card.id)}`, { method: "DELETE" }).catch(() => ({ response: { ok: false }, data: { error: "Network error" } }));
-    if (!response.ok || !data.deleted) {
-      yes.disabled = false; no.disabled = false; yes.textContent = "Yes";
-      confirmBox.hidden = true; del.hidden = false;
-      err.textContent = data.error || "Delete failed";
-      return;
-    }
-    closePreview();
-    state.cards = state.cards.filter((c) => c.id !== card.id);
-    renderQueue();
-    loadSummary();
-  });
-  return wrap;
+  const link = document.createElement("a");
+  link.setAttribute("role", "menuitem");
+  link.href = `https://airtable.com/${state.session?.baseId}/${state.session?.tableId}/${card.id}`;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "Open in Airtable";
+  items.push(link);
+
+  if (card.status === "Waitlist") {
+    const del = item("Delete", "danger");
+    const confirmBox = document.createElement("div");
+    confirmBox.className = "row-menu-confirm";
+    confirmBox.hidden = true;
+    const question = document.createElement("span");
+    question.textContent = "Delete this card?";
+    const yes = item("Delete", "danger-solid");
+    const no = item("Cancel");
+    confirmBox.append(question, yes, no);
+    del.addEventListener("click", () => {
+      del.hidden = true; confirmBox.hidden = false; note.textContent = "";
+      if (rowMenuButton) positionRowMenu(menu, rowMenuButton);
+      yes.focus({ preventScroll: true });
+    });
+    no.addEventListener("click", () => { confirmBox.hidden = true; del.hidden = false; del.focus({ preventScroll: true }); });
+    yes.addEventListener("click", async () => {
+      rowMenuBusy = true;
+      yes.disabled = true; no.disabled = true; yes.textContent = "Deleting…";
+      const { response, data } = await api(`/api/cards/${encodeURIComponent(card.id)}`, { method: "DELETE" }).catch(failed);
+      rowMenuBusy = false;
+      if (!response.ok || !data.deleted) {
+        yes.disabled = false; no.disabled = false; yes.textContent = "Delete";
+        confirmBox.hidden = true; del.hidden = false;
+        note.textContent = data.error || "Delete failed";
+        return;
+      }
+      state.cards = state.cards.filter((c) => c.id !== card.id);
+      renderQueue();
+      loadSummary();
+    });
+    items.push(del, confirmBox);
+  }
+  menu.replaceChildren(...items, note);
 }
 
 const LISTED_LABELS = { List: "Keep", Hold: "Watch", Skip: "Pull" };
@@ -1124,7 +1225,7 @@ async function runAutoSort() {
 function editCell(card, key, label) {
   const td = document.createElement("td");
   td.dataset.label = label;
-  td.className = "edit-cell";
+  td.className = `edit-cell c-${key === "condition" ? "cond" : key}`;
   let control;
   if (key === "qty") {
     control = document.createElement("input");
@@ -1302,7 +1403,7 @@ function renderPreview(el, data, card) {
     const title = document.createElement("div"); title.className = "cp-name"; title.textContent = card.name || card.collectorNumber || "Card";
     const msg = document.createElement("p"); msg.className = "cp-empty";
     msg.textContent = data?.error ? `Preview unavailable: ${data.error}` : "No preview available for this card.";
-    body.append(title, msg, sortBlock(card));
+    body.append(title, msg, sortBlock(card), noteBlock(card));
     el.append(body);
     return;
   }
@@ -1315,10 +1416,19 @@ function renderPreview(el, data, card) {
   body.append(name);
   if (data.subtitle) { const sub = document.createElement("div"); sub.className = "cp-sub"; sub.textContent = data.subtitle; body.append(sub); }
   if (data.text) { const text = document.createElement("p"); text.className = "cp-text"; text.textContent = data.text; body.append(text); }
-  body.append(sortBlock(card));
+  body.append(sortBlock(card), noteBlock(card));
   const src = document.createElement("div"); src.className = "cp-src"; src.textContent = `Source: ${data.source}`;
   body.append(src);
   el.append(body);
+}
+
+function noteBlock(card) {
+  const text = cardNote(card);
+  if (!text) return "";
+  const note = document.createElement("div");
+  note.className = "cp-note";
+  note.textContent = text;
+  return note;
 }
 
 function sortBlock(card) {
@@ -1364,54 +1474,34 @@ function positionPreview(el, tr) {
   el.style.left = `${Math.round(left)}px`;
 }
 
-function cell(label, text) {
+function cell(label, text, className) {
   const td = document.createElement("td");
   td.dataset.label = label;
   td.textContent = text;
+  if (className) td.className = className;
   return td;
+}
+
+/** Priority and notes, shown after the name in the row (cut off when long) and in full in the preview. */
+function cardNote(card) {
+  return [card.priority !== null && card.priority !== undefined ? `Priority ${card.priority}` : "", card.notes || ""].filter(Boolean).join(" · ");
 }
 
 function nameCell(card) {
   const td = document.createElement("td");
   td.dataset.label = "Name";
-  const title = document.createElement("div");
+  td.className = "c-name";
+  const title = document.createElement("span");
   title.className = "name";
   title.textContent = card.name || "Unnamed — Hekla can resolve it";
   td.append(title);
-  if (card.priority !== null && card.priority !== undefined) {
-    const priority = document.createElement("span");
-    priority.className = "sub";
-    priority.textContent = `Priority ${card.priority}`;
-    td.append(priority);
+  const note = cardNote(card);
+  if (note) {
+    const sub = document.createElement("span");
+    sub.className = "name-note";
+    sub.textContent = note;
+    td.append(sub);
   }
-  if (card.notes) {
-    const notes = document.createElement("span");
-    notes.className = "sub";
-    notes.textContent = card.notes;
-    td.append(notes);
-  }
-  const meta = document.createElement("span");
-  meta.className = "sub";
-  const link = document.createElement("a");
-  const base = state.session?.baseId;
-  const table = state.session?.tableId;
-  link.href = `https://airtable.com/${base}/${table}/${card.id}`;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.textContent = card.id;
-  meta.append(link);
-  td.append(meta);
-  return td;
-}
-
-function statusCell(card) {
-  const td = document.createElement("td");
-  td.dataset.label = "Status";
-  const pill = document.createElement("span");
-  const status = ["Waitlist", "Listed", "Sold", "Skip"].includes(card.status) ? card.status : "Waitlist";
-  pill.className = `status ${status}`;
-  pill.textContent = card.status || "—";
-  td.append(pill);
   return td;
 }
 
