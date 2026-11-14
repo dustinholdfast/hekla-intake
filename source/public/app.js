@@ -12,6 +12,8 @@ const state = {
   bulkPreview: null,
   heklaAction: null,
   submitting: false,
+  matches: null,
+  override: null,
 };
 
 let queueGeneration = 0;
@@ -26,8 +28,8 @@ const views = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
-  $("logout").addEventListener("click", signOut);
-  $("login-signout").addEventListener("click", signOut);
+  $("logout").addEventListener("click", () => { if (document.documentElement.dataset.preview === "1") return; signOut(); });
+  $("login-signout").addEventListener("click", () => { if (document.documentElement.dataset.preview === "1") return; signOut(); });
   $("add-form").addEventListener("submit", onAdd);
   $("add-form").addEventListener("change", saveDefaults);
   $("game").addEventListener("change", (event) => selectGame(event.target.value));
@@ -53,9 +55,16 @@ document.addEventListener("DOMContentLoaded", () => {
     state.bulkPreview = null;
     $("bulk-commit").disabled = true;
   });
-  $("dupe-merge").addEventListener("click", () => resolveDupe("merge"));
-  $("dupe-add").addEventListener("click", () => resolveDupe("add"));
-  $("dupe-cancel").addEventListener("click", () => $("dupe-dialog").close());
+  $("match-override").addEventListener("click", () => openOverride("card"));
+  $("override-confirm").addEventListener("click", confirmOverride);
+  $("override-cancel").addEventListener("click", () => $("override-dialog").close());
+  $("qty").addEventListener("input", () => { if (state.matches) renderMatch(state.matches); });
+  for (const id of ["collector", "finish", "condition", "set", "set-identifier", "game"]) {
+    $(id).addEventListener("change", clearMatch);
+  }
+  document.querySelectorAll("input[name=onDuplicate]").forEach((radio) => {
+    radio.addEventListener("change", () => { if (state.bulkPreview) renderBulk(state.bulkPreview); });
+  });
   $("ask-process").addEventListener("click", runAutoSort);
   $("rerank-listed").addEventListener("click", runRerankListed);
   $("rescan").addEventListener("click", runRescan);
@@ -97,6 +106,22 @@ function showOrganizations(clerk, message) {
 }
 
 async function boot() {
+  if (document.documentElement.dataset.preview === "1") {
+    const { response, data } = await api("/api/session");
+    if (!response.ok) {
+      show("login");
+      $("login-error").textContent = data.error || "Preview session failed.";
+      return;
+    }
+    state.session = data;
+    $("admin-link").hidden = true;
+    buildForm(data);
+    applyDefaults();
+    markTabs();
+    show("app");
+    await refreshAll();
+    return;
+  }
   let clerk;
   try {
     clerk = await loadClerk();
@@ -637,8 +662,12 @@ async function onAdd(event) {
     }
     saveDefaults();
   }
-  const payload = cardPayload({ onDuplicate: "ask" });
-  await submitCard(payload);
+  if (state.matches?.length) {
+    const selected = document.querySelector("input[name=merge-target]:checked");
+    await submitCard(cardPayload({ onDuplicate: "merge", mergeRecordId: selected ? selected.value : state.matches[0].id }));
+    return;
+  }
+  await submitCard(cardPayload({ onDuplicate: "ask" }));
 }
 
 async function submitCard(payload) {
@@ -651,7 +680,7 @@ async function submitCard(payload) {
     });
     if (response.status === 409 && data.error === "duplicate") {
       state.pending = payload;
-      openDupe(data.matches || []);
+      renderMatch(data.matches || []);
       return;
     }
     if (!response.ok) {
@@ -659,6 +688,7 @@ async function submitCard(payload) {
       return;
     }
     state.pending = null;
+    clearMatch();
     const name = data.card?.name || data.card?.collectorNumber || "Card";
     $("form-flash").textContent = data.merged
       ? `Merged qty onto ${name}. Still not listed.`
@@ -685,44 +715,84 @@ function clearEntry() {
   $("notes").value = "";
 }
 
-function openDupe(matches) {
-  const list = $("dupe-list");
-  list.replaceChildren();
-  matches.forEach((match, index) => {
-    const label = document.createElement("label");
-    const radio = document.createElement("input");
-    radio.type = "radio";
-    radio.name = "merge-target";
-    radio.value = match.id;
-    radio.checked = index === 0;
-    const text = document.createElement("span");
-    const title = document.createElement("strong");
-    title.textContent = match.name || "Unnamed card";
-    const detail = document.createElement("span");
-    detail.className = "sub";
-    const setLabel = match.game && match.game !== "Lorcana" ? (match.setIdentifier || "?") : (match.setNumber || "?");
-    detail.textContent = `${match.game || "Card"} · ${setLabel} · #${match.collectorNumber || "?"} · ${match.finish || "?"} · ${match.condition || "?"} · qty ${match.qty} · ${match.status}`;
-    text.append(title, detail);
-    label.append(radio, text);
-    list.append(label);
-  });
-  $("dupe-listed").hidden = !matches.some((match) => match.status === "Listed");
-  $("dupe-dialog").showModal();
+function stockLanguage(value) {
+  const text = (value || "").trim();
+  const lower = text.toLowerCase();
+  if (!text || lower === "en" || lower === "english") return "English";
+  return text;
 }
 
-async function resolveDupe(choice) {
-  const payload = state.pending;
-  if (!payload) return;
+function selectedMatch() {
+  const matches = state.matches || [];
   const selected = document.querySelector("input[name=merge-target]:checked");
-  if (choice === "add") {
-    const confirmed = window.confirm("Add anyway creates a second row for the same card, even when one is already Listed. That duplicate is recorded and the owner is alerted. Continue?");
-    if (!confirmed) return;
+  return matches.find((match) => match.id === selected?.value) || matches[0] || null;
+}
+
+function clearMatch() {
+  state.matches = null;
+  const note = $("match-note");
+  if (note) note.hidden = true;
+  const button = $("add-button");
+  if (button) {
+    button.textContent = "Add to waitlist";
+    button.className = "primary";
   }
-  $("dupe-dialog").close();
-  if (choice === "merge") {
-    await submitCard({ ...payload, onDuplicate: "merge", mergeRecordId: selected ? selected.value : undefined });
+  const link = $("match-override");
+  if (link) link.hidden = true;
+}
+
+function renderMatch(matches) {
+  const previous = document.querySelector("input[name=merge-target]:checked")?.value;
+  state.matches = matches;
+  const note = $("match-note");
+  const list = $("match-choices");
+  list.replaceChildren();
+  if (matches.length > 1) {
+    matches.forEach((match, index) => {
+      const label = document.createElement("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "merge-target";
+      radio.value = match.id;
+      radio.checked = previous ? match.id === previous : index === 0;
+      radio.addEventListener("change", () => renderMatch(matches));
+      const text = document.createElement("span");
+      text.textContent = `${match.name || "Unnamed card"} · qty ${match.qty} · ${match.status}`;
+      label.append(radio, text);
+      list.append(label);
+    });
+  }
+  const match = selectedMatch();
+  const adding = Number($("qty").value) || 1;
+  const have = match ? match.qty : 0;
+  $("match-copy").textContent = match
+    ? `Already in stock: ${have} · ${match.condition || "NM"} · ${stockLanguage(match.language)}. Adding ${adding} brings it to ${have + adding}.`
+    : "";
+  $("match-listed").hidden = !matches.some((item) => item.status === "Listed");
+  note.hidden = false;
+  const button = $("add-button");
+  button.textContent = "Add to existing";
+  button.className = "primary gold";
+  $("match-override").hidden = false;
+}
+
+function openOverride(kind) {
+  state.override = kind;
+  $("override-copy").textContent = kind === "bulk"
+    ? "Add anyway creates a second row for each matched line. Those duplicates are recorded and the owner is alerted."
+    : "This creates a second row for the same card. That duplicate is recorded and the owner is alerted. It does not list the card.";
+  $("override-dialog").showModal();
+}
+
+async function confirmOverride() {
+  const kind = state.override;
+  $("override-dialog").close();
+  if (kind === "bulk") {
+    await commitBulk({ confirmed: true });
     return;
   }
+  const payload = state.pending;
+  if (!payload) return;
   await submitCard({ ...payload, onDuplicate: "add", confirmOverride: true });
 }
 
@@ -1367,6 +1437,33 @@ async function previewBulk() {
   renderBulk(data);
 }
 
+function bulkPolicy() {
+  return document.querySelector("input[name=onDuplicate]:checked")?.value || "merge";
+}
+
+function bulkTally(rows) {
+  const policy = bulkPolicy();
+  let fresh = 0;
+  let merge = 0;
+  let forced = 0;
+  for (const row of rows || []) {
+    if (row.error || !row.card) continue;
+    const matched = (row.matches || []).length > 0 || (row.alsoInPaste || []).length > 0;
+    if (!matched) fresh += 1;
+    else if (policy === "add") forced += 1;
+    else if (policy === "merge") merge += 1;
+  }
+  return { fresh, merge, forced };
+}
+
+function stockTag(matched) {
+  if (!matched) return null;
+  const policy = bulkPolicy();
+  if (policy === "add") return "New row";
+  if (policy === "skip") return "Skip";
+  return "Add to existing";
+}
+
 function renderBulk(data) {
   const body = $("bulk-body");
   body.replaceChildren();
@@ -1380,11 +1477,20 @@ function renderBulk(data) {
       valid += 1;
       const matches = row.matches || [];
       const paste = row.alsoInPaste || [];
-      if (matches.length || paste.length) dupes += 1;
-      const check = [
+      const matched = matches.length > 0 || paste.length > 0;
+      if (matched) dupes += 1;
+      const check = document.createElement("span");
+      const tag = stockTag(matched);
+      if (tag) {
+        const pill = document.createElement("span");
+        pill.className = "stock-tag";
+        pill.textContent = tag;
+        check.append(pill);
+      }
+      check.append(document.createTextNode([
         ...matches.map((match) => `${match.status} qty ${match.qty}`),
         ...paste.map((line) => `also line ${line}`),
-      ].join(", ") || "Ready";
+      ].join(", ") || "Ready"));
       tr.append(
         cell("Line", String(row.line)),
         cell("Set", row.card.game === "Lorcana" ? row.card.setNumber : (row.card.setIdentifier || "—")),
@@ -1394,11 +1500,16 @@ function renderBulk(data) {
         cell("Qty", String(row.card.qty)),
         cell("Cost", row.card.costBasisUsd == null ? "—" : String(row.card.costBasisUsd)),
         cell("Name", row.card.cardName || "—"),
-        cell("Check", check),
+        cell("Check", ""),
       );
+      tr.lastChild.replaceChildren(check);
     }
     body.append(tr);
   }
+  const tally = bulkTally(data.rows);
+  const summary = $("bulk-summary");
+  summary.hidden = valid === 0;
+  summary.textContent = `${tally.fresh} new · ${tally.merge} add to existing · ${tally.forced} new rows forced`;
   $("dup-policy").hidden = dupes === 0;
   const mergeChoice = document.querySelector("input[name=onDuplicate][value=merge]");
   if (mergeChoice && !document.querySelector("input[name=onDuplicate]:checked")) mergeChoice.checked = true;
@@ -1410,13 +1521,12 @@ function renderBulk(data) {
   $("bulk-commit").textContent = valid ? `Add ${valid} to waitlist` : "Add these to waitlist";
 }
 
-async function commitBulk() {
+async function commitBulk(options = {}) {
   const text = $("bulk-text").value;
-  const selected = document.querySelector("input[name=onDuplicate]:checked");
-  const onDuplicate = selected ? selected.value : "merge";
-  if (onDuplicate === "add") {
-    const confirmed = window.confirm("Add anyway creates a second row for each duplicate line. Those duplicates are recorded and the owner is alerted. Continue?");
-    if (!confirmed) return;
+  const onDuplicate = bulkPolicy();
+  if (onDuplicate === "add" && !options.confirmed) {
+    openOverride("bulk");
+    return;
   }
   $("bulk-error").textContent = "";
   $("bulk-commit").disabled = true;

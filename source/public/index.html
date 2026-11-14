@@ -67,6 +67,13 @@
               <label>Qty
                 <input id="qty" name="qty" type="number" min="1" max="250" step="1" inputmode="numeric" value="1" />
               </label>
+              <label>Cost (optional)
+                <span class="money-field">
+                  <span class="money-prefix" aria-hidden="true">$</span>
+                  <input id="cost" name="costBasisUsd" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" />
+                </span>
+                <small class="hint">Per card, or the lot total split evenly.</small>
+              </label>
             </fieldset>
             <p id="finish-hint" class="hint finish-hint" hidden></p>
 
@@ -76,15 +83,13 @@
             <label class="field" for="card-name">Card name <span class="opt">optional — Hekla can resolve it</span></label>
             <input id="card-name" name="cardName" autocomplete="off" placeholder="Elsa - Snow Queen" />
 
-            <div class="split">
-              <div>
-                <label class="field" for="rarity">Rarity</label>
-                <select id="rarity" name="rarity"></select>
-              </div>
-              <div>
-                <label class="field" for="cost">Cost basis USD <span class="opt">optional, this lot only</span></label>
-                <input id="cost" name="costBasisUsd" type="number" min="0" step="0.01" inputmode="decimal" placeholder="blank leaves cost unknown" />
-              </div>
+            <label class="field" for="rarity">Rarity</label>
+            <select id="rarity" name="rarity"></select>
+
+            <div id="match-note" class="amber-box" hidden>
+              <p id="match-copy"></p>
+              <div id="match-choices" class="choice-list"></div>
+              <p id="match-listed" hidden>This row is already Listed. Adding here does not change the CardTrader listing.</p>
             </div>
 
             <details>
@@ -97,6 +102,7 @@
 
             <div class="actions">
               <button id="add-button" class="primary" type="submit">Add to waitlist</button>
+              <button id="match-override" class="link-quiet" type="button" hidden>Add as new row</button>
             </div>
             <p class="hint">Status is always Waitlist. Rank score and market price stay with Hekla.</p>
             <p id="form-error" class="error" role="alert"></p>
@@ -160,16 +166,15 @@
     </main>
   </div>
 
-  <dialog id="dupe-dialog">
-    <form method="dialog" id="dupe-form">
-      <h3>Already in the queue</h3>
-      <p id="dupe-copy">Same game, set, collector number, finish, condition, and language is already Waitlist or Listed. Blank language counts as English. Merge is the default: it adds your quantity onto that row and keeps its holds. Add anyway creates a second row, records the duplicate, and alerts the owner. Neither lists the card.</p>
-      <div id="dupe-list" class="choice-list"></div>
-      <p id="dupe-listed" class="warn" hidden>A match is already Listed. Merging increases the Airtable listed quantity. It does not change the CardTrader listing.</p>
+  <dialog id="override-dialog">
+    <form method="dialog" id="override-form">
+      <h3>Add as a new row</h3>
+      <div class="amber-box">
+        <p id="override-copy">This creates a second row for the same card. That duplicate is recorded and the owner is alerted. It does not list the card.</p>
+      </div>
       <div class="actions">
-        <button id="dupe-merge" class="primary" type="button" value="merge">Merge qty</button>
-        <button id="dupe-add" class="ghost" type="button" value="add">Add anyway…</button>
-        <button class="ghost" type="button" id="dupe-cancel">Cancel</button>
+        <button id="override-confirm" class="ghost" type="button">Add as new row</button>
+        <button id="override-cancel" class="link-quiet" type="button">Cancel</button>
       </div>
     </form>
   </dialog>
@@ -194,6 +199,7 @@
         <label><input type="radio" name="onDuplicate" value="merge" checked /> Merge qty into the existing row</label>
         <label><input type="radio" name="onDuplicate" value="add" /> Add anyway</label>
       </fieldset>
+      <p id="bulk-summary" class="bulk-summary" hidden></p>
       <p id="bulk-warning" class="warn" hidden></p>
       <p id="bulk-error" class="error" role="alert"></p>
       <div class="table-wrap">
